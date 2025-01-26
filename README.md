@@ -82,8 +82,13 @@ This option involves cloning the repository and building the C# project source f
    # Build the Blazor app
    Write-Host "Building Blazor app..."
    dotnet publish $projectFilePath -c Release -o $publishFolder -warnaserror:none --nologo
+	
+	# Delete the existing zip file if it exists
+	if (Test-Path $zipPath) {
+		Remove-Item $zipPath -Force
+	}
 
-
+		
    # Archive published files
    Compress-Archive -Path "$publishFolder\*" -DestinationPath $zipPath -Update
 

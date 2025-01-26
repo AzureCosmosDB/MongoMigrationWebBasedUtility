@@ -1,148 +1,170 @@
 ﻿@inject Service.JobManager JobManager
 @using OnlineMongoMigrationProcessor
 
-
 <div class="modal fade show d-block bg-dark bg-opacity-75" id="myModal" aria-modal="true" role="dialog">
     <div class="modal-dialog bg-dark">
         <div class="modal-content">
             <div class="modal-header">
-                <h4 class="modal-title">@(NewMode==true ? "New Job Details" : "Provide Connections Strings")</h4>
+                <h4 class="modal-title">@(newMode ? "New Job Details" : "Provide Connections Strings")</h4>
                 <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button>
             </div>
-            <div class="modal-body">              
-
+            <div class="modal-body">
                 <div class="mb-3">
                     <label for="name" class="form-label">Name</label>
-                    <input type="text" id="name" class="form-control" disabled="@(!NewMode)" @bind="Name" />
+                    <input type="text" id="name" class="form-control" disabled="@(!newMode)" @bind="name" />
                 </div>
-
+                @if (newMode)
+                {
+                    <div class="mb-3">
+                        <label for="mongo-options">Data Migration Tool:</label>
+                        <select id="mongo-options" @onchange="OnSelectionChanged" >
+                            <option value="Use MongoDump and MongoRestore">Use MongoDump and MongoRestore</option>
+                            <option value="Use Mongo Driver">Use Mongo Driver</option>
+                        </select>
+                    </div>
+                }
                 <div class="mb-3">
                     <label class="form-label">Online</label>
-                    <input type="checkbox" id="isOnline" disabled="@(!NewMode)" @bind="IsOnline" />
+                    <input type="checkbox" id="isOnline" disabled="@(!newMode)" @bind="isOnline" />
                 </div>
 
                 <div class="mb-3">
                     <label for="sourceConnectionString" class="form-label">Source Connection String</label>
-                    <input type="text" id="sourceConnectionString" placeholder="@(NewMode==false ?"For " +SourceEndpoint :"")" class="form-control" @bind="SourceConnectionString" />
+                    <input type="text" id="sourceConnectionString" placeholder="@(newMode ? "" : "For " + sourceEndpoint)" class="form-control" @bind="sourceConnectionString" />
                 </div>
 
                 <div class="mb-3">
                     <label for="targetConnectionString" class="form-label">Target Connection String</label>
-                    <input type="text" id="targetConnectionString" placeholder="@(NewMode==false ?"For " +TargetEndpoint :"For [account name].mongocluster.cosmos.azure.com")" class="form-control" @bind="TargetConnectionString" />
+                    <input type="text" id="targetConnectionString" placeholder="@(newMode ? "For [account name].mongocluster.cosmos.azure.com" : "For " + targetEndpoint)" class="form-control" @bind="targetConnectionString" />
                 </div>
-
 
                 <div class="mb-3">
                     <label for="nameSpaces" class="form-label">Collections To Migrate</label>
-                    <textarea type="text" id="nameSpaces" disabled="@(!NewMode)" rows="4" placeholder="e.g. db1.col1,db1.col2,db2.col1,db2.col5" class="form-control" @bind="Namespaces" />
+                    <textarea id="nameSpaces" disabled="@(!newMode)" rows="4" placeholder="e.g. db1.col1,db1.col2,db2.col1,db2.col5" class="form-control" @bind="namespaces"></textarea>
                 </div>
 
-                @if (!string.IsNullOrEmpty(ErrorMessage))
+                @if (!string.IsNullOrEmpty(errorMessage))
                 {
-                    <div class="alert alert-danger mt-2">@ErrorMessage</div>
+                    <div class="alert alert-danger mt-2">@errorMessage</div>
                 }
-
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-primary"
-                @onclick=@HandleSubmit>
-                    Ok
-                </button>
-                <button type="button" class="btn btn-secondary"
-                @onclick="@Cancel">
-                    Cancel
-                </button>
+                <button type="button" class="btn btn-primary" @onclick=@HandleSubmit>Ok</button>
+                <button type="button" class="btn btn-secondary" @onclick="@Cancel">Cancel</button>
             </div>
         </div>
     </div>
 </div>
 
 @code {
+    [Parameter]
+    public bool newMode { get; set; }
 
     [Parameter]
-    public bool NewMode { get; set; }
-
-
-    [Parameter]
-    public string Name { get; set; } = string.Empty;
+    public string name { get; set; } = string.Empty;
 
     [Parameter]
-    public bool IsOnline { get; set; }
-
-
-    [Parameter]
-    public string SourceEndpoint { get; set; } = string.Empty;
+    public bool isOnline { get; set; }
 
     [Parameter]
-    public string TargetEndpoint { get; set; } = string.Empty;
+    public string sourceEndpoint { get; set; } = string.Empty;
 
     [Parameter]
-    public string Namespaces { get; set; } = string.Empty;
-
-    public string SourceConnectionString { get; set; } = string.Empty;
-
-    public string TargetConnectionString { get; set; } = string.Empty;
-
+    public string targetEndpoint { get; set; } = string.Empty;
 
     [Parameter]
-    public EventCallback<OnlineMongoMigrationProcessor.MigrationJob> OnSubmit { get; set; }
+    public string namespaces { get; set; } = string.Empty;
 
-    private string ErrorMessage=string.Empty;
+    public string sourceConnectionString { get; set; } = string.Empty;
 
-    
+    public string targetConnectionString { get; set; } = string.Empty;
 
-    private void HandleSubmit()
+    [Parameter]
+    public EventCallback<MigrationJob> OnSubmit { get; set; }
+
+    [Parameter]
+    public Func<string, Task<bool>> CheckNameExists { get; set; }
+
+    private string errorMessage = string.Empty;
+    private bool useMongoDump = true; // Variable to track the selected value
+    private string selectedOption = "Use MongoDump and MongoRestore"; // Default dropdown value
+
+    private void OnSelectionChanged(ChangeEventArgs e)
     {
-        if (string.IsNullOrEmpty(Name))
+        selectedOption = e.Value.ToString();
+        useMongoDump = selectedOption == "Use MongoDump and MongoRestore"; // Set useMongoDump based on selection
+    }
+
+    private async void HandleSubmit()
+    {
+        if (string.IsNullOrEmpty(name))
         {
-            ErrorMessage = "Name can't be empty.";
+            errorMessage = "Name can't be empty.";
+            return;
+        }
+        if (newMode && CheckNameExists != null) // Ensure callback is provided
+        {
+            var nameExists = await CheckNameExists(name);
+            if (nameExists)
+            {
+                errorMessage = "Name already exists.";
+                return;
+            }
+        }
+
+        if (string.IsNullOrEmpty(sourceConnectionString) || string.IsNullOrEmpty(targetConnectionString))
+        {
+            errorMessage = "Source and Target Connection Strings can't be empty.";
             return;
         }
 
-        var tmpSrcEndpoint = JobManager.ExtractHost(SourceConnectionString);
-        if (tmpSrcEndpoint != SourceEndpoint && !NewMode)
+        var tmpSrcEndpoint = JobManager.ExtractHost(sourceConnectionString);
+        if (tmpSrcEndpoint != sourceEndpoint && !newMode)
         {
-            ErrorMessage = "Source endpoint doesn't match provided Source Connection String.";
+            errorMessage = "Source endpoint doesn't match provided Source Connection String.";
             return;
         }
 
-        var tmpTgtEndpoint = JobManager.ExtractHost(TargetConnectionString);
-        if (tmpTgtEndpoint != TargetEndpoint && !NewMode)
+        var tmpTgtEndpoint = JobManager.ExtractHost(targetConnectionString);
+        if (tmpTgtEndpoint != targetEndpoint && !newMode)
         {
-            ErrorMessage = "Target endpoint doesn't match provided Target Connection String.";
+            errorMessage = "Target endpoint doesn't match provided Target Connection String.";
             return;
         }
 
         if (tmpTgtEndpoint == tmpSrcEndpoint)
         {
-            ErrorMessage = "Target and Source endpoints can't be the same.";
+            errorMessage = "Target and Source endpoints can't be the same.";
             return;
         }
 
-        if(NewMode)
+        if (newMode)
         {
-            Tuple<bool, string> retValue = Helper.ValidateNameSpaceFormat(Namespaces);
-            if (retValue.Item1 == false)
+            var retValue = Helper.ValidateNamespaceFormat(namespaces);
+            if (!retValue.Item1)
             {
-                ErrorMessage = "Namespaces Format is invalid.";
+                errorMessage = "Namespaces Format is invalid.";
                 return;
             }
             else
-                Namespaces = retValue.Item2;
+            {
+                namespaces = retValue.Item2;
+            }
         }
 
-        OnlineMongoMigrationProcessor.MigrationJob job = new OnlineMongoMigrationProcessor.MigrationJob();
-        job.Name = Name;
-        job.Id = Guid.NewGuid().ToString();
-        job.IsOnline = IsOnline;
-        job.SourceConnectionString = SourceConnectionString;
-        job.TargetConnectionString = TargetConnectionString;
-        job.SourceEndpoint = tmpSrcEndpoint;
-        job.TargetEndpoint = tmpTgtEndpoint;
-        job.NameSpaces = Namespaces;        
-
-        OnSubmit.InvokeAsync(job);
-               
+        var job = new MigrationJob
+            {
+                Name = name,
+                Id = Guid.NewGuid().ToString(),
+                IsOnline = isOnline,
+                SourceConnectionString = sourceConnectionString,
+                TargetConnectionString = targetConnectionString,
+                SourceEndpoint = tmpSrcEndpoint,
+                TargetEndpoint = tmpTgtEndpoint,
+                NameSpaces = namespaces,
+                UseMongoDump = useMongoDump
+            };
+        await OnSubmit.InvokeAsync(job);
     }
 
     private Task Cancel()
@@ -150,3 +172,4 @@
         return OnSubmit.InvokeAsync(null);
     }
 }
+

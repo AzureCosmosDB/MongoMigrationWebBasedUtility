@@ -12,18 +12,18 @@
     <h3>
         <button class="btn btn-light" @onclick="GoBack" title="Back to Job List" style="border: none; background: transparent;">
             <i class="bi bi-arrow-left"></i>
-        </button> @migrationJob?.Name - Job Status
+        </button> @MigrationJob?.Name - Job Status
     </h3>
     <div class="d-flex align-items-center mb-3">
-        @if (migrationJob !=null && !migrationJob.IsCompleted && !migrationJob.CurrentlyActive && (migrationJob.IsStarted || (JobManager.migrationWorker != null && !JobManager.migrationWorker.IsProcessRunning())))
+        @if (MigrationJob !=null && !MigrationJob.IsCompleted && !MigrationJob.CurrentlyActive && (MigrationJob.IsStarted || (JobManager.MigrationWorker != null && !JobManager.MigrationWorker.IsProcessRunning())))
         {
             <button class="btn btn-primary mx-2" title="Resume Job" @onclick="ResumeJob">Resume Job</button>            
         }
 
-        @if (migrationJob!=null && !migrationJob.IsCancelled && !migrationJob.IsCompleted && migrationJob.CurrentlyActive && JobManager.migrationWorker != null && JobManager.migrationWorker.IsProcessRunning())
+        @if (MigrationJob!=null && !MigrationJob.IsCancelled && !MigrationJob.IsCompleted && MigrationJob.CurrentlyActive && JobManager.MigrationWorker != null && JobManager.MigrationWorker.IsProcessRunning())
         {
             <button class="btn btn-primary mx-2" title="Pause Job" @onclick="PauseJob">Pause Job</button>
-            @if (migrationJob.IsOnline)
+            @if (MigrationJob.IsOnline)
             {
                 <button class="btn btn-warning mx-2" title="Perform Cut Over" @onclick="CompleteJob" disabled="@(!CheckCutoverReadiness())">Cut Over</button>
             }
@@ -35,31 +35,31 @@
     </div>
 </div>
 
-@if (!string.IsNullOrEmpty(ErrorMessage))
+@if (!string.IsNullOrEmpty(_errorMessage))
 {
-    <div class="alert alert-danger mt-2">@ErrorMessage</div>
+    <div class="alert alert-danger mt-2">@_errorMessage</div>
 }
 
 
-@if (_MigrationDetailsPopUpOpen && migrationJob!=null)
+@if (_migrationDetailsPopUpOpen && MigrationJob != null)
 {
-    <MongoMigrationWebApp.Components.MigrationDetails NewMode=false Name="@migrationJob?.Name"
-    IsOnline="@migrationJob.IsOnline"
-    SourceEndpoint="@migrationJob.SourceEndpoint"
-    TargetEndpoint="@migrationJob.TargetEndpoint"
-    NameSpaces="@migrationJob.NameSpaces"
-    OnSubmit="@OnMigrationDetailsPopUpSubmit" />
-
+    <MongoMigrationWebApp.Components.MigrationDetails NewMode=false Name="@MigrationJob?.Name"
+    IsOnline="@MigrationJob.IsOnline"
+    SourceEndpoint="@MigrationJob.SourceEndpoint"
+    TargetEndpoint="@MigrationJob.TargetEndpoint"
+    NameSpaces="@MigrationJob.NameSpaces"
+    OnSubmit="@OnMigrationDetailsPopUpSubmit"
+    CheckNameExists="CheckIfNameExistsAsync" />
 }
 
-@if (_YesNoDialogOpen)
+@if (_yesNoDialogOpen)
 {
-    <YesNoDialog Type="YesNoDialog.Category.CutoverNot" Caption="Confirmation Required"  Message="@_Message" OnClose="@YesNoDialogSubmit"  />
+    <YesNoDialog Type="YesNoDialog.Category.CutoverNot" Caption="Confirmation Required"  Message="@_message" OnClose="@YesNoDialogSubmit"  />
 }
 
-@if (_ManageCollectionDialogOpen && migrationJob != null)
+@if (_manageCollectionDialogOpen && MigrationJob != null)
 {
-    <ManageCollections MigrationUnits="@migrationJob.MigrationUnits" OnConllectionsUpdated="@OnConllectionsUpdated" />
+    <ManageCollections MigrationUnits="@MigrationJob.MigrationUnits" OnCollectionsUpdated="@OnCollectionsUpdated" />
 }
 
 <table class="table">
@@ -67,28 +67,44 @@
         <tr>
             <th>Database Name</th>
             <th>Collection Name</th>
-            <th>Download Status</th>
-            <th>Upload Status</th>
-            <th>Change Stream Lag</th>
+            @if (MigrationJob != null && MigrationJob.UseMongoDump)
+            {
+                <th>Download Status</th>
+                <th>Upload Status</th>
+            }
+            else
+            {
+                <th>Copy Status</th>
+            }
+            @if (MigrationJob != null && MigrationJob.IsOnline)
+            {
+                <th>Change Stream Lag</th>
+            }
         </tr>
     </thead>
     <tbody>
-        @if (migrationJob!=null && migrationJob.MigrationUnits != null)
+        @if (MigrationJob!=null && MigrationJob.MigrationUnits != null)
         {
-            @foreach (var unit in migrationJob.MigrationUnits)
+            @foreach (var unit in MigrationJob.MigrationUnits)
             {
                 <tr>
                     <td>@unit.DatabaseName</td>
-                    <td>@unit.CollectionName</td>
+                    <td>@unit.CollectionName</td>                    
                     <td>
                         @(unit.DumpComplete ? "Sucess" : $"{unit.DumpPercent:F1}%")
                     </td>
-                    <td>
-                        @(unit.RestoreComplete || unit.RestorePercent==100 ? "Sucess" : $"{unit.RestorePercent:F1}%")
-                    </td>
-                    <td>
-                        @GetChangeStreamLag(unit.cursorUtcTimestamp)
-                    </td>
+                    @if (MigrationJob != null && MigrationJob.UseMongoDump)
+                    {
+                        <td>
+                            @(unit.RestoreComplete || unit.RestorePercent == 100 ? "Sucess" : $"{unit.RestorePercent:F1}%")
+                        </td>
+                    }
+                    @if (MigrationJob != null && MigrationJob.IsOnline)
+                    {
+                        <td>
+                            @GetChangeStreamLag(unit.CursorUtcTimestamp)
+                        </td>
+                    }
                 </tr>
             }
         }
@@ -176,65 +192,56 @@
 }
 @code {
 
-    #pragma warning disable CS8602
+#pragma warning disable CS8602
 #pragma warning disable CS8603
 #pragma warning disable CS8604
-
 
     [Parameter]
     public string? JobId { get; set; }
 
     [Parameter]
-    public MigrationJob? migrationJob { get; set; }
+    public MigrationJob? MigrationJob { get; set; }
 
     [Parameter]
     public LogBucket? LogBucket { get; set; }
 
-    private string ErrorMessage=string.Empty;
-
-    private bool _MigrationDetailsPopUpOpen;
-
-    private Timer? RefreshTimer;
-
-    private string _Message=string.Empty;
-
-    private bool _YesNoDialogOpen;
-
-    private bool _ManageCollectionDialogOpen;
-
+    private string _errorMessage = string.Empty;
+    private bool _migrationDetailsPopUpOpen;
+    private Timer? _refreshTimer;
+    private string _message = string.Empty;
+    private bool _yesNoDialogOpen;
+    private bool _manageCollectionDialogOpen;
 
     private string GetRowClass(string type, string message)
     {
         string rowClass = string.Empty;
+        string lowerMessage = message.ToLower();
 
-        string lwrMessage = message.ToLower();
-        if (lwrMessage.Contains("warning") || lwrMessage.Contains("failure") || lwrMessage.Contains("error") || lwrMessage.Contains("failed"))
+        if (lowerMessage.Contains("warning") || lowerMessage.Contains("failure") || lowerMessage.Contains("error") || lowerMessage.Contains("failed") || lowerMessage.Contains("canceled"))
         {
             rowClass = "warning-row"; // Change to warning-row if any condition matches
         }
 
         if (type == "Error")
+        {
             rowClass = "error-row"; // Assign the default row class
+        }
 
         return rowClass;
     }
-
 
     private void GoBack()
     {
         NavigationManager.NavigateTo("/"); // Navigate back to the previous page
     }
 
-
     private void StartAutoRefresh()
     {
-        RefreshTimer = new Timer(Refresh, null, 0, 5000); // Update every 10 seconds
+        _refreshTimer = new Timer(Refresh, null, 0, 5000); // Update every 10 seconds
     }
-
 
     private async Task DownloadFile()
     {
-
         var url = $"/api/File/download/log/{JobId}"; // Adjust the API URL if needed
         var response = await HttpClient.GetAsync(url);
 
@@ -254,10 +261,16 @@
 
     private void Refresh(object? state)
     {
-        migrationJob = JobManager.GetMigrations().Find(m => m.Id == JobId);
+        MigrationJob = JobManager.GetMigrations().Find(m => m.Id == JobId);
         LogBucket = JobManager.GetLogBucket(JobId);
 
         InvokeAsync(StateHasChanged); // Ensure UI updates on the main thread
+    }
+
+    private Task<bool> CheckIfNameExistsAsync(string name)
+    {
+        //always false as we are not checking for duplicate names in this case
+        return Task.FromResult(false);
     }
 
     private string GetChangeStreamLag(DateTime cursorUtcTimestamp)
@@ -270,7 +283,7 @@
         var currentUtc = DateTime.UtcNow;
         var lag = currentUtc - cursorUtcTimestamp;
 
-        if(lag.TotalSeconds < 0)
+        if (lag.TotalSeconds < 0)
         {
             return "Invalid";
         }
@@ -278,11 +291,10 @@
         return $"{(int)lag.TotalMinutes} min {(int)lag.Seconds} sec";
     }
 
-
     private bool CheckCutoverReadiness()
     {
-        if (migrationJob.MigrationUnits == null) return false;
-        foreach (var item in migrationJob.MigrationUnits)
+        if (MigrationJob?.MigrationUnits == null) return false;
+        foreach (var item in MigrationJob.MigrationUnits)
         {
             if (item.DumpPercent != 100 || item.RestorePercent != 100)
                 return false;
@@ -292,143 +304,139 @@
 
     protected override async Task OnParametersSetAsync()
     {
-        migrationJob = JobManager.GetMigrations().Find(m => m.Id == JobId);
+        MigrationJob = JobManager.GetMigrations().Find(m => m.Id == JobId);
         LogBucket = JobManager.GetLogBucket(JobId);
 
-        if (!migrationJob.IsStarted || (!migrationJob.IsCancelled && !migrationJob.IsCompleted && migrationJob.CurrentlyActive && !IsJobRunning()))
+        if (!MigrationJob.IsStarted || (!MigrationJob.IsCancelled && !MigrationJob.IsCompleted && MigrationJob.CurrentlyActive && !IsJobRunning()))
         {
-            ResumeJob();
+            await ResumeJob();
         }
-        if (!migrationJob.IsCancelled && !migrationJob.IsCompleted && migrationJob.CurrentlyActive && IsJobRunning())
+        if (!MigrationJob.IsCancelled && !MigrationJob.IsCompleted && MigrationJob.CurrentlyActive && IsJobRunning())
         {
             StartAutoRefresh();
         }
     }
 
-
-    private async Task OnMigrationDetailsPopUpSubmit(OnlineMongoMigrationProcessor.MigrationJob job)
+    private async Task OnMigrationDetailsPopUpSubmit(MigrationJob job)
     {
-        _MigrationDetailsPopUpOpen = false;
+        _migrationDetailsPopUpOpen = false;
         Thread.Sleep(100);
         if (job != null)
         {
+            MigrationJob.SourceConnectionString = job.SourceConnectionString;
+            MigrationJob.TargetConnectionString = job.TargetConnectionString;
 
-            migrationJob.SourceConnectionString = job.SourceConnectionString;
-            migrationJob.TargetConnectionString = job.TargetConnectionString;
+            MigrationJob.CurrentlyActive = true;
+            MigrationJob.IsCancelled = false;
 
-            migrationJob.CurrentlyActive = true;
-            migrationJob.IsCancelled = false;
+            if (!MigrationJob.StartedOn.HasValue)
+                MigrationJob.StartedOn = DateTime.UtcNow;
 
-
-            if (!migrationJob.StartedOn.HasValue)
-                migrationJob.StartedOn = System.DateTime.Now.ToUniversalTime();
-
-            migrationJob.IsStarted = true;
+            MigrationJob.IsStarted = true;
 
             StartAutoRefresh();
 
             JobManager.Save();
-
 
             // Run the long task on a separate thread
             await Task.Run(() =>
             {
                 JobManager.DisposeLogs();
 #pragma warning disable CS4014
-                JobManager.migrationWorker.StartMigrationAsync(migrationJob, migrationJob.SourceConnectionString, migrationJob.TargetConnectionString, migrationJob.NameSpaces, true, migrationJob.IsOnline);
+                JobManager.MigrationWorker.StartMigrationAsync(MigrationJob, MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob.NameSpaces, true, MigrationJob.IsOnline);
             });
         }
         else
-            migrationJob.CurrentlyActive = false;
+        {
+            MigrationJob.CurrentlyActive = false;
+        }
     }
 
     private async Task ManageCollections()
     {
-        ErrorMessage = string.Empty;
-        if (!JobManager.migrationWorker.IsProcessRunning() && NoOtherActiveJobs())
+        _errorMessage = string.Empty;
+        if (!JobManager.MigrationWorker.IsProcessRunning() && NoOtherActiveJobs())
         {
-            _ManageCollectionDialogOpen = true;            
+            _manageCollectionDialogOpen = true;
         }
         else
         {
-            ErrorMessage = "Please pause the job, before updating collections.";
+            _errorMessage = "Please pause the job, before updating collections.";
         }
     }
 
-
     private async Task ResumeJob()
     {
-        ErrorMessage = string.Empty;
-        if (!JobManager.migrationWorker.IsProcessRunning() && NoOtherActiveJobs())
+        _errorMessage = string.Empty;
+        if (!JobManager.MigrationWorker.IsProcessRunning() && NoOtherActiveJobs())
         {
-            if (string.IsNullOrEmpty(migrationJob.SourceConnectionString) || string.IsNullOrEmpty(migrationJob.TargetConnectionString))
-                _MigrationDetailsPopUpOpen = true;
+            if (string.IsNullOrEmpty(MigrationJob.SourceConnectionString) || string.IsNullOrEmpty(MigrationJob.TargetConnectionString))
+                _migrationDetailsPopUpOpen = true;
             else
-                await OnMigrationDetailsPopUpSubmit(migrationJob);
+                await OnMigrationDetailsPopUpSubmit(MigrationJob);
         }
         else
         {
-            ErrorMessage = "Please stop active job, before starting/resuming a job.";
+            _errorMessage = "Please stop active job, before starting/resuming a job.";
         }
     }
 
     private bool IsJobRunning()
     {
-        return JobManager.migrationWorker.IsProcessRunning();
+        return JobManager.MigrationWorker.IsProcessRunning();
     }
 
     private void CompleteJob()
     {
-        _Message = "You can't resume a job after its cutover. Are you sure you want to cutover ?";
-        _YesNoDialogOpen = true;        
+        _message = "You can't resume a job after its cutover. Are you sure you want to cutover?";
+        _yesNoDialogOpen = true;
     }
 
-    private void OnConllectionsUpdated(List<MigrationUnit> migrationUnits)
+    private void OnCollectionsUpdated(List<MigrationUnit> migrationUnits)
     {
-        _ManageCollectionDialogOpen = false;
+        _manageCollectionDialogOpen = false;
 
         if (migrationUnits != null)
         {
-            migrationJob.NameSpaces = string.Join(",", migrationUnits.Select(x => x.DatabaseName + "." + x.CollectionName));
-            migrationJob.MigrationUnits = migrationUnits;
+            MigrationJob.NameSpaces = string.Join(",", migrationUnits.Select(x => x.DatabaseName + "." + x.CollectionName));
+            MigrationJob.MigrationUnits = migrationUnits;
             JobManager.Save();
         }
     }
 
     private void YesNoDialogSubmit(bool approved)
     {
-        _YesNoDialogOpen = false;
+        _yesNoDialogOpen = false;
         if (approved)
-        {           
-            JobManager.migrationWorker.StopMigration();
-            migrationJob.IsCancelled = true;
-            migrationJob.IsCompleted = true;
-            migrationJob.CurrentlyActive = false;
+        {
+            JobManager.MigrationWorker.StopMigration();
+            MigrationJob.IsCancelled = true;
+            MigrationJob.IsCompleted = true;
+            MigrationJob.CurrentlyActive = false;
             JobManager.Save();
-            RefreshTimer = null;
+            _refreshTimer = null;
         }
     }
 
     private void PauseJob()
     {
-        ErrorMessage = string.Empty;
+        _errorMessage = string.Empty;
 
-        JobManager.migrationWorker.StopMigration();
-        migrationJob.IsCancelled = true;
-        migrationJob.CurrentlyActive = false;
+        JobManager.MigrationWorker.StopMigration();
+        MigrationJob.IsCancelled = true;
+        MigrationJob.CurrentlyActive = false;
         JobManager.Save();
-        RefreshTimer = null;
+        _refreshTimer = null;
     }
 
     private bool NoOtherActiveJobs()
     {
-        foreach(var job in JobManager.GetMigrations())
+        foreach (var job in JobManager.GetMigrations())
         {
-            if (job.CurrentlyActive == true && job.Id != JobId)
-            return false;
+            if (job.CurrentlyActive && job.Id != JobId)
+                return false;
         }
         return true;
     }
-
-
 }
+

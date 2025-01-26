@@ -1,12 +1,7 @@
 ﻿using Newtonsoft.Json;
-using SharpCompress.Common;
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
+using System.IO;
 
 namespace OnlineMongoMigrationProcessor
 {
@@ -14,22 +9,21 @@ namespace OnlineMongoMigrationProcessor
 
     public class LogBucket
     {
-        public List<LogObject>? Logs;
-        private List<LogObject>? VerboseMessages;
-
+        public List<LogObject>? Logs { get; set; }
+        private List<LogObject>? _verboseMessages;
         private readonly object _lock = new object();
 
-        public void AddVerboseMessage(string message, LogType logtype = LogType.Messge)
+        public void AddVerboseMessage(string message, LogType logType = LogType.Message)
         {
             lock (_lock)
             {
-                if (VerboseMessages == null) VerboseMessages = new List<LogObject>();
+                _verboseMessages ??= new List<LogObject>();
 
-                if (VerboseMessages.Count == 5)
+                if (_verboseMessages.Count == 5)
                 {
-                    VerboseMessages.RemoveAt(0); // Remove the oldest item
+                    _verboseMessages.RemoveAt(0); // Remove the oldest item
                 }
-                VerboseMessages.Add(new LogObject(logtype, message)); // Add the new item
+                _verboseMessages.Add(new LogObject(logType, message)); // Add the new item
             }
         }
 
@@ -37,88 +31,81 @@ namespace OnlineMongoMigrationProcessor
         {
             try
             {
-                if (VerboseMessages == null) VerboseMessages = new List<LogObject>();
-                var reversedList = new List<LogObject>(VerboseMessages); // Create a copy to avoid modifying the original list
+                _verboseMessages ??= new List<LogObject>();
+                var reversedList = new List<LogObject>(_verboseMessages); // Create a copy to avoid modifying the original list
                 reversedList.Reverse(); // Reverse the copy
-            
 
                 // If the reversed list has fewer than 5 elements, add empty message LogObjects
                 while (reversedList.Count < 5)
                 {
-                    reversedList.Add(new LogObject(LogType.Messge, ""));
+                    reversedList.Add(new LogObject(LogType.Message, ""));
                 }
                 return reversedList;
             }
-            catch {
-                var blanklist = new List<LogObject>();
-                for(int i=0;i< 5;i++)
+            catch
+            {
+                var blankList = new List<LogObject>();
+                for (int i = 0; i < 5; i++)
                 {
-                    blanklist.Add(new LogObject(LogType.Messge, ""));
+                    blankList.Add(new LogObject(LogType.Message, ""));
                 }
-                return blanklist;
+                return blankList;
             }
         }
     }
+
     public static class Log
     {
         private static LogBucket? _logBucket;
-        private static string CurrentId=string.Empty ;
+        private static string _currentId = string.Empty;
 
-        public static void init(string _id)
+        public static void Init(string id)
         {
-            CurrentId = _id;
-            System.IO.Directory.CreateDirectory($"{Path.GetTempPath()}migrationlogs");
+            _currentId = id;
+            Directory.CreateDirectory($"{Path.GetTempPath()}migrationlogs");
 
-            _logBucket = GetLogBucket(CurrentId);
+            _logBucket = GetLogBucket(_currentId);
         }
 
-        public static void AddVerboseMessage(string Message, LogType logtype = LogType.Messge)
+        public static void AddVerboseMessage(string message, LogType logType = LogType.Message)
         {
-            _logBucket.AddVerboseMessage(Message, logtype);
+            _logBucket?.AddVerboseMessage(message, logType);
         }
 
-        public static void WriteLine(string Message, LogType logtype = LogType.Messge)
+        public static void WriteLine(string message, LogType logType = LogType.Message)
         {
             try
-            {   
-                if (_logBucket.Logs==null)
-                    _logBucket.Logs=new List<LogObject>();
+            {
+                _logBucket ??= new LogBucket();
+                _logBucket.Logs ??= new List<LogObject>();
 
-                _logBucket.Logs.Add(new LogObject(logtype, Message));
+                _logBucket.Logs.Add(new LogObject(logType, message));
             }
             catch { }
         }
 
-
         public static void Dispose()
         {
-            CurrentId=string.Empty;
+            _currentId = string.Empty;
             _logBucket = null;
-
         }
+
         public static void Save()
-        {            
+        {
             try
             {
                 string json = JsonConvert.SerializeObject(_logBucket);
-                var path = $"{Path.GetTempPath()}migrationlogs\\{CurrentId}.txt";
+                var path = $"{Path.GetTempPath()}migrationlogs\\{_currentId}.txt";
                 File.WriteAllText(path, json);
             }
             catch { }
         }
 
-        //public static string DownloadLogBucket(string id)
-        //{
-        //    var path = $"{Path.GetTempPath()}migrationlogs\\{id}.txt";
-        //    // Read the file as a stream
-        //    return System.IO.File.ReadAllText(path);
-        //}
-
         public static LogBucket GetLogBucket(string id)
         {
             try
             {
-                if(id== CurrentId && _logBucket != null)
+                if (id == _currentId && _logBucket != null)
                     return _logBucket;
 
                 var path = $"{Path.GetTempPath()}migrationlogs\\{id}.txt";
@@ -126,14 +113,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     string json = File.ReadAllText(path);
                     var loadedObject = JsonConvert.DeserializeObject<LogBucket>(json);
-                    if (loadedObject != null)
-                    {
-                        return loadedObject;
-                    }
-                    else
-                    {
-                        return new LogBucket();
-                    }
+                    return loadedObject ?? new LogBucket();
                 }
                 else
                 {
@@ -147,3 +127,4 @@ namespace OnlineMongoMigrationProcessor
         }
     }
 }
+

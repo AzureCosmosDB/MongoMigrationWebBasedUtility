@@ -1,6 +1,5 @@
 ﻿@page "/"
 @inject Service.JobManager JobManager
-
 @inject NavigationManager NavigationManager
 @inject IJSRuntime JS
 @inject Service.FileService FileService
@@ -14,16 +13,17 @@
         <button class="btn btn-light" title="Download Jobs JSON" @onclick="DownloadFile" style="border: none; background: transparent;">
             <i class="bi bi-download"></i>
         </button>
-        Migration Jobs</h3>
+        Migration Jobs
+    </h3>
     <div class="d-flex align-items-center mb-3">
         <button class="btn btn-primary" title="New Job" @onclick="StartMigrationAsync">New Job</button>
         <button class="btn btn-light" title="Edit Migration Settings" @onclick="OpenConfig" style="border: none; background: transparent;">
             <i class="bi bi-gear"></i>
         </button>
     </div>
-
 </div>
-@if (_loadingComplete==true)
+
+@if (_loadingComplete)
 {
     @if (migrationJobs?.Count == 0)
     {
@@ -36,6 +36,7 @@
                 <tr>
                     <th> &nbsp;&nbsp;&nbsp;&nbsp;</th>
                     <th>Name</th>
+                    <th>Migration Tool</th>
                     <th>Started On (UTC)</th>
                     <th>Endpoints</th>
                     <th>Is Online</th>
@@ -48,21 +49,22 @@
                 {
                     <tr>
                         <td>
-                            @if (migration.CurrentlyActive == true && JobManager.migrationWorker!=null && JobManager.migrationWorker.IsProcessRunning())
+                            @if (migration.CurrentlyActive && JobManager.MigrationWorker != null && JobManager.MigrationWorker.IsProcessRunning())
                             {
                                 <i class="bi bi-star-fill text-warning"></i>
-                            }        
-                        </td>                        
+                            }
+                        </td>
                         <td>@migration.Name</td>
+                        <td>@GetToolName(migration.UseMongoDump)</td>
                         <td>@migration.StartedOn</td>
                         <td class="tooltip-text" title="@migration.NameSpaces">@migration.SourceEndpoint<br /> to <br /> @migration.TargetEndpoint</td>
                         <td>@migration.IsOnline</td>
                         <td>@migration.IsCompleted</td>
-                        <td>                            
+                        <td>
                             <button class="btn btn-primary" title="View Job" @onclick="() => ViewMigration(migration.Id)">
                                 <i class="bi bi-eye"></i>
                             </button>
-                            <button class="btn btn-secondary" title="Delete Job" @onclick="() => RemoveMigration(migration.Id)" >
+                            <button class="btn btn-secondary" title="Delete Job" @onclick="() => RemoveMigration(migration.Id)">
                                 <i class="bi bi-trash"></i>
                             </button>
                         </td>
@@ -70,70 +72,64 @@
                 }
             </tbody>
         </table>
-
-       
     }
 }
 
-@if (_MigrationDetailsPopUpOpen)
-{    
-    <MigrationDetails NewMode=true OnSubmit="@OnMigrationDetailsPopUpSubmit" />   
-}
-
-
-@if (_YesNoDialogOpen)
+@if (_migrationDetailsPopUpOpen)
 {
-    <YesNoDialog Type="YesNoDialog.Category.DeleteNot" Caption="Confirm Delete" Message="@_Message" OnClose="@YesNoDialogSubmit"  />
+    <MigrationDetails NewMode=true OnSubmit="@OnMigrationDetailsPopUpSubmit" CheckNameExists="CheckIfNameExistsAsync" />
 }
 
-@if (_MessageDialogOpen)
+@if (_yesNoDialogOpen)
 {
-    <YesNoDialog Type="YesNoDialog.Category.Okay" Caption="Message" Message="@_Message" OnClose="@YesNoDialogSubmit"  />
+    <YesNoDialog Type="YesNoDialog.Category.DeleteNot" Caption="Confirm Delete" Message="@_message" OnClose="@YesNoDialogSubmit" />
 }
 
-@if (_EditSettingsOpen)
+@if (_messageDialogOpen)
+{
+    <YesNoDialog Type="YesNoDialog.Category.Okay" Caption="Message" Message="@_message" OnClose="@YesNoDialogSubmit" />
+}
+
+@if (_editSettingsOpen)
 {
     <MigrationSettings Configuration="@GetConfig()" OnConfigurationSaved="HandleConfigurationSaved" />
 }
 
 @code {
-
     #pragma warning disable CS8603
 #pragma warning disable CS8604
 
-    private bool _MigrationDetailsPopUpOpen;
-    private bool _YesNoDialogOpen;
-    private bool _MessageDialogOpen;
-    private bool _EditSettingsOpen;
+    private bool _migrationDetailsPopUpOpen;
+    private bool _yesNoDialogOpen;
+    private bool _messageDialogOpen;
+    private bool _editSettingsOpen;
 
-    private string _Message=string.Empty;
-
-    private OnlineMongoMigrationProcessor.MigrationJob? _SelectedMigrationJob;
-
-    private List<OnlineMongoMigrationProcessor.MigrationJob>?  migrationJobs;
-
+    private string _message = string.Empty;
+    private MigrationJob? _selectedMigrationJob;
+    private List<MigrationJob>? migrationJobs;
     private bool _loadingComplete;
+
+    private string GetToolName(bool useMongoDump)
+    {
+        return useMongoDump ? "MongoDump and MongoRestore" : "Mongo Driver";
+    }
 
 #pragma warning disable CS1998
     protected override async Task OnParametersSetAsync()
     {
-        if (_loadingComplete == true)
+        if (_loadingComplete)
             return;
 
         _loadingComplete = false;
-
         migrationJobs = JobManager.GetMigrations();
-
         _loadingComplete = true;
-
     }
 #pragma warning restore CS1998
 #pragma warning disable CS8602
 
     private async Task DownloadFile()
     {
-
-        var url = $"/api/File/download/Jobs"; 
+        var url = $"/api/File/download/Jobs";
         var response = await HttpClient.GetAsync(url);
 
         if (response.IsSuccessStatusCode)
@@ -153,79 +149,75 @@
     private void RemoveMigration(string? id)
     {
         var migrationJob = JobManager.GetMigrations().Find(m => m.Id == id);
-        _SelectedMigrationJob = migrationJob;
-        if (!_SelectedMigrationJob.CurrentlyActive || !JobManager.migrationWorker.IsProcessRunning())
+        _selectedMigrationJob = migrationJob;
+        if (!_selectedMigrationJob.CurrentlyActive || !JobManager.MigrationWorker.IsProcessRunning())
         {
-            _Message = "Are you sure you want to delete " + _SelectedMigrationJob.Name + " ?";
-            _YesNoDialogOpen = true;
+            _message = "Are you sure you want to delete " + _selectedMigrationJob.Name + " ?";
+            _yesNoDialogOpen = true;
         }
         else
         {
-            _Message = "Can't delete active job" + _SelectedMigrationJob.Name + ". Please stop the job and try again.";
-            _MessageDialogOpen = true;
+            _message = "Can't delete active job " + _selectedMigrationJob.Name + ". Please stop the job and try again.";
+            _messageDialogOpen = true;
         }
     }
 
-
     private void YesNoDialogSubmit(bool approved)
     {
-        if (_MessageDialogOpen)
+        if (_messageDialogOpen)
         {
-            _MessageDialogOpen = false;
+            _messageDialogOpen = false;
             return;
         }
         else
         {
-            _YesNoDialogOpen = false;
+            _yesNoDialogOpen = false;
 
-            if (approved && (!_SelectedMigrationJob.CurrentlyActive || !JobManager.migrationWorker.IsProcessRunning()))
+            if (approved && (!_selectedMigrationJob.CurrentlyActive || !JobManager.MigrationWorker.IsProcessRunning()))
             {
-                if (_SelectedMigrationJob != null)
+                if (_selectedMigrationJob != null)
                 {
                     // try
                     // {
                     //     Task.Run(() =>
                     //        {
-                    //            JobManager.ClearJobFiles(_SelectedMigrationJob.Id);
+                    //            JobManager.ClearJobFiles(_selectedMigrationJob.Id);
                     //        });
                     // }
                     // catch { }
                 }
-                JobManager.GetMigrations().Remove(_SelectedMigrationJob);
-
+                JobManager.GetMigrations().Remove(_selectedMigrationJob);
             }
 
-
-
-            _SelectedMigrationJob = null;
+            _selectedMigrationJob = null;
         }
     }
 
     private OnlineMongoMigrationProcessor.MigrationSettings GetConfig()
     {
-        if (JobManager.migrationWorker.Config == null)
+        if (JobManager.MigrationWorker.Config == null)
         {
-            JobManager.migrationWorker.Config = new  OnlineMongoMigrationProcessor.MigrationSettings();
-            JobManager.migrationWorker.Config.Load();
+            JobManager.MigrationWorker.Config = new OnlineMongoMigrationProcessor.MigrationSettings();
+            JobManager.MigrationWorker.Config.Load();
         }
 
-        return JobManager.migrationWorker.Config;
+        return JobManager.MigrationWorker.Config;
     }
+
     private void OpenConfig()
     {
-       _EditSettingsOpen = true;
+        _editSettingsOpen = true;
     }
 
     private void HandleConfigurationSaved(OnlineMongoMigrationProcessor.MigrationSettings updatedConfig)
     {
-
-        _EditSettingsOpen = false;
+        _editSettingsOpen = false;
 
         if (updatedConfig != null)
         {
-            JobManager.migrationWorker.Config = updatedConfig;
-            JobManager.migrationWorker.Config.Save();
-            Console.WriteLine($"Configuration updated: {updatedConfig.MongoToolsDownloadURL}");
+            JobManager.MigrationWorker.Config = updatedConfig;
+            JobManager.MigrationWorker.Config.Save();
+            Console.WriteLine($"Configuration updated: {updatedConfig.MongoToolsDownloadUrl}");
         }
     }
 
@@ -236,17 +228,22 @@
 
     private void StartMigrationAsync()
     {
-        _SelectedMigrationJob = null;
-        _MigrationDetailsPopUpOpen = true;
-
+        _selectedMigrationJob = null;
+        _migrationDetailsPopUpOpen = true;
     }
 
-    private void OnMigrationDetailsPopUpSubmit(OnlineMongoMigrationProcessor.MigrationJob job)
+    private Task<bool> CheckIfNameExistsAsync(string name)
     {
-        _MigrationDetailsPopUpOpen = false;
-        if(job!=null)
+        var migrationJob = JobManager.GetMigrations().Find(m => m.Name == name);
+        return Task.FromResult(migrationJob != null);
+    }
+
+    private void OnMigrationDetailsPopUpSubmit(MigrationJob job)
+    {
+        _migrationDetailsPopUpOpen = false;
+        if (job != null)
         {
-            if (_SelectedMigrationJob == null)
+            if (_selectedMigrationJob == null)
             {
                 JobManager.GetMigrations().Add(job);
                 JobManager.Save();

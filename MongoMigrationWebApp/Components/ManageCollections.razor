@@ -6,7 +6,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h4 class="modal-title">Add/Remove Collections</h4>
-                <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button> 
+                <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button>
             </div>
             <div class="modal-body">
                 <table class="table table-borderless">
@@ -17,7 +17,6 @@
                         </tr>
                     </thead>
                     <tbody>
-
                         @foreach (var mu in LoadUpdatedMigrationUnits())
                         {
                             <tr>
@@ -32,31 +31,23 @@
 
                 <div class="mt-3">
                     <label for="nameSpaces" class="form-label">Collections To Add</label>
-                    <input id="nameSpaces"  type="text" @bind="newCollection" placeholder="e.g. db1.col1,db1.col2" class="form-control" />
+                    <input id="nameSpaces" type="text" @bind="newCollection" placeholder="e.g. db1.col1,db1.col2" class="form-control" />
                     <button class="btn btn-primary btn-sm mt-2" @onclick="AddCollection">Add</button>
                 </div>
-                               
 
-                @if (CollectionRemoved)
+                @if (collectionRemoved)
                 {
                     <div class="alert alert-warning mt-2">If a collection is removed from the job, it will need to be migrated as new, and all migration and change stream details will be lost. Select Cancel if you wish to keep the collection.</div>
                 }
 
-                @if (!string.IsNullOrEmpty(ErrorMessage))
+                @if (!string.IsNullOrEmpty(errorMessage))
                 {
-                    <div class="alert alert-danger mt-2">@ErrorMessage</div>
+                    <div class="alert alert-danger mt-2">@errorMessage</div>
                 }
-
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-primary"
-                @onclick=@HandleSubmit>
-                    Ok
-                </button>
-                <button type="button" class="btn btn-secondary"
-                @onclick="@Cancel">
-                    Cancel
-                </button>
+                <button type="button" class="btn btn-primary" @onclick=@HandleSubmit>Ok</button>
+                <button type="button" class="btn btn-secondary" @onclick="@Cancel">Cancel</button>
             </div>
         </div>
     </div>
@@ -68,35 +59,33 @@
     public List<MigrationUnit>? MigrationUnits { get; set; }
 
     [Parameter]
-    public EventCallback<List<MigrationUnit>> OnConllectionsUpdated { get; set; }
+    public EventCallback<List<MigrationUnit>> OnCollectionsUpdated { get; set; }
 
-    private string ErrorMessage = string.Empty;
-
-    private string newCollection=string.Empty;
-
-    private List<MigrationUnit> UpdatedMigrationUnits;
-    private bool CollectionRemoved=false;
+    private string errorMessage = string.Empty;
+    private string newCollection = string.Empty;
+    private List<MigrationUnit> updatedMigrationUnits;
+    private bool collectionRemoved = false;
 
     private List<MigrationUnit> LoadUpdatedMigrationUnits()
     {
-        if (UpdatedMigrationUnits == null)
+        if (updatedMigrationUnits == null)
         {
-            UpdatedMigrationUnits = new List<MigrationUnit>();        
-            UpdatedMigrationUnits = MigrationUnits.ToList();
+            updatedMigrationUnits = new List<MigrationUnit>();
+            updatedMigrationUnits = MigrationUnits.ToList();
         }
 
-        return UpdatedMigrationUnits;
+        return updatedMigrationUnits;
     }
 
     private void AddCollection()
     {
-        ErrorMessage = string.Empty;
+        errorMessage = string.Empty;
         if (!string.IsNullOrWhiteSpace(newCollection))
         {
-            Tuple<bool, string> retValue = Helper.ValidateNameSpaceFormat(newCollection);
+            Tuple<bool, string> retValue = Helper.ValidateNamespaceFormat(newCollection);
             if (!retValue.Item1)
             {
-                ErrorMessage = "Invalid collection name. Please provide the collection name in the format 'database.collection'";
+                errorMessage = "Invalid collection name. Please provide the collection name in the format 'database.collection'";
                 return;
             }
 
@@ -118,9 +107,9 @@
                 var mu = new MigrationUnit(dbName, colName, null);
 
                 // Ensure no duplicates based on DatabaseName.CollectionName
-                if (!UpdatedMigrationUnits.Any(x => x.DatabaseName == dbName && x.CollectionName == colName))
+                if (!updatedMigrationUnits.Any(x => x.DatabaseName == dbName && x.CollectionName == colName))
                 {
-                    UpdatedMigrationUnits.Add(mu);
+                    updatedMigrationUnits.Add(mu);
                 }
             }
 
@@ -128,35 +117,31 @@
         }
     }
 
-
     private void RemoveCollection(MigrationUnit mu)
     {
-        ErrorMessage = string.Empty;
-        if (UpdatedMigrationUnits.Count == 1)
+        errorMessage = string.Empty;
+        if (updatedMigrationUnits.Count == 1)
         {
-            ErrorMessage = "At least one collection is required for migration.";
+            errorMessage = "At least one collection is required for migration.";
             return;
         }
-        UpdatedMigrationUnits.Remove(mu);
-        CollectionRemoved = true;
+        updatedMigrationUnits.Remove(mu);
+        collectionRemoved = true;
     }
 
     private void HandleSubmit()
-    {       
-
-        if (OnConllectionsUpdated.HasDelegate)
+    {
+        if (OnCollectionsUpdated.HasDelegate)
         {
-            OnConllectionsUpdated.InvokeAsync(UpdatedMigrationUnits);
+            OnCollectionsUpdated.InvokeAsync(updatedMigrationUnits);
         }
     }
 
     private void Cancel()
     {
-        if (OnConllectionsUpdated.HasDelegate)
+        if (OnCollectionsUpdated.HasDelegate)
         {
-            OnConllectionsUpdated.InvokeAsync(null);
+            OnCollectionsUpdated.InvokeAsync(null);
         }
     }
 }
-
-

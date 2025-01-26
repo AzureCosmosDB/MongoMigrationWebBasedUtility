@@ -1,15 +1,8 @@
-﻿using Microsoft.Extensions.Logging;
-using MongoDB.Driver.Core.Configuration;
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Data;
 using System.Diagnostics;
-using System.Linq;
-using System.Numerics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading.Tasks;
 
 namespace OnlineMongoMigrationProcessor
 {
@@ -17,9 +10,7 @@ namespace OnlineMongoMigrationProcessor
 
     internal class ProcessExecutor
     {
-
-        //private static Process? _process;
-        private static bool MigrationCancelled = false;
+        private static bool _migrationCancelled = false;
 
         /// <summary>
         /// Executes a process with the given executable path and arguments.
@@ -27,23 +18,22 @@ namespace OnlineMongoMigrationProcessor
         /// <param name="exePath">The full path to the executable file.</param>
         /// <param name="arguments">The arguments to pass to the executable.</param>
         /// <returns>True if the process completed successfully, otherwise false.</returns>
-
-        public bool Execute(Joblist joblist, MigrationUnit item, MigrationChunk chunk, double basePercent, double contribFator, long targetCount, string exePath, string arguments)
+        public bool Execute(JobList jobList, MigrationUnit item, MigrationChunk chunk, double basePercent, double contribFactor, long targetCount, string exePath, string arguments)
         {
             int pid;
-            string pType = string.Empty;
+            string processType = string.Empty;
             try
             {
                 // Determine process type and active process ID
                 if (exePath.ToLower().Contains("restore"))
                 {
-                    pType = "MongoRestore";
-                    pid = joblist.activeRestoreProcessId;
+                    processType = "MongoRestore";
+                    pid = jobList.ActiveRestoreProcessId;
                 }
                 else
                 {
-                    pType = "MongoDump";
-                    pid = joblist.activeDumpProcessId;
+                    processType = "MongoDump";
+                    pid = jobList.ActiveDumpProcessId;
                 }
 
                 // Kill any existing process
@@ -79,7 +69,7 @@ namespace OnlineMongoMigrationProcessor
                         if (!string.IsNullOrEmpty(args.Data))
                         {
                             outputBuffer.AppendLine(args.Data);
-                            Log.WriteLine(RedactPII(args.Data));
+                            Log.WriteLine(Helper.RedactPii(args.Data));
                         }
                     };
 
@@ -88,7 +78,7 @@ namespace OnlineMongoMigrationProcessor
                         if (!string.IsNullOrEmpty(args.Data))
                         {
                             errorBuffer.AppendLine(args.Data);
-                            ProcessErrorData(args.Data, pType, item, chunk, basePercent, contribFator, targetCount, joblist);
+                            ProcessErrorData(args.Data, processType, item, chunk, basePercent, contribFactor, targetCount, jobList);
                         }
                     };
 
@@ -96,34 +86,33 @@ namespace OnlineMongoMigrationProcessor
                     process.BeginOutputReadLine();
                     process.BeginErrorReadLine();
 
-                    if (pType == "MongoRestore")
-                        joblist.activeRestoreProcessId = process.Id;
+                    if (processType == "MongoRestore")
+                        jobList.ActiveRestoreProcessId = process.Id;
                     else
-                        joblist.activeDumpProcessId = process.Id;
+                        jobList.ActiveDumpProcessId = process.Id;
 
                     while (!process.WaitForExit(1000)) // Poll every sec
                     {
-                        if (MigrationCancelled)
+                        if (_migrationCancelled)
                         {
                             try
                             {
                                 process.Kill();
-                                Log.WriteLine($"{pType} Process terminated due to cancellation.");
-                                MigrationCancelled = false;
+                                Log.WriteLine($"{processType} Process terminated due to cancellation.");
+                                _migrationCancelled = false;
                                 break;
                             }
                             catch (Exception ex)
                             {
-                                Log.WriteLine($"Error terminating process {pType}: {RedactPII(ex.Message)}", LogType.Error);
+                                Log.WriteLine($"Error terminating process {processType}: {Helper.RedactPii(ex.Message)}", LogType.Error);
                             }
                         }
                     }
 
-
-                    if (pType == "MongoRestore")
-                        joblist.activeRestoreProcessId = 0;
+                    if (processType == "MongoRestore")
+                        jobList.ActiveRestoreProcessId = 0;
                     else
-                        joblist.activeDumpProcessId = 0;
+                        jobList.ActiveDumpProcessId = 0;
 
                     Log.Save();
                     return process.ExitCode == 0;
@@ -131,13 +120,13 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                Log.WriteLine($"Error executing process {pType}: {RedactPII(ex.Message)}", LogType.Error);
+                Log.WriteLine($"Error executing process {processType}: {Helper.RedactPii(ex.Message)}", LogType.Error);
                 Log.Save();
                 return false;
             }
         }
 
-        private void ProcessErrorData(string data, string pType, MigrationUnit item, MigrationChunk chunk, double basePercent, double contribFator, long targetCount, Joblist joblist)
+        private void ProcessErrorData(string data, string processType, MigrationUnit item, MigrationChunk chunk, double basePercent, double contribFactor, long targetCount, JobList jobList)
         {
             string percentValue = ExtractPercentage(data);
             string docsProcessed = ExtractDocCount(data, string.Empty);
@@ -155,29 +144,29 @@ namespace OnlineMongoMigrationProcessor
 
             if (percent > 0)
             {
-                Log.AddVerboseMessage($"{pType} Chunk Percentage: {percent}");
-                if (pType == "MongoRestore")
+                Log.AddVerboseMessage($"{processType} Chunk Percentage: {percent}");
+                if (processType == "MongoRestore")
                 {
-                    item.RestorePercent = basePercent + (percent * contribFator);
+                    item.RestorePercent = basePercent + (percent * contribFactor);
                     if (item.RestorePercent == 100)
                         item.RestoreComplete = true;
                 }
                 else
                 {
-                    item.DumpPercent = basePercent + (percent * contribFator);
+                    item.DumpPercent = basePercent + (percent * contribFactor);
                     if (item.DumpPercent == 100)
                         item.DumpComplete = true;
                 }
-                joblist.Save();
+                jobList.Save();
             }
             else
             {
-                if (pType == "MongoRestore")
+                if (processType == "MongoRestore")
                 {
                     var (restoredCount, failedCount) = ExtractRestoreCounts(data);
                     if (restoredCount > 0 || failedCount > 0)
                     {
-                        chunk.RestoredSucessDocCount = restoredCount;
+                        chunk.RestoredSuccessDocCount = restoredCount;
                         chunk.RestoredFailedDocCount = failedCount;
                     }
                 }
@@ -191,18 +180,9 @@ namespace OnlineMongoMigrationProcessor
                 }
                 if (!data.Contains("continuing through error: Duplicate key violation on the requested collection"))
                 {
-                    Log.WriteLine($"{pType} Response: {RedactPII(data)}");
+                    Log.WriteLine($"{processType} Response: {Helper.RedactPii(data)}");
                 }
             }
-        }
-
-        private string RedactPII(string input)
-        {
-            string pattern = @"(?<=://)([^:]+):([^@]+)";
-            string replacement = "[REDACTED]:[REDACTED]";
-
-            // Redact the user ID and password
-            return Regex.Replace(input, pattern, replacement);
         }
 
         private string ExtractPercentage(string input)
@@ -216,7 +196,6 @@ namespace OnlineMongoMigrationProcessor
             return string.Empty;
         }
 
-
         private string ExtractDocCount(string input, string prefix)
         {
             // Regular expression to match the percentage value in the format (x.y%)
@@ -227,7 +206,6 @@ namespace OnlineMongoMigrationProcessor
             }
             return string.Empty;
         }
-
 
         public (int RestoredCount, int FailedCount) ExtractRestoreCounts(string input)
         {
@@ -245,7 +223,7 @@ namespace OnlineMongoMigrationProcessor
         public int ExtractDumpedDocumentCount(string input)
         {
             // Define the regex pattern to match "done" followed by document count
-            string pattern = @"\bdone dumping.*\((\d+)\s+documents\)"; 
+            string pattern = @"\bdone dumping.*\((\d+)\s+documents\)";
             var match = Regex.Match(input, pattern);
 
             // Check if the regex matched
@@ -259,14 +237,13 @@ namespace OnlineMongoMigrationProcessor
             return 0;
         }
 
-
         /// <summary>
         /// Terminates the currently running process, if any.
         /// </summary>
         public void Terminate()
         {
-            MigrationCancelled = true;
+            _migrationCancelled = true;
         }
-        
     }
 }
+

@@ -2,59 +2,48 @@
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">@Caption</h5>
+                <h5 class="modal-title">@caption</h5>
                 <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button>
             </div>
             <div class="modal-body">
-                <p>@Message</p>
+                <p>@message</p>
             </div>
             <div class="modal-footer">
-                @switch (Type)
+                @switch (type)
                 {
                     case Category.Okay:
-                        <button type="button" class="btn btn-primary"
-                                @onclick=@Ok>
-                            OK
-                        </button>
+                        <button type="button" class="btn btn-primary" @onclick=@Ok>OK</button>
                         break;
                     case Category.CutoverNot:
-                        <button type="button" class="btn btn-primary"
-                                @onclick=@Ok>
-                            Cutover
-                        </button>
-                        <button type="button" class="btn btn-secondary"
-                                @onclick="@Cancel">
-                            Don't Cutover
-                        </button>
+                        <button type="button" class="btn btn-primary" @onclick=@Ok>Cutover</button>
+                        <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Cutover</button>
                         break;
                     case Category.DeleteNot:
-                        <button type="button" class="btn btn-primary"
-                                @onclick=@Ok>
-                            Delete
-                        </button>
-                        <button type="button" class="btn btn-secondary"
-                                @onclick="@Cancel">
-                            Don't Delete
-                        </button>
+                        <button type="button" class="btn btn-primary" @onclick=@Ok>Delete</button>
+                        <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Delete</button>
                         break;
                 }
             </div>
         </div>
     </div>
 </div>
+
 @code {
-    [Parameter] public string? Caption { get; set; }
-    [Parameter] public string? Message { get; set; }
-    [Parameter] public EventCallback<bool> OnClose { get; set; }
-    [Parameter] public Category Type { get; set; }
+    [Parameter] public string? caption { get; set; }
+    [Parameter] public string? message { get; set; }
+    [Parameter] public EventCallback<bool> onClose { get; set; }
+    [Parameter] public Category type { get; set; }
+
     private Task Cancel()
     {
-        return OnClose.InvokeAsync(false);
+        return onClose.InvokeAsync(false);
     }
+
     private Task Ok()
     {
-        return OnClose.InvokeAsync(true);
+        return onClose.InvokeAsync(true);
     }
+
     public enum Category
     {
         Okay,

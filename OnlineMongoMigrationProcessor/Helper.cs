@@ -1,16 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO.Compression;
-using System.Linq;
-using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace OnlineMongoMigrationProcessor
 {
     public static class Helper
     {
-        public static async Task<string> EnsureMongoToolsAvailableAsync(string toolsDestinationFolder,string toolsDownloadUrl)
+        public static async Task<string> EnsureMongoToolsAvailableAsync(string toolsDestinationFolder, MigrationSettings config)
         {
+            string toolsDownloadUrl = config.MongoToolsDownloadUrl;
+
             try
             {
                 string toolsLaunchFolder = Path.Combine(toolsDestinationFolder, Path.GetFileNameWithoutExtension(toolsDownloadUrl), "bin");
@@ -44,7 +45,6 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-
                 // Extract ZIP file
                 ZipFile.ExtractToDirectory(zipFilePath, toolsDestinationFolder, overwriteFiles: true);
                 File.Delete(zipFilePath);
@@ -67,7 +67,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        public static Tuple<bool, string> ValidateNameSpaceFormat(string input)
+        public static Tuple<bool, string> ValidateNamespaceFormat(string input)
         {
             // Regular expression pattern to match db1.col1, db2.col2, db3.col4 format
             string pattern = @"^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$";
@@ -81,7 +81,7 @@ namespace OnlineMongoMigrationProcessor
             foreach (string item in items)
             {
                 string trimmedItem = item.Trim(); // Remove any extra whitespace
-                if (System.Text.RegularExpressions.Regex.IsMatch(trimmedItem, pattern))
+                if (Regex.IsMatch(trimmedItem, pattern))
                 {
                     Console.WriteLine($"'{trimmedItem}' matches the pattern.");
                     validItems.Add(trimmedItem); // HashSet ensures uniqueness
@@ -97,5 +97,27 @@ namespace OnlineMongoMigrationProcessor
             return new Tuple<bool, string>(true, cleanedNamespace);
         }
 
+        public static string RedactPii(string input)
+        {
+            string pattern = @"(?<=://)([^:]+):([^@]+)";
+            string replacement = "[REDACTED]:[REDACTED]";
+
+            // Redact the user ID and password
+            return Regex.Replace(input, pattern, replacement);
+        }
+
+        public static bool IsOfflineJobCompleted(MigrationJob migrationJob)
+        {
+            if (migrationJob == null) return true;
+
+            foreach (var mu in migrationJob.MigrationUnits)
+            {
+                if (!mu.RestoreComplete || !mu.DumpComplete)
+                    return false;
+            }
+            return true;
+        }
     }
 }
+
+

@@ -10,40 +10,36 @@ namespace MongoMigrationWebApp.Service
 
     public class JobManager
     {
-        private Joblist? joblist;
-        public MigrationWorker? migrationWorker;
+        private JobList? _jobList;
+        public MigrationWorker? MigrationWorker { get; set; }
+        private List<LogObject>? _logBucket { get; set; }
 
-        private List<LogObject>? LogBucket { get; set; }
-
-        public JobManager() {
-
-            if(joblist==null)
-            {  
-                joblist = new Joblist();
-                joblist.Load();
+        public JobManager()
+        {
+            if (_jobList == null)
+            {
+                _jobList = new JobList();
+                _jobList.Load();
             }
 
-            if (migrationWorker == null)
+            if (MigrationWorker == null)
             {
-                migrationWorker=new MigrationWorker(joblist);
+                MigrationWorker = new MigrationWorker(_jobList);
             }
-                
 
-            if (joblist.MigrationJobs == null)
+            if (_jobList.MigrationJobs == null)
             {
-                joblist.MigrationJobs = new List<MigrationJob>();
-
+                _jobList.MigrationJobs = new List<MigrationJob>();
                 Save();
             }
-
         }
 
         public bool Save()
         {
-            return joblist.Save();
+            return _jobList.Save();
         }
 
-        public List<MigrationJob> GetMigrations() => joblist.MigrationJobs;
+        public List<MigrationJob> GetMigrations() => _jobList.MigrationJobs;
 
         public LogBucket GetLogBucket(string id) => Log.GetLogBucket(id);
 
@@ -52,10 +48,9 @@ namespace MongoMigrationWebApp.Service
             Log.Dispose();
         }
 
-
         public Task CancelMigration(string id)
         {
-            var migration = joblist.MigrationJobs.Find(m => m.Id == id);
+            var migration = _jobList.MigrationJobs.Find(m => m.Id == id);
             if (migration != null)
             {
                 migration.IsCancelled = true;
@@ -65,7 +60,7 @@ namespace MongoMigrationWebApp.Service
 
         public Task ResumeMigration(string id)
         {
-            var migration = joblist.MigrationJobs.Find(m => m.Id == id);
+            var migration = _jobList.MigrationJobs.Find(m => m.Id == id);
             if (migration != null)
             {
                 migration.IsCancelled = true;
@@ -75,7 +70,7 @@ namespace MongoMigrationWebApp.Service
 
         public Task ViewMigration(string id)
         {
-            var migration = joblist.MigrationJobs.Find(m => m.Id == id);
+            var migration = _jobList.MigrationJobs.Find(m => m.Id == id);
             if (migration != null)
             {
                 migration.IsCancelled = true;
@@ -83,14 +78,15 @@ namespace MongoMigrationWebApp.Service
             return Task.CompletedTask;
         }
 
-        void ClearJobFiles(string jobId)
+        public void ClearJobFiles(string jobId)
         {
             try
             {
                 System.IO.Directory.Delete($"{Path.GetTempPath()}mongodump", true);
             }
-            catch { }   
+            catch { }
         }
+
         public string ExtractHost(string connectionString)
         {
             if (string.IsNullOrWhiteSpace(connectionString))
@@ -116,10 +112,10 @@ namespace MongoMigrationWebApp.Service
                 return connectionString.Substring(startIndex, endIndex - startIndex).Split('@')[1];
             }
             catch
-            {                
+            {
                 return string.Empty;
             }
         }
     }
-
 }
+
