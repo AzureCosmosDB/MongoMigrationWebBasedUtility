@@ -63,7 +63,7 @@ namespace OnlineMongoMigrationProcessor
 
             DateTime migrationJobStartTime = DateTime.Now;
 
-            Log.WriteLine($"{dbName}.{colName} DocumentCopy started");
+            Log.WriteLine($"{dbName}.{colName} Document copy started");
 
             if (!item.DumpComplete && !_executionCancelled)
             {
@@ -140,26 +140,29 @@ namespace OnlineMongoMigrationProcessor
 
                                 if (result)
                                 {
-                                    continueProcessing = false;
-                                    item.MigrationChunks[i].IsDownloaded = true;
-                                    item.MigrationChunks[i].IsUploaded = true;
+                                    if (!_cts.IsCancellationRequested)
+                                    {
+                                        continueProcessing = false;
+                                        item.MigrationChunks[i].IsDownloaded = true;
+                                        item.MigrationChunks[i].IsUploaded = true;                                        
+                                    }
                                     _jobs?.Save(); // Persist state
                                     dumpAttempts = 0;
                                 }
                                 else
                                 {
-                                    Log.WriteLine($"Attempt {dumpAttempts} {dbName}.{colName}-{i} of DocumentCopy failed. Retrying in {backoff.TotalSeconds} seconds...");
+                                    Log.WriteLine($"Attempt {dumpAttempts} {dbName}.{colName}-{i} of Document copy failed. Retrying in {backoff.TotalSeconds} seconds...");
                                     Thread.Sleep(backoff);
                                     backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
                                 }
                             }
                             catch (MongoExecutionTimeoutException ex)
                             {
-                                Log.WriteLine($" DocumentCopy attempt {dumpAttempts} failed due to timeout: {ex.Message}", LogType.Error);
+                                Log.WriteLine($" Document copy attempt {dumpAttempts} failed due to timeout: {ex.Message}", LogType.Error);
 
                                 if (dumpAttempts >= maxRetries)
                                 {
-                                    Log.WriteLine("Maximum DocumentCopy attempts reached. Aborting operation.", LogType.Error);
+                                    Log.WriteLine("Maximum Document copy attempts reached. Aborting operation.", LogType.Error);
                                     Log.Save();
 
                                     _job.CurrentlyActive = false;

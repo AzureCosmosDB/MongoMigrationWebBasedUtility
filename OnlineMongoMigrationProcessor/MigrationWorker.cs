@@ -132,6 +132,9 @@ namespace OnlineMongoMigrationProcessor
                 }
             }
 
+
+           
+
             while (attempts < maxRetries && !_migrationCancelled && continueProcessing)
             {
                 attempts++;
@@ -142,15 +145,15 @@ namespace OnlineMongoMigrationProcessor
                     Log.Save();
 
                     _migrationProcessor?.StopProcessing();
+                    _migrationProcessor = null;
                     if (!_job.UseMongoDump)
-                    {                        
+                    {
                         _migrationProcessor = new CopyProcessor(_jobs, _job, _sourceClient, Config);
                     }
                     else
                     {
                         _migrationProcessor = new DumpRestoreProcessor(_jobs, _job, _sourceClient, Config, _toolsLaunchFolder);
                     }
-
                     _migrationProcessor.ProcessRunning = true;
 
                     foreach (var unit in _job.MigrationUnits)
@@ -250,16 +253,26 @@ namespace OnlineMongoMigrationProcessor
             }
 
             int totalChunks=0;
+            long minDocsInChunk=0;
             if (_job.UseMongoDump)
             {
                 Log.WriteLine($"{databaseName}.{collectionName} Storage Size: {totalCollectionSizeBytes}");
                 long targetChunkSizeBytes = Config.ChunkSizeInMb * 1024 * 1024;
                 totalChunks = (int)Math.Ceiling((double)totalCollectionSizeBytes / targetChunkSizeBytes);
+                minDocsInChunk = documentCount / totalChunks;
             }
             else
             {
                 Log.WriteLine($"{databaseName}.{collectionName} Estimated Document Count: {documentCount}");
                 totalChunks = (int)Math.Min(SamplePartitioner.MaxSamples/SamplePartitioner.MaxSegments, documentCount / SamplePartitioner.MaxSamples);
+                minDocsInChunk = documentCount / totalChunks;
+
+                // we want more segments for parallel processing
+                if ( (documentCount/ (minDocsInChunk * totalChunks)) < 5)
+                {
+                    totalChunks = (int)Math.Min(SamplePartitioner.MaxSamples / SamplePartitioner.MaxSegments, documentCount /(5 * minDocsInChunk));
+                    minDocsInChunk = documentCount / totalChunks;
+                }
             }
             
             List<MigrationChunk> migrationChunks = new List<MigrationChunk>();
@@ -278,7 +291,7 @@ namespace OnlineMongoMigrationProcessor
                 foreach (var dataType in dataTypes)
                 {
                     long docCountByType;
-                    ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(collection, idField, totalChunks, dataType, documentCount / totalChunks, out docCountByType);
+                    ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_job.UseMongoDump,collection, idField, totalChunks, dataType, minDocsInChunk, out docCountByType);
 
                     if (docCountByType == 0)
                     {

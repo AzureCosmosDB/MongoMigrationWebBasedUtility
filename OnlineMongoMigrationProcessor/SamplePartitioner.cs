@@ -28,7 +28,7 @@ namespace OnlineMongoMigrationProcessor
         /// <param name="idField">The field used as the partition key.</param>
         /// <param name="partitionCount">The number of desired partitions.</param>
         /// <returns>A list of partition boundaries.</returns>
-        public static ChunkBoundaries CreatePartitions(IMongoCollection<BsonDocument> collection, string idField, int chunkCount, DataType dataType, long minDocsPerChunk, out long docCountByType)
+        public static ChunkBoundaries CreatePartitions(bool optimizeForMongoDump,IMongoCollection<BsonDocument> collection, string idField, int chunkCount, DataType dataType, long minDocsPerChunk, out long docCountByType)
         {
             int segmentCount = 1;
             int minDocsPerSegment = 10000;
@@ -75,6 +75,7 @@ namespace OnlineMongoMigrationProcessor
             if (chunkCount > MaxSamples)
                 throw new ArgumentException("Chunk count too large. Retry with larger Chunk Size.");
 
+            
 
             //ensuring minimum docs per chunk
             docsInChunk = docCountByType / chunkCount;
@@ -96,6 +97,7 @@ namespace OnlineMongoMigrationProcessor
             // Calculate sampleCount as segmentCount times the chunkCount
             sampleCount = chunkCount * segmentCount; //used to generate segments in case of non Dump/Restore sceanrio
 
+
             // dont allow more samples than maxSamples
             sampleCount = Math.Min(sampleCount, MaxSamples);
 
@@ -113,7 +115,7 @@ namespace OnlineMongoMigrationProcessor
 
             // Step 2: Sample the data
 
-            Log.AddVerboseMessage($"Sampling data where {idField} is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
+            Log.WriteLine($"Sampling data where {idField} is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
             Log.Save();
 
             var pipeline = new[]
