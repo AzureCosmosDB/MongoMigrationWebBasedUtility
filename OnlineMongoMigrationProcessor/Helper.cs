@@ -70,7 +70,7 @@ namespace OnlineMongoMigrationProcessor
         public static Tuple<bool, string> ValidateNamespaceFormat(string input)
         {
             // Regular expression pattern to match db1.col1, db2.col2, db3.col4 format
-            string pattern = @"^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$";
+            string pattern = @"^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+$";
 
             // Split the input by commas
             string[] items = input.Split(',');
