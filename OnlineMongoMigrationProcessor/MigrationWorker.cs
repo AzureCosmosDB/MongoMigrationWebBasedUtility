@@ -235,7 +235,7 @@ namespace OnlineMongoMigrationProcessor
 
             var statsCommand = new BsonDocument { { "collStats", collectionName } };
             var stats = await database.RunCommandAsync<BsonDocument>(statsCommand);
-            long totalCollectionSizeBytes = stats["storageSize"].ToInt64();
+            long totalCollectionSizeBytes = stats.Contains("storageSize") ? stats["storageSize"].ToInt64() : stats["size"].ToInt64();
 
 
             long documentCount;
