@@ -59,6 +59,10 @@ namespace OnlineMongoMigrationProcessor
             int attempts = 0;
             TimeSpan backoff = TimeSpan.FromSeconds(2);
 
+            //encoding speacial characters
+            sourceConnectionString=MongoHelper.EncodeMongoPasswordInConnectionString(sourceConnectionString);
+            targetConnectionString = MongoHelper.EncodeMongoPasswordInConnectionString(targetConnectionString);
+
             if (Config == null)
             {
                 Config = new MigrationSettings();

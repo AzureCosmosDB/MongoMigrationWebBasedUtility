@@ -5,7 +5,7 @@ Streamline your migration to Azure Cosmos DB for MongoDB (vCore-based) with a to
 ## Key Features
 
 - **Flexible Migration Options**  
-  Supports both online and offline migrations to suit your business requirements. It can either use `mongodump` and `mongorestore` for data movement or employ the MongoDB driver to read data from the source and write it to the target.
+  Supports both online and offline migrations to suit your business requirements. It can either use `mongodump` and `mongorestore` for data movement or employ the MongoDB driver to read data from the source and write it to the target. If you are migrating an on-premises MongoDB VM, consider using the [On-Premise Deployment](#deploy-mongomigrationwebapp-on-a-onpremise-windows-server) to install the app locally and transfer data to Azure. This eliminates the need to set up an Azure VPN.
 
 - **User-Friendly Interface**  
   No steep learning curve—simply provide your connection strings and specify the collections to migrate.
@@ -31,9 +31,9 @@ Streamline your migration to Azure Cosmos DB for MongoDB (vCore-based) with a to
 
 Effortlessly migrate your MongoDB collections while maintaining control, security, and scalability. Begin your migration today and unlock the full potential of Azure Cosmos DB!
 
-## Deployment Steps
+## Azure Deployment
 
-You can deploy the utility either by compiling the source files or by using the precompiled binaries.
+Follow these steps to migrate data from a cloud-based MongoDB VM or MongoDB Atlas. You can deploy the utility either by building it from the source files or using the precompiled binaries.
 
 ### Prerequisites
 
@@ -42,12 +42,13 @@ You can deploy the utility either by compiling the source files or by using the 
 1. PowerShell
 
 
-### Deploy using Source Files (option 1)
+### Deploy on Azure using Source Files (option 1)
 
 This option involves cloning the repository and building the C# project source files locally on a Windows machine. If you’re not comfortable working with code, consider using Option 2 below.
 
+
 1. Install [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet/6.0)
-2. Clone the repository: `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility`
+2. Clone/Download the repository: `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility`
 2. Open PowerShell.
 2. Navigate to the cloned project folder.
 3. Run the following commands in PowerShell:
@@ -102,9 +103,9 @@ This option involves cloning the repository and building the C# project source f
 4. Open `https://<WebAppName>.azurewebsites.net` to access the tool.
 5. [Enable the use of a single public IP for consistent firewall rules](#integrating-azure-web-app-with-a-vnet-to-use-a-single-public-ip-optional) or [Enable Private Endpoint](#steps-to-enable-private-endpoint-on-the-azure-web-app-optional) if required.
 
-### Deploy using precompiled binaries (option 2)
+### Deploy on Azure using using precompiled binaries (option 2)
 
-1. Download `app.zip` from the latest release at `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility/releases`
+1. Download the .zip file (excluding source code.zip and source code.tar.gz) from the latest release available at `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility/releases`.
 2. Open PowerShell.
 3. Run the following commands in PowerShell:
 
@@ -133,6 +134,8 @@ This option involves cloning the repository and building the C# project source f
 
 4. Open `https://<WebAppName>.azurewebsites.net` to access the tool.
 5. [Enable the use of a single public IP for consistent firewall rules](#integrating-azure-web-app-with-a-vnet-to-use-a-single-public-ip-optional) or [Enable Private Endpoint](#steps-to-enable-private-endpoint-on-the-azure-web-app-optional) if required.
+6. Keep in mind that [vNet injection](#1-enable-vnet-integration-for-the-web-app) is required if the source or target MongoDB servers are within a private vNet.
+
 
 ## Integrating Azure Web App with a VNet to Use a Single Public IP (Optional)
 
@@ -266,6 +269,102 @@ If using a private DNS zone:
 2. From the VM, access the web app via its URL (e.g., `https://<WebAppName>.azurewebsites.net`).
 3. Confirm that the web app is accessible only within the VNet.
 
+
+## On-Premise Deployment
+
+Follow these steps to migrate data from an on-premises MongoDB VM. You can deploy the utility by either compiling the source files or using the precompiled binaries.
+
+### Steps to Deploy on a Windows Server
+
+1. Prepare the Windows Server
+    - Log in to the Windows Server using Remote Desktop or a similar method.
+    - Ensure the server has internet access to download required components.
+2. Install .NET 6 Runtime
+    - Download the .NET 6 Hosting Bundle:
+    - Visit the .NET Download Page.
+    - Download the Hosting Bundle under the Runtime section.
+    - Install the Hosting Bundle:
+        - Run the installer and follow the instructions.
+        - This will install the ASP.NET Core Runtime and configure IIS to work with .NET applications.
+3. Install and Configure IIS (Internet Information Services)
+    - Open Server Manager.
+    - Click Add Roles and Features and follow these steps:
+        - Select Role-based or feature-based installation.
+        - Choose the current server.
+        - Under Server Roles, select Web Server (IIS).
+        - In the Role Services section, ensure the following are selected:
+            - Web Server > Common HTTP Features > Static Content, Default Document.
+            - Web Server > Application Development > .NET Extensibility 4.8, ASP.NET 4.8.
+            - Management Tools > IIS Management Console.
+        - Click Install to complete the setup.
+        - 
+4. Enable Required Windows Features by running the following PowerShell command
+
+    ```powershell
+
+    Enable-WindowsOptionalFeature -Online -FeatureName IIS-ASPNET45, IIS-NetFxExtensibility45
+
+    ```
+5. Create the App Directory
+    - On the server, create an empty folder to store the MongoMigrationWebApp files. This folder will be referred to as the app directory.
+    - Recommended path: C:\inetpub\wwwroot\MongoMigrationWeb
+    - Configure File Permissions
+        - Right-click the app directory, select Properties > Security.
+        - Ensure that the **IIS_IUSRS** group has **Read** & **Execute** permissions.
+6. Configure IIS for WebApp
+    - Open IIS Manager (search IIS in the Start menu).
+    - Right-click Sites in the left-hand pane and select Add Website.
+        - Site Name: Enter a name for your site (e.g., MongoMigrationWeb).
+        - Physical Path: Point to the app directory.
+        - Binding: Configure the site to use the desired port (e.g., 8080 for HTTPS).
+7. Set Up Application Pool
+    - In IIS Manager, select Application Pools.
+    - Create a new Application Pool:
+        - Right-click and select Add Application Pool.
+        - Name it (e.g., MongoMigrationWebPool).
+        - Set the .NET CLR version to No Managed Code.
+    - Select the site, click Basic Settings, and set the application pool to the one created.
+8. Deploy the binaries to the app directory
+    - Use precompiled binaries
+        - Download the .zip file (excluding source code.zip and source code.tar.gz) from the latest release available at `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility/releases`.
+        - Unzip the files to the app directory.
+        - Ensure the web.config file is present in the root of your app directory. This file is critical for configuring the IIS hosting.
+      or
+    - Use Source Files
+        1. Install [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet/6.0)
+        2. Clone/Download the repository: `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility`
+        3. Open PowerShell.
+        4. Navigate to the cloned project folder.
+        5. Run the following commands in PowerShell:
+    
+               ```powershell
+               # Variables to be updated
+    
+               $webAppName = <Replace with Web App Name>
+               $projectFolderPath = <Replace with path to cloned repo on local>
+            
+            
+               # Paths - No changes required
+               $projectFilePath = "$projectFolderPath\MongoMigrationWebApp\MongoMigrationWebApp.csproj"
+               $publishFolder = "$projectFolderPath\publish"
+               $zipPath = "$publishFolder\app.zip"
+                 
+            
+               # Configure Nuget Path. Execute only once on a machine
+               dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
+            
+            
+               # Build the Blazor app
+               Write-Host "Building Blazor app..."
+               dotnet publish $projectFilePath -c Release -o $publishFolder -warnaserror:none --nologo        	
+            
+           
+               Write-Host "Published to "$publishFolder
+               ```
+
+        6. Copy the contents of the published folder to  the app directory.
+
+10. Restart IIS from the right-hand pane.
 
 ## How to Use
 

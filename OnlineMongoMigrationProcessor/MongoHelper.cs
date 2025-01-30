@@ -2,6 +2,7 @@
 using MongoDB.Driver;
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace OnlineMongoMigrationProcessor
@@ -59,6 +60,25 @@ namespace OnlineMongoMigrationProcessor
         {
             // Execute the query and return the count
             return collection.CountDocuments(filter);
+        }
+
+        public static string EncodeMongoPasswordInConnectionString(string connectionString)
+        {
+            // Regex pattern to capture the password part (assuming mongodb://user:password@host)
+            string pattern = @"(mongodb(?:\+srv)?:\/\/[^:]+:)(.*)@([^@]+)$";
+
+            Match match = Regex.Match(connectionString, pattern);
+
+            if (match.Success)
+            {
+                string decodedPassword = Uri.UnescapeDataString(match.Groups[2].Value); //decode if user gave encoded password
+
+                string encodedPassword = Uri.EscapeDataString(decodedPassword); // URL-encode password
+                return match.Groups[1].Value + encodedPassword + "@" + match.Groups[3].Value; // Reconstruct the connection string
+            }
+
+            // Return the original string if no password is found
+            return connectionString;
         }
 
         public static async Task<bool> IsChangeStreamEnabledAsync(string connectionString)
