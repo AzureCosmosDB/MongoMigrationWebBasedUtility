@@ -103,7 +103,7 @@ This option involves cloning the repository and building the C# project source f
 4. Open `https://<WebAppName>.azurewebsites.net` to access the tool.
 5. [Enable the use of a single public IP for consistent firewall rules](#integrating-azure-web-app-with-a-vnet-to-use-a-single-public-ip-optional) or [Enable Private Endpoint](#steps-to-enable-private-endpoint-on-the-azure-web-app-optional) if required.
 
-### Deploy on Azure using using precompiled binaries (option 2)
+### Deploy on Azure using precompiled binaries (option 2)
 
 1. Download the .zip file (excluding source code.zip and source code.tar.gz) from the latest release available at `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility/releases`.
 2. Open PowerShell.
@@ -134,7 +134,10 @@ This option involves cloning the repository and building the C# project source f
 
 4. Open `https://<WebAppName>.azurewebsites.net` to access the tool.
 5. [Enable the use of a single public IP for consistent firewall rules](#integrating-azure-web-app-with-a-vnet-to-use-a-single-public-ip-optional) or [Enable Private Endpoint](#steps-to-enable-private-endpoint-on-the-azure-web-app-optional) if required.
-6. Keep in mind that [vNet injection](#1-enable-vnet-integration-for-the-web-app) is required if the source or target MongoDB servers are within a private vNet.
+
+### VNet Integration for MongoDB servers within a private Virtual Network (VNet)
+
+Accessing MongoDB servers within a VNet requires VNet injection. To enable connectivity to MongoDB servers located within a private VNet, ensure that [VNet integration](#1-enable-vnet-integration-for-the-web-app) is configured for your application.
 
 
 ## Integrating Azure Web App with a VNet to Use a Single Public IP (Optional)
@@ -374,6 +377,9 @@ Follow these steps to migrate data from an on-premises MongoDB VM. You can deplo
 3. Choose the migration tool: either "Mongo Dump/Restore" or "Mongo Driver".
 4. The job will automatically start if no other jobs are running.
 
+
+**Note:** For the Mongo Dump/Restore option, the Web App will download the mongo-tools from the URL specified in the Web App settings. Ensure that the Web App has access to this URL. If the Web App does not have internet access, you can download the mongo-tools zip file to your development machine, then copy it to the wwwroot folder inside the published folder before compressing it. Afterward, update the URL in the Web App settings to point to the Web App’s URL (e.g., https://<WebAppName>.azurewebsites.net/<zipfilename.zip>).
+
 #### Migrations modes
 
 Migrations can be done in two ways:
@@ -415,6 +421,9 @@ Change Stream Lag refers to the time difference between the timestamp of the las
 - Check if the transactions per second on the source are very high; in this case, you may need a larger app service plan or a dedicated web app for the collection.
 
 
+### Update Web App Settings
+1. From the home page  
+2. Select the **gear icon** to open the settings page.  
 
 ### Remove a Job
 1. From the home page  

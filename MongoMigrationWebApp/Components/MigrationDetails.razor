@@ -118,14 +118,14 @@
             return;
         }
 
-        var tmpSrcEndpoint = JobManager.ExtractHost(sourceConnectionString);
+        var tmpSrcEndpoint = Helper.ExtractHost(sourceConnectionString);
         if (tmpSrcEndpoint != sourceEndpoint && !newMode)
         {
             errorMessage = "Source endpoint doesn't match provided Source Connection String.";
             return;
         }
 
-        var tmpTgtEndpoint = JobManager.ExtractHost(targetConnectionString);
+        var tmpTgtEndpoint = Helper.ExtractHost(targetConnectionString);
         if (tmpTgtEndpoint != targetEndpoint && !newMode)
         {
             errorMessage = "Target endpoint doesn't match provided Target Connection String.";

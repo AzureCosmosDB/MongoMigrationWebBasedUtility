@@ -82,40 +82,14 @@ namespace MongoMigrationWebApp.Service
         {
             try
             {
-                System.IO.Directory.Delete($"{Path.GetTempPath()}mongodump", true);
+                System.IO.Directory.Delete($"{Path.GetTempPath()}mongodump\\{jobId}",true);
             }
-            catch { }
+            catch(Exception ex)
+            {
+            }
         }
 
-        public string ExtractHost(string connectionString)
-        {
-            if (string.IsNullOrWhiteSpace(connectionString))
-            {
-                return string.Empty;
-            }
-
-            try
-            {
-                // Find the starting position of the host (after "://")
-                var startIndex = connectionString.IndexOf("://") + 3;
-                if (startIndex < 3 || startIndex >= connectionString.Length)
-                    return string.Empty;
-
-                // Find the end position of the host (before "/" or "?")
-                var endIndex = connectionString.IndexOf("/", startIndex);
-                if (endIndex == -1)
-                    endIndex = connectionString.IndexOf("?", startIndex);
-                if (endIndex == -1)
-                    endIndex = connectionString.Length;
-
-                // Extract and return the host
-                return connectionString.Substring(startIndex, endIndex - startIndex).Split('@')[1];
-            }
-            catch
-            {
-                return string.Empty;
-            }
-        }
+        
     }
 }
 

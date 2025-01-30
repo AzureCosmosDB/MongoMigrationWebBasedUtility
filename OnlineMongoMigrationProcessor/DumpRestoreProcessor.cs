@@ -1,6 +1,7 @@
 ﻿using MongoDB.Bson;
 using MongoDB.Driver;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -108,6 +109,33 @@ namespace OnlineMongoMigrationProcessor
                             string args = $" --uri=\"{sourceConnectionString}\" --gzip --db={dbName} --collection={colName}  --out {folder}\\{i}.bson";
                             try
                             {
+                                //checking if there are too many downloads or disk full. Caused by limited uploads.
+                                bool continueDownlods;
+                                double pendingUploadsGB = 0;
+                                double freeSpaceGB = 0;
+                                while (true)
+                                {
+                                    continueDownlods = Helper.CanProceedWithDownloads(folder, _config.ChunkSizeInMb * 2, out pendingUploadsGB, out freeSpaceGB); 
+
+                                    if (!continueDownlods)
+                                    {
+                                        // invoke the uploader if not invoked already. let uploads cleanup the disk.
+                                        if (!restoreInvoked)
+                                        {
+                                            Log.WriteLine($"{dbName}.{colName} Uploader invoked");
+                                            Log.Save();
+                                            restoreInvoked = true;
+                                            Task.Run(() => Upload(item, targetConnectionString));
+                                        }
+
+                                        Log.WriteLine($"Disk space is running low, with only {freeSpaceGB}GB available. Pending jobs are using {pendingUploadsGB}GB of space. Free up disk space by deleting unwanted jobs. Alternatively, you can scale up tp Premium App Service plan, which will reset the WebApp. New downloads will resume in 5 minutes...", LogType.Error);
+                                        Log.Save();
+                                        Thread.Sleep(TimeSpan.FromMinutes(5));
+                                    }
+                                    else
+                                        break;
+                                }
+
                                 if (item.MigrationChunks.Count > 1)
                                 {
                                     var bounds = SamplePartitioner.GetChunkBounds(item.MigrationChunks[i].Gte, item.MigrationChunks[i].Lt, item.MigrationChunks[i].DataType);
@@ -134,6 +162,7 @@ namespace OnlineMongoMigrationProcessor
 
                                 if (Directory.Exists($"folder\\{i}.bson"))
                                     Directory.Delete($"folder\\{i}.bson", true);
+                                                                
 
                                 var task = Task.Run(() => _processExecutor.Execute(_jobs, item, item.MigrationChunks[i], initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongodump.exe", args));
                                 task.Wait(); // Wait for the task to complete
@@ -156,9 +185,12 @@ namespace OnlineMongoMigrationProcessor
                                 }
                                 else
                                 {
-                                    Log.WriteLine($"Attempt {dumpAttempts} {dbName}.{colName}-{i} of Dump Executor failed. Retrying in {backoff.TotalSeconds} seconds...");
-                                    Thread.Sleep(backoff);
-                                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+                                    if (!_executionCancelled)
+                                    {
+                                        Log.WriteLine($"Attempt {dumpAttempts} {dbName}.{colName}-{i} of Dump Executor failed. Retrying in {backoff.TotalSeconds} seconds...");
+                                        Thread.Sleep(backoff);
+                                        backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+                                    }
                                 }
                             }
                             catch (MongoExecutionTimeoutException ex)
@@ -176,13 +208,16 @@ namespace OnlineMongoMigrationProcessor
                                     ProcessRunning = false;
                                 }
 
-                                // Wait for the backoff duration before retrying
-                                Log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                Thread.Sleep(backoff);
-                                Log.Save();
+                                if (!_executionCancelled)
+                                {
+                                    // Wait for the backoff duration before retrying
+                                    Log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
+                                    Thread.Sleep(backoff);
+                                    Log.Save();
 
-                                // Exponentially increase the backoff duration
-                                backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+                                    // Exponentially increase the backoff duration
+                                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+                                }
                             }
                             catch (Exception ex)
                             {
@@ -242,7 +277,8 @@ namespace OnlineMongoMigrationProcessor
                 if (!item.RestoreComplete && !_executionCancelled)
                 {
                     for (int i = 0; i < item.MigrationChunks.Count; i++)
-                    {
+                    {                 
+
                         if (_executionCancelled) return;
 
                         if (!item.MigrationChunks[i].IsUploaded == true && item.MigrationChunks[i].IsDownloaded == true)
@@ -310,7 +346,10 @@ namespace OnlineMongoMigrationProcessor
                                     }
                                     else
                                     {
-                                        Log.WriteLine($"Attempt {restoreAttempts} {dbName}.{colName}-{i} of Restore Executor failed");
+                                        if (!_executionCancelled)
+                                        {
+                                            Log.WriteLine($"Attempt {restoreAttempts} {dbName}.{colName}-{i} of Restore Executor failed");
+                                        }
                                     }
                                 }
                                 catch (MongoExecutionTimeoutException ex)
@@ -319,8 +358,11 @@ namespace OnlineMongoMigrationProcessor
 
                                     if (restoreAttempts >= maxRetries)
                                     {
-                                        Log.WriteLine("Maximum retry attempts reached. Aborting operation.", LogType.Error);
-                                        Log.Save();
+                                        if (!_executionCancelled)
+                                        {
+                                            Log.WriteLine("Maximum retry attempts reached. Aborting operation.", LogType.Error);
+                                            Log.Save();
+                                        }
 
                                         _job.CurrentlyActive = false;
                                         _jobs?.Save();
@@ -328,18 +370,24 @@ namespace OnlineMongoMigrationProcessor
                                         ProcessRunning = false;
                                     }
 
-                                    // Wait for the backoff duration before retrying
-                                    Log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                    Thread.Sleep(backoff);
-                                    Log.Save();
+                                    if (!_executionCancelled)
+                                    {
+                                        // Wait for the backoff duration before retrying
+                                        Log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
+                                        Thread.Sleep(backoff);
+                                        Log.Save();
+                                    }
 
                                     // Exponentially increase the backoff duration
                                     backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
                                 }
                                 catch (Exception ex)
                                 {
-                                    Log.WriteLine(ex.ToString(), LogType.Error);
-                                    Log.Save();
+                                    if (!_executionCancelled)
+                                    {
+                                        Log.WriteLine(ex.ToString(), LogType.Error);
+                                        Log.Save();
+                                    }
 
                                     _job.CurrentlyActive = false;
                                     _jobs?.Save();

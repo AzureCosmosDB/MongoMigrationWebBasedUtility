@@ -175,18 +175,22 @@
 
             if (approved && (!_selectedMigrationJob.CurrentlyActive || !JobManager.MigrationWorker.IsProcessRunning()))
             {
+                
                 if (_selectedMigrationJob != null)
                 {
-                    // try
-                    // {
-                    //     Task.Run(() =>
-                    //        {
-                    //            JobManager.ClearJobFiles(_selectedMigrationJob.Id);
-                    //        });
-                    // }
-                    // catch { }
+                    string jobId = _selectedMigrationJob.Id;
+                    JobManager.GetMigrations().Remove(_selectedMigrationJob);
+
+                    try
+                    {
+                        Task.Run(() =>
+                           {
+                               JobManager.ClearJobFiles(jobId);
+                           });
+                    }
+                    catch { }
                 }
-                JobManager.GetMigrations().Remove(_selectedMigrationJob);
+                
             }
 
             _selectedMigrationJob = null;

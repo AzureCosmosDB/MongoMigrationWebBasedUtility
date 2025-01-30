@@ -129,7 +129,7 @@ namespace OnlineMongoMigrationProcessor
         private void ProcessErrorData(string data, string processType, MigrationUnit item, MigrationChunk chunk, double basePercent, double contribFactor, long targetCount, JobList jobList)
         {
             string percentValue = ExtractPercentage(data);
-            string docsProcessed = ExtractDocCount(data, string.Empty);
+            string docsProcessed = ExtractDocCount(data);
 
             double percent = 0;
             int count;
@@ -196,15 +196,19 @@ namespace OnlineMongoMigrationProcessor
             return string.Empty;
         }
 
-        private string ExtractDocCount(string input, string prefix)
+        private string ExtractDocCount(string input)
         {
-            // Regular expression to match the percentage value in the format (x.y%)
+
             var match = Regex.Match(input, @"\s+(\d+)$");
             if (match.Success)
             {
                 return match.Groups[1].Value; // Extract the doc count value 
             }
-            return string.Empty;
+            else
+            {
+                return ExtractDumpedDocumentCount(input).ToString();
+            }
+
         }
 
         public (int RestoredCount, int FailedCount) ExtractRestoreCounts(string input)
@@ -224,6 +228,8 @@ namespace OnlineMongoMigrationProcessor
         {
             // Define the regex pattern to match "done" followed by document count
             string pattern = @"\bdone dumping.*\((\d+)\s+documents\)";
+            //string pattern = @"\bdone dumping .*?\((\d+)\s+documents\)";
+
             var match = Regex.Match(input, pattern);
 
             // Check if the regex matched

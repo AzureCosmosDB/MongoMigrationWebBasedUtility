@@ -60,8 +60,8 @@ namespace OnlineMongoMigrationProcessor
             TimeSpan backoff = TimeSpan.FromSeconds(2);
 
             //encoding speacial characters
-            sourceConnectionString=MongoHelper.EncodeMongoPasswordInConnectionString(sourceConnectionString);
-            targetConnectionString = MongoHelper.EncodeMongoPasswordInConnectionString(targetConnectionString);
+            sourceConnectionString=Helper.EncodeMongoPasswordInConnectionString(sourceConnectionString);
+            targetConnectionString = Helper.EncodeMongoPasswordInConnectionString(targetConnectionString);
 
             if (Config == null)
             {
@@ -89,26 +89,20 @@ namespace OnlineMongoMigrationProcessor
                 .Select(item => item.Trim())
                 .ToArray();
 
-            if (_job.IsOnline)
-            {
-                Log.WriteLine("Checking if Change Stream is enabled on source");
-                Log.Save();
+            
 
-                var retValue = await MongoHelper.IsChangeStreamEnabledAsync(_job.SourceConnectionString);
-                if (!retValue)
+            if (_job.UseMongoDump)
+            {
+                _toolsLaunchFolder = await Helper.EnsureMongoToolsAvailableAsync(_toolsDestinationFolder, Config);
+                if (string.IsNullOrEmpty(_toolsLaunchFolder))
                 {
                     _job.CurrentlyActive = false;
-                    _job.IsCompleted = true;
+                    _job.IsCompleted = false;
                     _jobs?.Save();
 
                     _migrationProcessor?.StopProcessing();
                     return;
                 }
-            }
-
-            if (_job.UseMongoDump)
-            {
-                _toolsLaunchFolder = await Helper.EnsureMongoToolsAvailableAsync(_toolsDestinationFolder, Config);
             }
 
             bool continueProcessing = true;
@@ -147,6 +141,25 @@ namespace OnlineMongoMigrationProcessor
                     _sourceClient = new MongoClient(sourceConnectionString);
                     Log.WriteLine("Source Client Created");
                     Log.Save();
+
+
+                    if (_job.IsOnline)
+                    {
+                        Log.WriteLine("Checking if Change Stream is enabled on source");
+                        Log.Save();
+
+                        var retValue = await MongoHelper.IsChangeStreamEnabledAsync(_job.SourceConnectionString);
+                        if (!retValue)
+                        {
+                            _job.CurrentlyActive = false;
+                            _job.IsCompleted = true;
+                            _jobs?.Save();
+                            continueProcessing = false;
+
+                            _migrationProcessor?.StopProcessing();
+                            return;
+                        }
+                    }
 
                     _migrationProcessor?.StopProcessing();
                     _migrationProcessor = null;
@@ -273,6 +286,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 Log.WriteLine($"{databaseName}.{collectionName} Estimated Document Count: {documentCount}");
                 totalChunks = (int)Math.Min(SamplePartitioner.MaxSamples/SamplePartitioner.MaxSegments, documentCount / SamplePartitioner.MaxSamples);
+                totalChunks = Math.Max(1, totalChunks); // At least one chunk
                 totalChunks = Math.Max(totalChunks, totalChunksBySize);
                 minDocsInChunk = documentCount / totalChunks;               
             }
