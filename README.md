@@ -5,7 +5,7 @@ Streamline your migration to Azure Cosmos DB for MongoDB (vCore-based) with a to
 ## Key Features
 
 - **Flexible Migration Options**  
-  Supports both online and offline migrations to suit your business requirements. It can either use `mongodump` and `mongorestore` for data movement or employ the MongoDB driver to read data from the source and write it to the target. If you are migrating an on-premises MongoDB VM, consider using the [On-Premise Deployment](#deploy-mongomigrationwebapp-on-a-onpremise-windows-server) to install the app locally and transfer data to Azure. This eliminates the need to set up an Azure VPN.
+  Supports both online and offline migrations to suit your business requirements. It can either use `mongodump` and `mongorestore` for data movement or employ the MongoDB driver to read data from the source and write it to the target. If you are migrating an on-premises MongoDB VM, consider using the [On-Premises Deployment](#on-premises-deployment) to install the app locally and transfer data to Azure. This eliminates the need to set up an Azure VPN.
 
 - **User-Friendly Interface**  
   No steep learning curve—simply provide your connection strings and specify the collections to migrate.
@@ -270,7 +270,7 @@ If using a private DNS zone:
 3. Confirm that the web app is accessible only within the VNet.
 
 
-## On-Premise Deployment
+## On-Premises Deployment
 
 Follow these steps to migrate data from an on-premises MongoDB VM. You can deploy the utility by either compiling the source files or using the precompiled binaries.
 
