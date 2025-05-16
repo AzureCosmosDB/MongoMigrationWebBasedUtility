@@ -240,6 +240,7 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
+                bool failed = false;
                 int pageIndex = 0; // Current page index
                 List<BsonDocument> set = new List<BsonDocument>();
                 while (!cancellationToken.IsCancellationRequested)
@@ -298,6 +299,8 @@ namespace OnlineMongoMigrationProcessor
                         Log.WriteLine($"Batch processing error during document copy for segment [{migrationChunkIndex}.{segmentId}]. Details : {ex.ToString()}", LogType.Error);
                         Log.Save();
 
+                        failed=true;
+
                     }
                     finally
                     {
@@ -306,14 +309,17 @@ namespace OnlineMongoMigrationProcessor
                         // Increment the page index to get the next batch
                         pageIndex++;
                     }
+
+                    if (failed)
+                        break;
                 }
 
                 if(!cancellationToken.IsCancellationRequested)
                 {
-                    Log.WriteLine($"Document copy Operation completed for chunk [{migrationChunkIndex}.{segmentId}]");
+                    Log.WriteLine($"Document copy Operation completed for chunk [{migrationChunkIndex}.{segmentId}] with satus {!failed}");
                     Log.Save();
 
-                    segment.IsProcessed = true;
+                    segment.IsProcessed = !failed;
                     jobList.Save();
                 }      
                 
