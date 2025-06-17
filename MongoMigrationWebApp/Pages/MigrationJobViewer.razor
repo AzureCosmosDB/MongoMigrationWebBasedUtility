@@ -34,10 +34,27 @@
         @if (MigrationJob!=null && !MigrationJob.IsCancelled && !MigrationJob.IsCompleted && MigrationJob.CurrentlyActive && JobManager.MigrationWorker != null && JobManager.MigrationWorker.IsProcessRunning())
         {
             <button class="btn btn-primary mx-2" title="Pause Job" @onclick="PauseJob">Pause Job</button>
-            @if (MigrationJob.IsOnline)
-            {
-                <button class="btn btn-warning mx-2" title="Perform Cut Over" @onclick="CompleteJob" disabled="@(!CheckCutoverReadiness())">Cut Over</button>
+
+            @if (MigrationJob.IsOnline && MigrationJob.SyncBackAfterMigration )
+            {               
+                <button class="btn btn-primary dropdown-toggle" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" data-bs-toggle="dropdown" aria-expanded="false">Cut Over</button>
+
+                <ul class="dropdown-menu" aria-labelledby="performCutOverDropdown">
+                    <li><a class="dropdown-item" @onclick="InitReverseSyncJob">With Reverse Sync</a></li>
+                    <li><a class="dropdown-item" @onclick="CompleteJob">Without Reverse Sync</a></li>
+
+                </ul>
             }
+            else if (MigrationJob.IsOnline && !MigrationJob.SyncBackAfterMigration )
+            {
+                <button class="btn btn-primary" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" @onclick="CompleteJob">Cut Over</button>
+            }           
+
+            if(MigrationJob.IsOnline && MigrationJob.SyncBackAfterMigration && MigrationJob.ReverseSyncStarted)
+            {
+                <button class="btn btn-primary" title="Complete Job" @onclick="CompleteJob">Complete Job</button>
+            }
+
             <button class="btn btn-toolbar" title="Refresh" @onclick="Refresh">
                 <i class="bi bi-arrow-repeat"></i>
             </button>
@@ -124,7 +141,7 @@
     </tbody>
 </table>
 <div class="d-flex align-items-center mb-3">
-    <button class="btn btn-primary mx-2" title="Update Collections" @onclick="ManageCollections">Update Collections</button>
+    <button class="btn btn-primary mx-2" title="Update Collections" @onclick="ManageCollections" disabled="@(MigrationJob.ReverseSyncStarted)" >Update Collections</button>
 </div>
 
 <h5 class="pt-4">
@@ -205,7 +222,7 @@
 }
 @code {
 
-#pragma warning disable CS8602
+    #pragma warning disable CS8602
 #pragma warning disable CS8603
 #pragma warning disable CS8604
 
@@ -309,8 +326,11 @@
         if (MigrationJob?.MigrationUnits == null) return false;
         foreach (var item in MigrationJob.MigrationUnits)
         {
-            if (item.DumpPercent != 100 || item.RestorePercent != 100)
-                return false;
+            if (item.SourceStatus != CollectionStatus.NotFound)
+            {
+                if (item.DumpPercent != 100 || item.RestorePercent != 100)
+                    return false;
+            }
         }
         return true;
     }
@@ -356,7 +376,15 @@
             {
                 JobManager.DisposeLogs();
 #pragma warning disable CS4014
-                JobManager.MigrationWorker.StartMigrationAsync(MigrationJob, MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob.NameSpaces, true, MigrationJob.IsOnline);
+
+                if(MigrationJob.ReverseSyncStarted)
+                {
+                    JobManager.MigrationWorker.SyncBackToSourceAsync(MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob);
+                }
+                else
+                {
+                    JobManager.MigrationWorker.StartMigrationAsync(MigrationJob, MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob.NameSpaces, MigrationJob.UseMongoDump, MigrationJob.IsOnline);
+                }                
             });
         }
         else
@@ -403,6 +431,11 @@
     private bool IsJobRunning()
     {
         return JobManager.MigrationWorker.IsProcessRunning();
+    }
+
+    private void InitReverseSyncJob()
+    {
+      JobManager.MigrationWorker.SyncBackToSourceAsync(MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob);
     }
 
     private void CompleteJob()

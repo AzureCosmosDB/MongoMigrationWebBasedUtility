@@ -81,8 +81,6 @@ namespace OnlineMongoMigrationProcessor
             string version = string.Empty;
             try
             {
-                //// Connect to the MongoDB server
-                //var client = new MongoClient(connectionString);
                 var mongoUrl = new MongoUrl(connectionString);
                 var settings = MongoClientSettings.FromUrl(mongoUrl);
                 settings.ReadConcern = ReadConcern.Majority;
@@ -120,13 +118,13 @@ namespace OnlineMongoMigrationProcessor
                     // Check if the server is part of a replica set or a sharded cluster
                     if (isMasterResult.Contains("setName") || isMasterResult.GetValue("msg", "").AsString == "isdbgrid")
                     {
-                        Log.WriteLine("Change streams are enabled on source (replica set or sharded cluster).");
+                        Log.WriteLine("Change streams are enabled (replica set or sharded cluster).");
                         Log.Save();
                         return (IsCSEnabled: true, Version: version);
                     }
                     else
                     {
-                        Log.WriteLine("Change streams are not enabled on source (standalone server).", LogType.Error);
+                        Log.WriteLine("Change streams are not enabled (standalone server).", LogType.Error);
                         Log.Save();
                         return (IsCSEnabled: false, Version: version);
                     }

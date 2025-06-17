@@ -32,8 +32,15 @@
                     <div style="display: flex; gap: 1rem; align-items: center;">  
                         <label class="form-label">
                             <input type="checkbox" id="isOnline" disabled="@(!newMode)" @bind="isOnline" />
-                            Online
+                            Online Migration
                         </label>
+
+                        <label class="form-label">
+                            <input type="checkbox" id="enableReverseSynce" disabled="@(!newMode || !isOnline)" @bind="enableReverseSync" />
+                            Post Migration Reverse Sync
+                        </label>
+                </div>
+                <div class="mb-3">
                         <label class="form-label">                            
                             <input type="checkbox" id="copyIndex" disabled="@(!newMode)" @bind="appendMode" />
                             Append Mode
@@ -115,6 +122,7 @@
     [Parameter]
     public Func<string, Task<bool>> CheckNameExists { get; set; }
 
+    private bool enableReverseSync = false;// if the migration is online, reverse sync can be enabled
     private bool skipIndexes = false;// create indexes on Target
     private bool appendMode = false;// if the target collection exists, it will be deleted
     private string errorMessage = string.Empty;
@@ -200,7 +208,8 @@
                 UseMongoDump = useMongoDump,
                 IsSimulatedRun = isSimulatedRun,
                 SkipIndexes=skipIndexes,
-                AppendMode=appendMode
+                AppendMode=appendMode,                
+                SyncBackAfterMigration = (enableReverseSync && isOnline) ? true : false
             };
         await OnSubmit.InvokeAsync(job);
     }

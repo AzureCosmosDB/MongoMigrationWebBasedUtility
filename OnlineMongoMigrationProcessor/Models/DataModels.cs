@@ -91,6 +91,8 @@ namespace OnlineMongoMigrationProcessor
         public bool IsSimulatedRun { get; set; }
         public bool SkipIndexes { get; set; }
         public bool AppendMode { get; set; }
+        public bool SyncBackAfterMigration { get; set; }
+        public bool ReverseSyncStarted { get; set; }
         public List<MigrationUnit>? MigrationUnits { get; set; }
     }
 
@@ -111,6 +113,11 @@ namespace OnlineMongoMigrationProcessor
         public BsonValue? ResumeDocumentId { get; set; }
         public DateTime? ChangeStreamStartedOn { get; set; }
         public DateTime CursorUtcTimestamp { get; set; }
+
+        public string? ReverseSyncResumeToken { get; set; }
+        public DateTime? ReverseSyncChangeStreamStartedOn { get; set; }
+        public DateTime ReverseSyncCursorUtcTimestamp { get; set; }
+
         public double DumpPercent { get; set; }
         public double RestorePercent { get; set; }
         public bool DumpComplete { get; set; }

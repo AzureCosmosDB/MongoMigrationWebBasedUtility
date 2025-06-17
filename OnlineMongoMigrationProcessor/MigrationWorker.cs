@@ -29,6 +29,8 @@ namespace OnlineMongoMigrationProcessor
         private MongoClient? _sourceClient;
         private IMigrationProcessor _migrationProcessor;
 
+        private MongoChangeStreamProcessor _syncBackToSource;
+
         public MigrationSettings? Config { get; set; }
         public string? CurrentJobId { get; set; }
 
@@ -49,11 +51,18 @@ namespace OnlineMongoMigrationProcessor
         }
 
         public void StopMigration()
-        {
+        {           
             _migrationCancelled = true;
             _migrationProcessor?.StopProcessing();
             _migrationProcessor.ProcessRunning = false;
             _migrationProcessor = null;
+
+            if(_syncBackToSource!= null)
+            {
+                _syncBackToSource.ExecutionCancelled = true;
+                _syncBackToSource = null;
+            }
+
         }
 
         public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, bool doBulkCopy, bool trackChangeStreams)
@@ -74,6 +83,7 @@ namespace OnlineMongoMigrationProcessor
                 Config = new MigrationSettings();
                 Config.Load();
             }
+
 
             try
             {
@@ -168,7 +178,7 @@ namespace OnlineMongoMigrationProcessor
 
                     if (_job.IsOnline)
                     {
-                        Log.WriteLine("Checking if Change Stream is enabled on source");
+                        Log.WriteLine("Checking if Change Stream is enabled on Source");
                         Log.Save();
 
 
@@ -185,7 +195,8 @@ namespace OnlineMongoMigrationProcessor
 
                             _migrationProcessor?.StopProcessing();
                             return;
-                        }
+                        }                        
+
                     }
 
                     _migrationProcessor?.StopProcessing();
@@ -230,11 +241,31 @@ namespace OnlineMongoMigrationProcessor
 
 
 
-                                if (!_job.UseMongoDump && !job.IsSimulatedRun && !job.AppendMode)
+                                if (!job.IsSimulatedRun && !job.AppendMode)
                                 {
                                     var database = _sourceClient.GetDatabase(unit.DatabaseName);
                                     var collection = database.GetCollection<BsonDocument>(unit.CollectionName);
                                     await MongoHelper.DeleteAndCopyIndexesAsync(targetConnectionString, collection, job.SkipIndexes);
+
+                                    if (_job.SyncBackAfterMigration && !job.IsSimulatedRun && _job.IsOnline)
+                                    {
+                                        Log.WriteLine("Checking if Change Stream is enabled on Target");
+                                        Log.Save();
+
+
+                                        var retValue = await MongoHelper.IsChangeStreamEnabledAsync(_job.TargetConnectionString, _job.MigrationUnits[0]);
+
+                                        if (!retValue.IsCSEnabled)
+                                        {
+                                            _job.CurrentlyActive = false;
+                                            _job.IsCompleted = true;
+                                            _jobs?.Save();
+                                            continueProcessing = false;
+
+                                            _migrationProcessor?.StopProcessing();
+                                            return;
+                                        }
+                                    }
                                 }                                
                             }
                            
@@ -314,6 +345,94 @@ namespace OnlineMongoMigrationProcessor
 
                 _migrationProcessor?.StopProcessing();
 
+            }
+        }
+
+
+        public async void SyncBackToSourceAsync(string sourceConnectionString, string targetConnectionString, MigrationJob job)
+        {
+            int maxRetries = 10;
+            int attempts = 0;
+
+            TimeSpan backoff = TimeSpan.FromSeconds(2);
+            bool continueProcessing = true;
+
+            var sourceClient = new MongoClient(sourceConnectionString);
+            var targetClient = new MongoClient(targetConnectionString);
+
+            _syncBackToSource = new MongoChangeStreamProcessor(sourceClient, targetClient, _jobs, Config);
+
+            job.ReverseSyncStarted = true;
+            _jobs.Save();
+
+            while (attempts < maxRetries && !_migrationCancelled && continueProcessing)
+            {
+                attempts++;
+                try
+                {               
+                    foreach (var migrationUnit in _job.MigrationUnits)
+                    {
+                        if (_migrationCancelled) break;
+
+                        if (migrationUnit.SourceStatus == CollectionStatus.OK)
+                        {
+                            if (await MongoHelper.CheckCollectionExists(_sourceClient, migrationUnit.DatabaseName, migrationUnit.CollectionName))
+                            {
+                                if (await MongoHelper.CheckCollectionExists(targetClient, migrationUnit.DatabaseName, migrationUnit.CollectionName))
+                                {                                   
+                                    Task.Run(() => _syncBackToSource.CollectionSyncBackAsync(_job, migrationUnit));
+                                }
+                                else
+                                {
+                                    migrationUnit.SourceStatus = CollectionStatus.NotFound;
+                                    Log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist or has zero records", LogType.Error);
+                                    Log.Save();
+                                }
+                            }
+                            else
+                            {
+                                migrationUnit.SourceStatus = CollectionStatus.NotFound;
+                                Log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist or has zero records", LogType.Error);
+                                Log.Save();
+                            }
+                        }
+                    }
+                    continueProcessing = false;
+                }
+                catch (MongoExecutionTimeoutException ex)
+                {
+                    Log.WriteLine($"Attempt {attempts} failed due to timeout: {ex.ToString()}. Details:{ex.ToString()}", LogType.Error);
+
+                    Log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
+                    Thread.Sleep(backoff);
+                    Log.Save();
+
+                    continueProcessing = true;
+                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+                }
+                catch (Exception ex)
+                {
+                    Log.WriteLine($"Attempt {attempts} failed: {ex.ToString()}. Details:{ex.ToString()}", LogType.Error);
+
+                    Log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
+                    Thread.Sleep(backoff);
+                    Log.Save();
+
+                    continueProcessing = true;
+                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
+
+                }
+            }
+            if (attempts == maxRetries)
+            {
+                Log.WriteLine("Maximum retry attempts reached. Aborting operation.", LogType.Error);
+                Log.Save();
+
+                _job.CurrentlyActive = false;
+                _jobs?.Save();
+                continueProcessing = false;
+
+                _migrationProcessor?.StopProcessing();
             }
         }
 
