@@ -35,25 +35,24 @@
         {
             <button class="btn btn-primary mx-2" title="Pause Job" @onclick="PauseJob">Pause Job</button>
 
-            @if (MigrationJob.IsOnline && MigrationJob.SyncBackAfterMigration )
+            @if (MigrationJob.IsOnline && MigrationJob.SyncBackAfterMigration && !MigrationJob.ReverseSyncStarted)
             {               
-                <button class="btn btn-primary dropdown-toggle" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" data-bs-toggle="dropdown" aria-expanded="false">Cut Over</button>
+                <button class="btn btn-warning dropdown-toggle" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" data-bs-toggle="dropdown" aria-expanded="false">Cut Over</button>
 
                 <ul class="dropdown-menu" aria-labelledby="performCutOverDropdown">
                     <li><a class="dropdown-item" @onclick="InitReverseSyncJob">With Reverse Sync</a></li>
                     <li><a class="dropdown-item" @onclick="CompleteJob">Without Reverse Sync</a></li>
 
                 </ul>
+            }                 
+            else if(MigrationJob.IsOnline && MigrationJob.SyncBackAfterMigration && MigrationJob.ReverseSyncStarted)
+            {
+                <button class="btn btn-warning" title="Complete Job" @onclick="CompleteJob">Complete Job</button>
             }
             else if (MigrationJob.IsOnline && !MigrationJob.SyncBackAfterMigration )
             {
-                <button class="btn btn-primary" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" @onclick="CompleteJob">Cut Over</button>
-            }           
-
-            if(MigrationJob.IsOnline && MigrationJob.SyncBackAfterMigration && MigrationJob.ReverseSyncStarted)
-            {
-                <button class="btn btn-primary" title="Complete Job" @onclick="CompleteJob">Complete Job</button>
-            }
+                <button class="btn btn-warning" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" @onclick="CompleteJob">Cut Over</button>
+            }  
 
             <button class="btn btn-toolbar" title="Refresh" @onclick="Refresh">
                 <i class="bi bi-arrow-repeat"></i>
@@ -71,18 +70,22 @@
 
 @if (_migrationDetailsPopUpOpen && MigrationJob != null)
 {
-    <MongoMigrationWebApp.Components.MigrationDetails NewMode=false Name="@MigrationJob?.Name"
-    IsOnline="@MigrationJob.IsOnline"
-    SourceEndpoint="@MigrationJob.SourceEndpoint"
-    TargetEndpoint="@MigrationJob.TargetEndpoint"
-    NameSpaces="@MigrationJob.NameSpaces"
+    <MongoMigrationWebApp.Components.MigrationDetails NewMode=false 
+    Job="@MigrationJob"    
     OnSubmit="@OnMigrationDetailsPopUpSubmit"
     CheckNameExists="CheckIfNameExistsAsync" />
 }
 
 @if (_yesNoDialogOpen)
 {
-    <YesNoDialog Type="YesNoDialog.Category.CutoverNot" Caption="Confirmation Required"  Message="@_message" OnClose="@YesNoDialogSubmit"  />
+    if(MigrationJob.ReverseSyncStarted)
+    {
+        <YesNoDialog Type="YesNoDialog.Category.CompleteNot" Caption="Confirmation Required"  Message="@_message" OnClose="@YesNoDialogSubmit"  />
+    }
+    else 
+    {
+        <YesNoDialog Type="YesNoDialog.Category.CompleteNot" Caption="Confirmation Required"  Message="@_message" OnClose="@YesNoDialogSubmit"  />
+    }
 }
 
 @if (_manageCollectionDialogOpen && MigrationJob != null)
@@ -377,9 +380,9 @@
                 JobManager.DisposeLogs();
 #pragma warning disable CS4014
 
-                if(MigrationJob.ReverseSyncStarted)
+                if(MigrationJob.ReverseSyncStarted && !MigrationJob.IsSimulatedRun)
                 {
-                    JobManager.MigrationWorker.SyncBackToSourceAsync(MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob);
+                    JobManager.MigrationWorker.SyncBackToSource(MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob);
                 }
                 else
                 {
@@ -435,12 +438,19 @@
 
     private void InitReverseSyncJob()
     {
-      JobManager.MigrationWorker.SyncBackToSourceAsync(MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob);
+      JobManager.MigrationWorker.SyncBackToSource(MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob);
     }
 
     private void CompleteJob()
     {
-        _message = "You can't resume a job after its cutover. Are you sure you want to cutover?";
+        if(MigrationJob.ReverseSyncStarted)
+        {
+            _message = "You can't resume a job after its completed. Are you sure you want to complete the job?";
+        }
+        else
+        {
+            _message = "You can't resume a job after its cutover. Are you sure you want to cutover?";
+        }        
         _yesNoDialogOpen = true;
     }
 

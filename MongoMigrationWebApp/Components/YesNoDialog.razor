@@ -18,6 +18,10 @@
                         <button type="button" class="btn btn-primary" @onclick=@Ok>Cutover</button>
                         <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Cutover</button>
                         break;
+                    case Category.CompleteNot:
+                        <button type="button" class="btn btn-primary" @onclick=@Ok>Complete</button>
+                        <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Complete</button>
+                        break;
                     case Category.DeleteNot:
                         <button type="button" class="btn btn-primary" @onclick=@Ok>Delete</button>
                         <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Delete</button>
@@ -48,6 +52,7 @@
     {
         Okay,
         CutoverNot,
+        CompleteNot,
         DeleteNot
     }
 }

@@ -304,7 +304,11 @@ namespace OnlineMongoMigrationProcessor
                         if (!item.MigrationChunks[i].IsUploaded == true && item.MigrationChunks[i].IsDownloaded == true)
                         {
                             string args = $" --uri=\"{targetConnectionString}\" --gzip {folder}\\{i}.bson";
+                            args = $"{args} --noIndexRestore"; // No index to create.
 
+                            //index creation is now done by worker, so no need to restore indexes or drop collection
+
+                            /*
                             // If first item, drop collection, else append. Also No drop in AppendMode
                             if (i == 0 && !_job.AppendMode)
                             {
@@ -318,7 +322,7 @@ namespace OnlineMongoMigrationProcessor
                             {
                                 args = $"{args} --noIndexRestore"; // No index to create. Index restore only for 1st chunk.
 
-                            }
+                            }*/
 
                             double initialPercent = ((double)100 / item.MigrationChunks.Count) * i;
                             double contributionFactor = (double)item.MigrationChunks[i].DumpQueryDocCount / Math.Max(item.ActualDocCount, item.EstimatedDocCount);

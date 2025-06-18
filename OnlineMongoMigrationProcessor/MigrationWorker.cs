@@ -211,6 +211,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                     _migrationProcessor.ProcessRunning = true;
 
+                    bool checkedCS = false;
                     foreach (var unit in _job.MigrationUnits)
                     {
                         if (_migrationCancelled) return;
@@ -247,14 +248,13 @@ namespace OnlineMongoMigrationProcessor
                                     var collection = database.GetCollection<BsonDocument>(unit.CollectionName);
                                     await MongoHelper.DeleteAndCopyIndexesAsync(targetConnectionString, collection, job.SkipIndexes);
 
-                                    if (_job.SyncBackAfterMigration && !job.IsSimulatedRun && _job.IsOnline)
+                                    if (_job.SyncBackAfterMigration && !job.IsSimulatedRun && _job.IsOnline && !checkedCS)
                                     {
-                                        Log.WriteLine("Checking if Change Stream is enabled on Target");
+                                        Log.WriteLine("Checking if Change Stream is enabled on Target for Reverse Sync");
                                         Log.Save();
 
-
-                                        var retValue = await MongoHelper.IsChangeStreamEnabledAsync(_job.TargetConnectionString, _job.MigrationUnits[0]);
-
+                                        var retValue = await MongoHelper.IsChangeStreamEnabledAsync(_job.TargetConnectionString, unit);
+                                        checkedCS = true;
                                         if (!retValue.IsCSEnabled)
                                         {
                                             _job.CurrentlyActive = false;
@@ -281,6 +281,7 @@ namespace OnlineMongoMigrationProcessor
                     _jobs?.Save();
                     Log.Save();
 
+                    
                     foreach (var migrationUnit in _job.MigrationUnits)
                     {
                         if (_migrationCancelled) break;
@@ -349,7 +350,7 @@ namespace OnlineMongoMigrationProcessor
         }
 
 
-        public async void SyncBackToSourceAsync(string sourceConnectionString, string targetConnectionString, MigrationJob job)
+        public void SyncBackToSource(string sourceConnectionString, string targetConnectionString, MigrationJob job)
         {
             int maxRetries = 10;
             int attempts = 0;
@@ -360,6 +361,7 @@ namespace OnlineMongoMigrationProcessor
             var sourceClient = new MongoClient(sourceConnectionString);
             var targetClient = new MongoClient(targetConnectionString);
 
+            _syncBackToSource = null;
             _syncBackToSource = new MongoChangeStreamProcessor(sourceClient, targetClient, _jobs, Config);
 
             job.ReverseSyncStarted = true;
@@ -370,31 +372,13 @@ namespace OnlineMongoMigrationProcessor
                 attempts++;
                 try
                 {               
-                    foreach (var migrationUnit in _job.MigrationUnits)
+                    foreach (var migrationUnit in job.MigrationUnits)
                     {
                         if (_migrationCancelled) break;
 
                         if (migrationUnit.SourceStatus == CollectionStatus.OK)
-                        {
-                            if (await MongoHelper.CheckCollectionExists(_sourceClient, migrationUnit.DatabaseName, migrationUnit.CollectionName))
-                            {
-                                if (await MongoHelper.CheckCollectionExists(targetClient, migrationUnit.DatabaseName, migrationUnit.CollectionName))
-                                {                                   
-                                    Task.Run(() => _syncBackToSource.CollectionSyncBackAsync(_job, migrationUnit));
-                                }
-                                else
-                                {
-                                    migrationUnit.SourceStatus = CollectionStatus.NotFound;
-                                    Log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist or has zero records", LogType.Error);
-                                    Log.Save();
-                                }
-                            }
-                            else
-                            {
-                                migrationUnit.SourceStatus = CollectionStatus.NotFound;
-                                Log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist or has zero records", LogType.Error);
-                                Log.Save();
-                            }
+                        {                                  
+                           Task.Run(() => _syncBackToSource.CollectionSyncBackAsync(job, migrationUnit));                           
                         }
                     }
                     continueProcessing = false;
@@ -428,11 +412,14 @@ namespace OnlineMongoMigrationProcessor
                 Log.WriteLine("Maximum retry attempts reached. Aborting operation.", LogType.Error);
                 Log.Save();
 
-                _job.CurrentlyActive = false;
+                job.CurrentlyActive = false;
                 _jobs?.Save();
                 continueProcessing = false;
 
                 _migrationProcessor?.StopProcessing();
+
+                _syncBackToSource.ExecutionCancelled = true;
+                _syncBackToSource = null;
             }
         }
 

@@ -97,20 +97,20 @@
     [Parameter]
     public bool newMode { get; set; }
 
-    [Parameter]
-    public string name { get; set; } = string.Empty;
+    // [Parameter]
+    // public string name { get; set; } = string.Empty;
 
     [Parameter]
-    public bool isOnline { get; set; }
+    public MigrationJob Job { get; set; }
 
-    [Parameter]
-    public string sourceEndpoint { get; set; } = string.Empty;
+    // [Parameter]
+    // public string sourceEndpoint { get; set; } = string.Empty;
 
-    [Parameter]
-    public string targetEndpoint { get; set; } = string.Empty;
+    // [Parameter]
+    // public string targetEndpoint { get; set; } = string.Empty;
 
-    [Parameter]
-    public string namespaces { get; set; } = string.Empty;
+    // [Parameter]
+    // public string namespaces { get; set; } = string.Empty;
 
     public string sourceConnectionString { get; set; } = string.Empty;
 
@@ -122,21 +122,59 @@
     [Parameter]
     public Func<string, Task<bool>> CheckNameExists { get; set; }
 
-    private bool enableReverseSync = false;// if the migration is online, reverse sync can be enabled
-    private bool skipIndexes = false;// create indexes on Target
-    private bool appendMode = false;// if the target collection exists, it will be deleted
+
     private string errorMessage = string.Empty;
     private bool useMongoDump = true; // Variable to track the selected value
     private string selectedOption = "Use MongoDump and MongoRestore"; // Default dropdown value
     private bool isSimulatedRun = false; // Variable to track the dummy run option
     private bool AllowMongoDump => Configuration.GetValue<bool>("AllowMongoDump");
-    
+    private bool isOnline = true; // Default to online migration
+    private bool enableReverseSync = false;// if the migration is online, reverse sync can be enabled
+    private bool skipIndexes = false;// create indexes on Target
+    private bool appendMode = false;// if the target collection exists, it will be deleted
+    private string namespaces = string.Empty;   // Comma-separated list of namespaces to migrate
+    private string name = string.Empty; // Name of the migration job
+    private string sourceEndpoint = string.Empty;   // Source endpoint extracted from the connection string
+    private string targetEndpoint = string.Empty;   // Target endpoint extracted from the connection string 
+
     private void OnSelectionChanged(ChangeEventArgs e)
     {
         selectedOption = e.Value.ToString();
         useMongoDump = selectedOption == "Use MongoDump and MongoRestore"; // Set useMongoDump based on selection
     }
 
+
+    protected override void OnInitialized()
+    {
+        if (newMode)
+        {
+            name = string.Empty;
+            sourceConnectionString = string.Empty;
+            targetConnectionString = string.Empty;
+            namespaces = string.Empty;
+            isOnline = false;
+            enableReverseSync = false;
+            useMongoDump = true;
+            isSimulatedRun = false;
+            skipIndexes = false;
+            appendMode = false;
+        }
+        else
+        {
+            name = Job.Name;
+            sourceConnectionString = Job.SourceConnectionString;
+            targetConnectionString = Job.TargetConnectionString;
+            namespaces = Job.NameSpaces;
+            sourceEndpoint = Job.SourceEndpoint;
+            targetEndpoint = Job.TargetEndpoint;
+            isOnline = Job.IsOnline;
+            enableReverseSync = Job.SyncBackAfterMigration && isOnline && !Job.IsSimulatedRun; // Reverse sync only if online and not a simulated run
+            useMongoDump = Job.UseMongoDump;
+            isSimulatedRun = Job.IsSimulatedRun;
+            skipIndexes = Job.SkipIndexes;
+            appendMode = Job.AppendMode;
+        }
+    }
     private async void HandleSubmit()
     {
        
@@ -209,7 +247,7 @@
                 IsSimulatedRun = isSimulatedRun,
                 SkipIndexes=skipIndexes,
                 AppendMode=appendMode,                
-                SyncBackAfterMigration = (enableReverseSync && isOnline) ? true : false
+                SyncBackAfterMigration = (enableReverseSync && isOnline && !isSimulatedRun) ? true : false
             };
         await OnSubmit.InvokeAsync(job);
     }

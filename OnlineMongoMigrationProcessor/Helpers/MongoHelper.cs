@@ -78,6 +78,7 @@ namespace OnlineMongoMigrationProcessor
 
         public static async Task<(bool IsCSEnabled, string Version)> IsChangeStreamEnabledAsync(string connectionString, MigrationUnit unit)
         {
+            
             string version = string.Empty;
             try
             {
@@ -97,7 +98,8 @@ namespace OnlineMongoMigrationProcessor
                         FullDocument = ChangeStreamFullDocumentOption.UpdateLookup
                     };
                     var cursor = await collection.WatchAsync(options) ;
-
+                    Log.WriteLine("Change streams are enabled on vCore.");
+                    Log.Save();
                     return (IsCSEnabled: true, Version: "");
                 }
                 else

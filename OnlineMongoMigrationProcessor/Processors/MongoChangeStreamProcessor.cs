@@ -2,6 +2,7 @@
 using MongoDB.Driver;
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Reflection.Metadata;
@@ -270,7 +271,22 @@ namespace OnlineMongoMigrationProcessor
                             break;
                         case ChangeStreamOperationType.Update:
                         case ChangeStreamOperationType.Replace:
-                            targetCollection.ReplaceOne(filter, result, new ReplaceOptions { IsUpsert = true });
+
+                            if (result == null || result.IsBsonNull)
+                            {
+                                Log.WriteLine($"No Document found. Deleting document with _id {documentId} for {opType}.");
+                                var deleteTTLFilter = Builders<BsonDocument>.Filter.Eq("_id", documentId);
+                                try
+                                {
+                                    targetCollection.DeleteOne(deleteTTLFilter);
+                                }
+                                catch
+                                { }
+                            }
+                            else
+                            {
+                                targetCollection.ReplaceOne(filter, result, new ReplaceOptions { IsUpsert = true });
+                            }
                             break;
                         case ChangeStreamOperationType.Delete:
                             var deleteFilter = Builders<BsonDocument>.Filter.Eq("_id", documentId);
@@ -302,6 +318,10 @@ namespace OnlineMongoMigrationProcessor
 
         private bool ProcessCursor(MigrationJob job, ChangeStreamDocument<BsonDocument> change, IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor, IMongoCollection<BsonDocument> targetCollection, MigrationUnit item, ref int counter, bool reverseSync=false)
         {
+            string reversePrefix = string.Empty;
+            if(reverseSync)
+                reversePrefix = "[R] ";
+
             try
             {
                 if (!job.SourceServerVersion.StartsWith("3") && change.ClusterTime!=null)
@@ -311,8 +331,8 @@ namespace OnlineMongoMigrationProcessor
                     var timestamp = change.ClusterTime; // Convert BsonTimestamp to DateTime
 
                     // Output change details to the console
-                    Log.AddVerboseMessage($"{change.OperationType} operation detected in {targetCollection.CollectionNamespace} for _id: {change.DocumentKey["_id"]} having TS (UTC): {MongoHelper.BsonTimestampToUtcDateTime(timestamp)}");
-                    ProcessChange(change, targetCollection,job.IsSimulatedRun);
+                    Log.AddVerboseMessage($"{reversePrefix}{change.OperationType} operation detected in {targetCollection.CollectionNamespace} for _id: {change.DocumentKey["_id"]} having TS (UTC): {MongoHelper.BsonTimestampToUtcDateTime(timestamp)}");
+                    ProcessChange(change, targetCollection,job.IsSimulatedRun, reverseSync);
                     if(!reverseSync)
                         item.CursorUtcTimestamp = MongoHelper.BsonTimestampToUtcDateTime(timestamp);
                     else
@@ -324,8 +344,8 @@ namespace OnlineMongoMigrationProcessor
                     var timestamp = change.WallTime; 
 
                     // Output change details to the console
-                    Log.AddVerboseMessage($"{change.OperationType} operation detected in {targetCollection.CollectionNamespace} for _id: {change.DocumentKey["_id"]} having TS (UTC): {timestamp.Value}");
-                    ProcessChange(change, targetCollection, job.IsSimulatedRun);
+                    Log.AddVerboseMessage($"{reversePrefix}{change.OperationType} operation detected in {targetCollection.CollectionNamespace} for _id: {change.DocumentKey["_id"]} having TS (UTC): {timestamp.Value}");
+                    ProcessChange(change, targetCollection, job.IsSimulatedRun, reverseSync);
                     if (!reverseSync)
                         item.CursorUtcTimestamp = timestamp.Value;
                     else
@@ -334,8 +354,8 @@ namespace OnlineMongoMigrationProcessor
                 else
                 {
                     // Output change details to the console
-                    Log.AddVerboseMessage($"{change.OperationType} operation detected in {targetCollection.CollectionNamespace} for _id: {change.DocumentKey["_id"]}");
-                    ProcessChange(change, targetCollection, job.IsSimulatedRun);
+                    Log.AddVerboseMessage($"{reversePrefix}{change.OperationType} operation detected in {targetCollection.CollectionNamespace} for _id: {change.DocumentKey["_id"]}");
+                    ProcessChange(change, targetCollection, job.IsSimulatedRun, reverseSync);
                 }
                 item.ResumeToken = cursor.Current.FirstOrDefault().ResumeToken.ToJson();
                 _jobs?.Save(); // persists state
@@ -354,17 +374,21 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                Log.WriteLine($"Error processing cursor. Details : {ex.ToString()}", LogType.Error);
+                Log.WriteLine($"Error processing cursor. {reversePrefix}Details : {ex.ToString()}", LogType.Error);
                 Log.Save();
                 return false;
             }
         }
 
 
-        private void ProcessChange(ChangeStreamDocument<BsonDocument> change, IMongoCollection<BsonDocument> targetCollection, bool isWriteSimulated)
+        private void ProcessChange(ChangeStreamDocument<BsonDocument> change, IMongoCollection<BsonDocument> targetCollection, bool isWriteSimulated, bool reverseSync)
         {
             if (isWriteSimulated)
                 return;
+
+            string reversePrefix = string.Empty;
+            if (reverseSync)
+                reversePrefix = "[R] ";
 
             try
             {
@@ -376,7 +400,21 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Update:
                     case ChangeStreamOperationType.Replace:
                         var filter = Builders<BsonDocument>.Filter.Eq("_id", change.DocumentKey["_id"]);
-                        targetCollection.ReplaceOne(filter, change.FullDocument, new ReplaceOptions { IsUpsert = true });
+                        if (change.FullDocument == null || change.FullDocument.IsBsonNull)
+                        {
+                            Log.WriteLine($"No Document found. Deleting document with _id {change.DocumentKey["_id"]} for {change.OperationType}.");
+                            var deleteTTLFilter = Builders<BsonDocument>.Filter.Eq("_id", change.DocumentKey["_id"]);
+                            try
+                            {
+                                targetCollection.DeleteOne(deleteTTLFilter);
+                            }
+                            catch
+                            { }
+                        }
+                        else
+                        {
+                            targetCollection.ReplaceOne(filter, change.FullDocument, new ReplaceOptions { IsUpsert = true });
+                        }
                         break;
                     case ChangeStreamOperationType.Delete:
                         var deleteFilter = Builders<BsonDocument>.Filter.Eq("_id", change.DocumentKey["_id"]);
@@ -393,7 +431,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                Log.WriteLine($"Error processing operation {change.OperationType} on {targetCollection.CollectionNamespace} with _id {change.DocumentKey["_id"]}. Details : {ex.ToString()}", LogType.Error);
+                Log.WriteLine($"Error processing operation {reversePrefix}{change.OperationType} on {targetCollection.CollectionNamespace} with _id {change.DocumentKey["_id"]}. Details : {ex.ToString()}", LogType.Error);
                 Log.Save();
             }
         }
