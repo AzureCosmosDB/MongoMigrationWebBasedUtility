@@ -339,7 +339,7 @@ Follow these steps to migrate data from an on-premises MongoDB VM. You can deplo
         - Ensure the web.config file is present in the root of your app directory. This file is critical for configuring the IIS hosting.
       or
     - Use Source Files
-        1. Install [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet/6.0)
+        1. Install [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet/9.0)
         2. Clone/Download the repository: `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility`
         3. Open PowerShell.
         4. Navigate to the cloned project folder.
@@ -494,7 +494,7 @@ Time Since Last Change refers to the time difference between the timestamp of th
 - Monitor for new write operations on the source. If no new changes are detected, the lag will increase. However, this is not an issue since all changes have already been processed.
 - Check if the transactions per second on the source are very high; in this case, you may need a larger app service plan or a dedicated web app for the collection.
 
-### Time Since Sync Back
+#### Time Since Sync Back
 
 Time Since Sync Back indicates the time elapsed between the most recent Sync Back operation and the current time. This metric becomes relevant after the application cutover, once the target account begins receiving traffic.
 
