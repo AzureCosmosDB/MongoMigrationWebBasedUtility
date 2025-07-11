@@ -76,7 +76,7 @@ namespace OnlineMongoMigrationProcessor
             sourceConnectionString = Helper.EncodeMongoPasswordInConnectionString(sourceConnectionString);
             targetConnectionString = Helper.EncodeMongoPasswordInConnectionString(targetConnectionString);
 
-            targetConnectionString = Helper.UpdateAppName(targetConnectionString, "MSFTMongoWebMigration-" + Guid.NewGuid().ToString());
+            targetConnectionString = Helper.UpdateAppName(targetConnectionString, "MSFTMongoWebMigration-" + job.Id);
 
             if (Config == null)
             {

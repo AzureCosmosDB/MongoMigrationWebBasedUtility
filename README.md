@@ -110,15 +110,17 @@ This option involves cloning the repository and building the C# project source f
 
 ### Deploy on Azure using precompiled binaries (option 2)
 
+1. Clone/Download the repository: `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility`
 1. Download the .zip file (excluding source code.zip and source code.tar.gz) from the latest release available at `https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility/releases`.
-2. Open PowerShell.
-3. Run the following commands in PowerShell:
+1. Open PowerShell.
+1. Navigate to the cloned project folder.
+1. Run the following commands in PowerShell:
 
    ```powershell
    # Variables to be updated
    $resourceGroupName = <Replace with Existing Resource Group Name>
    $webAppName = <Replace with Web App Name>
-   $zipPath = <Replace with full path of downloaded zip file on local>
+   $zipPath = <Replace with full path of downloaded latest release zip file on local>
 
    # Login to Azure
    az login
@@ -411,8 +413,10 @@ For online jobs, ensure that the oplog retention size of the source MongoDB is l
 The below script lists all authorized databases and collections in the format `dbname.collectionname`, excluding system collections and databases you don’t have access to.
 
 ```javascript
-// Get input from args or global input variable
-const input = typeof input !== "undefined" ? input : args[0];
+// Use global `input` if it exists
+const userInput = typeof input !== "undefined" ? input : null;
+
+print("-------------------------------- ")
 
 function isSystemCollection(name) {
     return name.startsWith("system.");
@@ -434,6 +438,8 @@ function listCollectionsSafely(dbName) {
         console.error(`⚠️ Skipping ${dbName}: ${err.message}`);
     }
 }
+
+
 
 if (input === "*.*") {
     const dbs = db.adminCommand({ listDatabases: 1 }).databases;
@@ -459,10 +465,14 @@ print("-------------------------------- ")
 
 ```bash
 # List all collections in all accessible databases
-mongosh "mongodb://localhost:27017" listCollections.js -- "*.*"
+mongosh "mongodb://localhost:27017"
+input = "*.*";  // or "mydb.*"
+load("listCollections.js");
 
 # List collections in a specific database 'mydb'
-mongosh "mongodb://localhost:27017" listCollections.js -- "mydb.*"
+mongosh "mongodb://localhost:27017"
+input = "mydb.*"
+load("listCollections.js");
 
 ```
 
