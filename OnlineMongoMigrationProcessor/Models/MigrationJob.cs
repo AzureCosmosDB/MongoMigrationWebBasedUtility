@@ -1,0 +1,37 @@
+using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+
+#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
+
+namespace OnlineMongoMigrationProcessor
+{
+    public class MigrationJob
+    {
+        public string? Id { get; set; }
+        public string? Name { get; set; }
+        public string? SourceEndpoint { get; set; }
+        public string? TargetEndpoint { get; set; }
+        [JsonIgnore]
+        public string? SourceConnectionString { get; set; }
+        [JsonIgnore]
+        public string? TargetConnectionString { get; set; }
+        public string? SourceServerVersion { get; set; }
+        public string? NameSpaces { get; set; }
+        public DateTime? StartedOn { get; set; }
+        public bool IsCompleted { get; set; }
+        public bool IsOnline { get; set; }
+        public bool IsCancelled { get; set; }
+        public bool IsStarted { get; set; }
+        //public bool CurrentlyActive { get; set; }
+        public bool UseMongoDump { get; set; }
+        public bool IsSimulatedRun { get; set; }
+        public bool SkipIndexes { get; set; }
+        public bool AppendMode { get; set; }
+        public bool SyncBackEnabled { get; set; }
+        public bool ProcessingSyncBack { get; set; }
+        public bool CSStartsAfterAllUploads { get; set; }
+        public bool CSPostProcessingStarted { get; set; }
+        public List<MigrationUnit>? MigrationUnits { get; set; }
+    }
+}

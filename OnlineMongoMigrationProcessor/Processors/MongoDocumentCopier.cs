@@ -395,7 +395,7 @@ namespace OnlineMongoMigrationProcessor
         {
             foreach (var error in exceptions)
             {
-               _log.WriteLine($"Document copy encountered WriteErrors for {location}, Details: {error.ToString()}");
+               _log.WriteLine($"Document copy encountered write errors for {location}. Details: {error.ToString()}");
 
             }
         }

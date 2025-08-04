@@ -21,7 +21,6 @@ namespace OnlineMongoMigrationProcessor
         private JobList? _jobList;
         private MigrationJob? _job;
         private string _toolsLaunchFolder = string.Empty;
-        private bool _executionCancelled = false;
         private string _mongoDumpOutputFolder = $"{Helper.GetWorkingFolder()}mongodump";
         private MongoClient? _sourceClient;
         private MongoClient? _targetClient;
@@ -52,7 +51,7 @@ namespace OnlineMongoMigrationProcessor
             _config = config;
 
             _processExecutor = new ProcessExecutor(_log);
-
+            _cts = new CancellationTokenSource();
         }
 
         public void StopProcessing(bool updateStatus = true)
@@ -65,9 +64,8 @@ namespace OnlineMongoMigrationProcessor
             if(updateStatus)
                 ProcessRunning = false;
 
-            _executionCancelled = true;
-            _processExecutor.Terminate();
             _cts?.Cancel();
+            _processExecutor.Terminate();
 
             if (_changeStreamProcessor != null)
                 _changeStreamProcessor.ExecutionCancelled = true;
@@ -86,7 +84,6 @@ namespace OnlineMongoMigrationProcessor
 
             string dbName = item.DatabaseName;
             string colName = item.CollectionName;
-            _cts= new CancellationTokenSource();
 
             // Create mongodump output folder if it does not exist
             string folder = $"{_mongoDumpOutputFolder}\\{jobId}\\{Helper.SafeFileName($"{dbName}.{colName}")}";
@@ -133,9 +130,9 @@ namespace OnlineMongoMigrationProcessor
             // starting the  regular dump and restore process                       
 
             // MongoDump
-            if (!item.DumpComplete && !_executionCancelled)
+            if (!item.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
-                _log.WriteLine($"{dbName}.{colName} Downloader started");
+                _log.WriteLine($"{dbName}.{colName} download started");
 
                 item.EstimatedDocCount = collection.EstimatedDocumentCount();
 
@@ -144,13 +141,13 @@ namespace OnlineMongoMigrationProcessor
                     long count = MongoHelper.GetActualDocumentCount(collection, item);
                     item.ActualDocCount = count;
                     _jobList?.Save();
-                });
+                }, _cts.Token);
 
                 long downloadCount = 0;
 
                 for (int i = 0; i < item.MigrationChunks.Count; i++)
                 {
-                    if (_executionCancelled || _job == null) return;//|| !_job.CurrentlyActive) return;
+                    _cts.Token.ThrowIfCancellationRequested();
 
                     double initialPercent = ((double)100 / item.MigrationChunks.Count) * i;
                     double contributionFactor = 1.0 / item.MigrationChunks.Count;
@@ -163,7 +160,7 @@ namespace OnlineMongoMigrationProcessor
                         backoff = TimeSpan.FromSeconds(2);
                         bool continueProcessing = true;
 
-                        while (dumpAttempts < maxRetries && !_executionCancelled && continueProcessing )//&& _job.CurrentlyActive)
+                        while (dumpAttempts < maxRetries && !_cts.Token.IsCancellationRequested && continueProcessing)
                         {
                             dumpAttempts++;
                             string args = $" --uri=\"{sourceConnectionString}\" --gzip --db={dbName} --collection={colName}  --out {folder}\\{i}.bson";
@@ -179,14 +176,21 @@ namespace OnlineMongoMigrationProcessor
 
                                     if (!continueDownlods)
                                     {
-                                        _log.WriteLine($"{dbName}.{colName} added to uploader queue");
+                                        _log.WriteLine($"{dbName}.{colName} added to upload queue");
                                         
                                         MigrationUnitsPendingUpload.AddOrUpdate($"{item.DatabaseName}.{item.CollectionName}",item);
-                                        Task.Run(() => Upload(item, targetConnectionString));
+                                        Task.Run(() => Upload(item, targetConnectionString), _cts.Token);
 
                                         _log.WriteLine($"Disk space is running low, with only {freeSpaceGB}GB available. Pending jobList are using {pendingUploadsGB}GB of space. Free up disk space by deleting unwanted jobList. Alternatively, you can scale up tp Premium App Service plan, which will reset the WebApp. New downloads will resume in 5 minutes...", LogType.Error);
                                         
-                                        Thread.Sleep(TimeSpan.FromMinutes(5));
+                                        try
+                                        {
+                                            Task.Delay(TimeSpan.FromMinutes(5), _cts.Token).Wait(_cts.Token);
+                                        }
+                                        catch (OperationCanceledException)
+                                        {
+                                            return; // Exit if cancellation was requested during delay
+                                        }
                                     }
                                     else
                                         break;
@@ -225,8 +229,8 @@ namespace OnlineMongoMigrationProcessor
                                 if (Directory.Exists($"folder\\{i}.bson"))
                                     Directory.Delete($"folder\\{i}.bson", true);
 
-                                var task = Task.Run(() => _processExecutor.Execute(_jobList, item, item.MigrationChunks[i],i, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongodump.exe", args));
-                                task.Wait(); // Wait for the task to complete
+                                var task = Task.Run(() => _processExecutor.Execute(_jobList, item, item.MigrationChunks[i],i, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongodump.exe", args), _cts.Token);
+                                task.Wait(_cts.Token); // Wait for the task to complete with cancellation support
                                 bool result = task.Result; // Capture the result after the task completes
 
                                 if (result)
@@ -236,21 +240,35 @@ namespace OnlineMongoMigrationProcessor
                                     _jobList?.Save(); // Persist state
                                     dumpAttempts = 0;
          
-                                    _log.WriteLine($"{dbName}.{colName} added to uploader queue");
+                                    _log.WriteLine($"{dbName}.{colName} added to upload queue.");
                                     
                                     MigrationUnitsPendingUpload.AddOrUpdate($"{item.DatabaseName}.{item.CollectionName}", item);
-                                    Task.Run(() => Upload(item, targetConnectionString));
+                                    Task.Run(() => Upload(item, targetConnectionString), _cts.Token);
           
                                 }
                                 else
                                 {
-                                    if (!_executionCancelled)
+                                    if (!_cts.Token.IsCancellationRequested)
                                     {
                                         _log.WriteLine($"Attempt {dumpAttempts} {dbName}.{colName}-{i} of Dump Executor failed. Retrying in {backoff.TotalSeconds} seconds...");
-                                        Thread.Sleep(backoff);
+                                        
+                                        try
+                                        {
+                                            Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
+                                        }
+                                        catch (OperationCanceledException)
+                                        {
+                                            return; // Exit if cancellation was requested during delay
+                                        }
+                                        
                                         backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
                                     }
                                 }
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                _log.WriteLine($"Dump operation was cancelled for {dbName}.{colName}-{i}");
+                                return;
                             }
                             catch (MongoExecutionTimeoutException ex)
                             {
@@ -263,11 +281,19 @@ namespace OnlineMongoMigrationProcessor
                                     StopProcessing();
                                 }
 
-                                if (!_executionCancelled)
+                                if (!_cts.Token.IsCancellationRequested)
                                 {
                                     // Wait for the backoff duration before retrying
                                     _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                    Thread.Sleep(backoff);
+                                    
+                                    try
+                                    {
+                                        Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
+                                    }
+                                    catch (OperationCanceledException)
+                                    {
+                                        return; // Exit if cancellation was requested during delay
+                                    }
                                     
 
                                     // Exponentially increase the backoff duration
@@ -290,7 +316,7 @@ namespace OnlineMongoMigrationProcessor
                         downloadCount += item.MigrationChunks[i].DumpQueryDocCount;
                     }
                 }
-                if (!_executionCancelled)
+                if (!_cts.Token.IsCancellationRequested)
                 {
                     item.SourceCountDuringCopy = item.MigrationChunks.Sum(chunk => chunk.DumpQueryDocCount);
                     item.DumpGap = Math.Max(item.ActualDocCount, item.EstimatedDocCount) - downloadCount;
@@ -298,12 +324,12 @@ namespace OnlineMongoMigrationProcessor
                     item.DumpComplete = true;
                 }
             }
-            else if (item.DumpComplete && !item.RestoreComplete && !_executionCancelled)
+            else if (item.DumpComplete && !item.RestoreComplete && !_cts.Token.IsCancellationRequested)
             {
-                _log.WriteLine($"{dbName}.{colName} added to uploader queue");
+                _log.WriteLine($"{dbName}.{colName} added to upload queue");
                 
                 MigrationUnitsPendingUpload.AddOrUpdate($"{item.DatabaseName}.{item.CollectionName}", item);
-                Task.Run(() => Upload(item, targetConnectionString));
+                Task.Run(() => Upload(item, targetConnectionString), _cts.Token);
             }
 
         }
@@ -329,19 +355,19 @@ namespace OnlineMongoMigrationProcessor
 
             string folder = $"{_mongoDumpOutputFolder}\\{jobId}\\{Helper.SafeFileName($"{dbName}.{colName}")}";
 
-            _log.WriteLine($"{dbName}.{colName} starting uploader");
+            _log.WriteLine($"{dbName}.{colName} upload started.");
 
-            while (!item.RestoreComplete && Directory.Exists(folder) && !_executionCancelled && !_job.IsSimulatedRun)// && _job.CurrentlyActive 
+            while (!item.RestoreComplete && Directory.Exists(folder) && !_cts.Token.IsCancellationRequested && !_job.IsSimulatedRun)
             {
                 int restoredChunks = 0;
                 long restoredDocs = 0;
 
                 // MongoRestore
-                if (!item.RestoreComplete && !_executionCancelled && item.SourceStatus == CollectionStatus.OK)
+                if (!item.RestoreComplete && !_cts.Token.IsCancellationRequested && item.SourceStatus == CollectionStatus.OK)
                 {
                     for (int i = 0; i < item.MigrationChunks.Count; i++)
                     {
-                        if (_executionCancelled) return;
+                        _cts.Token.ThrowIfCancellationRequested();
 
                         if (!item.MigrationChunks[i].IsUploaded == true && item.MigrationChunks[i].IsDownloaded == true)
                         {
@@ -372,7 +398,7 @@ namespace OnlineMongoMigrationProcessor
                             backoff = TimeSpan.FromSeconds(2);
                             bool continueProcessing = true;
                             bool skipRestore = false;
-                            while (restoreAttempts < maxRetries && !_executionCancelled && continueProcessing && !item.RestoreComplete)// && _job.CurrentlyActive )
+                            while (restoreAttempts < maxRetries && !_cts.Token.IsCancellationRequested && continueProcessing && !item.RestoreComplete)
                             {
                                 restoreAttempts++;
                                 skipRestore=false;
@@ -385,8 +411,8 @@ namespace OnlineMongoMigrationProcessor
                                         docCount = Math.Max(item.ActualDocCount, item.EstimatedDocCount);
 
 
-                                    var task = Task.Run(() => _processExecutor.Execute(_jobList, item, item.MigrationChunks[i],i, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongorestore.exe", args));
-                                    task.Wait(); // Wait for the task to complete
+                                    var task = Task.Run(() => _processExecutor.Execute(_jobList, item, item.MigrationChunks[i],i, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongorestore.exe", args), _cts.Token);
+                                    task.Wait(_cts.Token); // Wait for the task to complete with cancellation support
                                     bool result = task.Result; // Capture the result after the task completes
                                     _log.WriteLine($"{dbName}.{colName}-{i} uploader processing completed");
                                     if (result)
@@ -460,17 +486,30 @@ namespace OnlineMongoMigrationProcessor
                                             continueProcessing = false;
                                             _jobList?.Save(); // Persist state
                                         }
-                                        else if (!_executionCancelled)
+                                        else if (!_cts.Token.IsCancellationRequested)
                                         {
                                             _log.WriteLine($"Restore attempt {restoreAttempts} {dbName}.{colName}-{i} failed", LogType.Error);
                                             // Wait for the backoff duration before retrying
                                             _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                            Thread.Sleep(backoff);
+                                            
+                                            try
+                                            {
+                                                Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
+                                            }
+                                            catch (OperationCanceledException)
+                                            {
+                                                return; // Exit if cancellation was requested during delay
+                                            }
+                                            
                                             // Exponentially increase the backoff duration
                                             backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-                                            
                                         }
                                     }
+                                }
+                                catch (OperationCanceledException)
+                                {
+                                    _log.WriteLine($"Restore operation was cancelled for {dbName}.{colName}-{i}");
+                                    return;
                                 }
                                 catch (MongoExecutionTimeoutException ex)
                                 {
@@ -479,7 +518,7 @@ namespace OnlineMongoMigrationProcessor
 
                                     if (restoreAttempts >= maxRetries)
                                     {
-                                        if (!_executionCancelled)
+                                        if (!_cts.Token.IsCancellationRequested)
                                         {
                                             _log.WriteLine("Maximum retry attempts reached. Aborting operation.", LogType.Error);
                                             
@@ -488,11 +527,19 @@ namespace OnlineMongoMigrationProcessor
                                         StopProcessing();
                                     }
 
-                                    if (!_executionCancelled)
+                                    if (!_cts.Token.IsCancellationRequested)
                                     {
                                         // Wait for the backoff duration before retrying
                                         _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                        Thread.Sleep(backoff);
+                                        
+                                        try
+                                        {
+                                            Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
+                                        }
+                                        catch (OperationCanceledException)
+                                        {
+                                            return; // Exit if cancellation was requested during delay
+                                        }
                                         
                                     }
 
@@ -501,7 +548,7 @@ namespace OnlineMongoMigrationProcessor
                                 }
                                 catch (Exception ex)
                                 {
-                                    if (!_executionCancelled)
+                                    if (!_cts.Token.IsCancellationRequested)
                                     {
                                         _log.WriteLine(ex.ToString(), LogType.Error);
                                         
@@ -525,7 +572,7 @@ namespace OnlineMongoMigrationProcessor
                         }
                     }
 
-                    if (restoredChunks == item.MigrationChunks.Count && !_executionCancelled)
+                    if (restoredChunks == item.MigrationChunks.Count && !_cts.Token.IsCancellationRequested)
                     {
                         item.RestoreGap = Math.Max(item.ActualDocCount, item.EstimatedDocCount) - restoredDocs;
                         item.RestorePercent = 100;
@@ -534,7 +581,14 @@ namespace OnlineMongoMigrationProcessor
                     }
                     else
                     {
-                        Thread.Sleep(10000);
+                        try
+                        {
+                            Task.Delay(10000, _cts.Token).Wait(_cts.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            return; // Exit if cancellation was requested during delay
+                        }
                     }
                 }
             }
@@ -546,7 +600,7 @@ namespace OnlineMongoMigrationProcessor
                         Directory.Delete(folder, true);
 
                     // Process change streams
-                    if (_job.IsOnline && !_executionCancelled && !_job.CSStartsAfterAllUploads)
+                    if (_job.IsOnline && !_cts.Token.IsCancellationRequested && !_job.CSStartsAfterAllUploads)
                     {
                         if (_targetClient == null)
                             _targetClient = MongoClientFactory.Create(_log,targetConnectionString);
@@ -570,7 +624,7 @@ namespace OnlineMongoMigrationProcessor
                         return;
                     }
 
-                    if (!_executionCancelled)
+                    if (!_cts.Token.IsCancellationRequested)
                     {                       
                         var migrationJob = _jobList.MigrationJobs.Find(m => m.Id == jobId);
                         if (!_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))

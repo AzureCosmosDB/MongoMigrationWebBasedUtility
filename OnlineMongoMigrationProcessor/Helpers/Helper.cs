@@ -117,7 +117,7 @@ namespace OnlineMongoMigrationProcessor
                 // Check if tools exist
                 if (File.Exists(mongodumpPath) && File.Exists(mongorestorePath))
                 {
-                    log.WriteLine("Environment ready to use.");
+                    log.WriteLine("Environment is ready to use.");
                     
                     return toolsLaunchFolder;
                 }
@@ -146,11 +146,11 @@ namespace OnlineMongoMigrationProcessor
 
                 if (File.Exists(mongodumpPath) && File.Exists(mongorestorePath))
                 {
-                    log.WriteLine("Environment ready to use.");
+                    log.WriteLine("Environment is ready to use.");
                     
                     return toolsLaunchFolder;
                 }
-                log.WriteLine("Environment failed.", LogType.Error);
+                log.WriteLine("Environment setup failed.", LogType.Error);
                 
                 return string.Empty;
             }
@@ -343,5 +343,6 @@ namespace OnlineMongoMigrationProcessor
         }
     }
 }
+
 
 

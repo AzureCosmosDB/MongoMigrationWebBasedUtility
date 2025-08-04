@@ -310,7 +310,7 @@ namespace OnlineMongoMigrationProcessor
 
                                     if (_job.SyncBackEnabled && !job.IsSimulatedRun && _job.IsOnline && !checkedCS)
                                     {
-                                        _log.WriteLine("Sync Back: Checking if change stream is enabled on target");
+                                        _log.WriteLine("Sync Back: Checking if change stream is enabled on the target");
                                         
 
                                         //Thread.Sleep(30*1000); // Wait for 30 seconds to ensure the target is ready
@@ -357,7 +357,7 @@ namespace OnlineMongoMigrationProcessor
                                     {
                                         if (!_job.CSPostProcessingStarted)
                                         {
-                                            _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} already exists on target");
+                                            _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} already exists on the target.");
                                         }
                                     }
                                 }

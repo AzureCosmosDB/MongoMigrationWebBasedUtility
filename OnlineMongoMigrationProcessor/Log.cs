@@ -123,7 +123,7 @@ namespace OnlineMongoMigrationProcessor
                     {
                         string logBackupFile = string.Empty;
                         _logBucket = ReadLogFile(_currentId, out logBackupFile);
-                        Console.WriteLine($"LogBucket was null, re-initialized from file during WriteLine .");
+                        Console.WriteLine($"LogBucket was null, re-initialized from file during WriteLine.");
                     }
 
                     var logObj = new LogObject(LogType, message);

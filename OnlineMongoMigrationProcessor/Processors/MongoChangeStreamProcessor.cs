@@ -64,7 +64,7 @@ namespace OnlineMongoMigrationProcessor
             string key = $"{item.DatabaseName}.{item.CollectionName}";
             if (item.SourceStatus != CollectionStatus.OK || item.DumpComplete != true || item.RestoreComplete != true)
             {
-                _log.WriteLine($"{_syncBackPrefix}Cannot add {key} to change streams to process.", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Cannot add {key} to change streams for processing.", LogType.Error);
                 return false;
             }            
             if (!_migrationUnitsToProcess.ContainsKey(key))
@@ -397,15 +397,15 @@ namespace OnlineMongoMigrationProcessor
                 catch (MongoCommandException ex) when (ex.ToString().Contains("Resume of change stream was not possible"))
                 {
                     // Handle other potential exceptions
-                    _log.WriteLine($"{_syncBackPrefix}Oplog is full. Error processing change stream for {sourceCollection.CollectionNamespace}. Details : {ex.ToString()}", LogType.Error);
-                    _log.AddVerboseMessage($"{_syncBackPrefix}Oplog is full. Error processing change stream for {sourceCollection.CollectionNamespace}. Details : {ex.ToString()}");
+                    _log.WriteLine($"{_syncBackPrefix}Oplog is full. Error processing change stream for {sourceCollection.CollectionNamespace}. Details: {ex.ToString()}", LogType.Error);
+                    _log.AddVerboseMessage($"{_syncBackPrefix}Oplog is full. Error processing change stream for {sourceCollection.CollectionNamespace}. Details: {ex.ToString()}");
 
                     //ExecutionCancelled= true; // do not cancel as some collections may not be having any chnages annd  others may be processing.
                 }
                 catch (MongoCommandException ex) when (ex.Message.Contains("Expired resume token") || ex.Message.Contains("cursor"))
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Resume token expired or cursor invalid for {sourceCollection.CollectionNamespace}.", LogType.Error);
-                    _log.AddVerboseMessage($"{_syncBackPrefix}Resume token expired or cursor invalid for {sourceCollection.CollectionNamespace}.");
+                    _log.WriteLine($"{_syncBackPrefix}Resume token has expired or cursor is invalid for {sourceCollection.CollectionNamespace}.", LogType.Error);
+                    _log.AddVerboseMessage($"{_syncBackPrefix}Resume token has expired or cursor is invalid for {sourceCollection.CollectionNamespace}.");
 
                     //ExecutionCancelled = true; // do not cancel as some collections may not be having any chnages annd  others may be processing.              
                 }
@@ -417,7 +417,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix} Error processing change stream for {item.DatabaseName}.{item.CollectionName}. Details : {ex.ToString()}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Error processing change stream for {item.DatabaseName}.{item.CollectionName}. Details: {ex.ToString()}", LogType.Error);
                 
             }
         }
@@ -524,7 +524,7 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (Exception ex)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Error processing changes in batch for {sourceCollection.CollectionNamespace}. Details : {ex.ToString()}", LogType.Error);
+                    _log.WriteLine($"{_syncBackPrefix}Error processing changes in batch for {sourceCollection.CollectionNamespace}. Details: {ex.ToString()}", LogType.Error);
 
                 }
             }
@@ -538,12 +538,12 @@ namespace OnlineMongoMigrationProcessor
 
             if(documentId == null || documentId.IsBsonNull)
             {
-                _log.WriteLine($"Auto replay is empty {sourceCollection.CollectionNamespace}.");
+                _log.WriteLine($"Auto replay is empty for {sourceCollection.CollectionNamespace}.");
                 return true; // Skip if no document ID is provided
             }
             else
             {
-                _log.WriteLine($"Auto replay for {opType} operation with _id {documentId} in {sourceCollection.CollectionNamespace}. ");
+                _log.WriteLine($"Auto replay for {opType} operation with _id {documentId} in {sourceCollection.CollectionNamespace}.");
             }
             
             var filter = Builders<BsonDocument>.Filter.Eq("_id", documentId); // Assuming _id is your resume token
@@ -573,7 +573,7 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Replace:
                         if (result == null || result.IsBsonNull)
                         {
-                            _log.WriteLine($"Processing {opType} operation for {sourceCollection.CollectionNamespace} having _id {documentId}. No document found on source, deleting it from target.");
+                            _log.WriteLine($"Processing {opType} operation for {sourceCollection.CollectionNamespace} with _id {documentId}. No document found on source, deleting it from target.");
                             var deleteTTLFilter = Builders<BsonDocument>.Filter.Eq("_id", documentId);
                             try
                             {
@@ -630,7 +630,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error processing operation {opType} on {sourceCollection.CollectionNamespace} with _id {documentId}. Details : {ex.ToString()}", LogType.Error);
+                _log.WriteLine($"Error processing operation {opType} on {sourceCollection.CollectionNamespace} with _id {documentId}. Details: {ex.ToString()}", LogType.Error);
                 return false; // Return false to indicate failure in processing
             }
 
@@ -658,7 +658,7 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 // Output change details to the console
-                _log.AddVerboseMessage($"{_syncBackPrefix}{change.OperationType} operation detected in {collNameSpace} for _id: {change.DocumentKey["_id"]} having TS (UTC): {timeStamp}.  Sequence in Batch # {counter}");
+                _log.AddVerboseMessage($"{_syncBackPrefix}{change.OperationType} operation detected in {collNameSpace} for _id: {change.DocumentKey["_id"]} with TS (UTC): {timeStamp}. Sequence in batch #{counter}");
                 ProcessChange(change, targetCollection, collNameSpace, changeStreamDocuments, _job.IsSimulatedRun, item);
 
                 if (!_syncBack)
@@ -685,7 +685,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix}Error processing cursor. Details : {ex.ToString()}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Error processing cursor. Details: {ex.ToString()}", LogType.Error);
                 
                 return false;
             }
@@ -704,7 +704,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 if (!change.DocumentKey.TryGetValue("_id", out idValue))
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Error processing operation {change.OperationType} on {collNameSpace}. Change stream event missing _id in DocumentKey.", LogType.Error);
+                    _log.WriteLine($"{_syncBackPrefix}Error processing operation {change.OperationType} on {collNameSpace}. Change stream event is missing _id in DocumentKey.", LogType.Error);
 
                     return;
                 }
@@ -729,7 +729,7 @@ namespace OnlineMongoMigrationProcessor
                         var filter = Builders<BsonDocument>.Filter.Eq("_id", idValue);
                         if (change.FullDocument == null || change.FullDocument.IsBsonNull)
                         {
-                            _log.WriteLine($"{_syncBackPrefix}Processing {change.OperationType} operation for {collNameSpace} having _id {idValue}. No document found on source, deleting it from target.");
+                            _log.WriteLine($"{_syncBackPrefix}Processing {change.OperationType} operation for {collNameSpace} with _id {idValue}. No document found on source, deleting it from target.");
                             var deleteTTLFilter = Builders<BsonDocument>.Filter.Eq("_id", idValue);
                             try
                             {
@@ -761,7 +761,7 @@ namespace OnlineMongoMigrationProcessor
 
                 if (changeStreamDocuments.DocsToBeInserted.Count + changeStreamDocuments.DocsToBeUpdated.Count + changeStreamDocuments.DocsToBeDeleted.Count > _config.ChangeStreamMaxDocsInBatch)
                 {
-                    _log.AddVerboseMessage($"{_syncBackPrefix} Change Stream MaxBatchSize exceeded. Flushing changes for {collNameSpace}");
+                    _log.AddVerboseMessage($"{_syncBackPrefix}Change stream max batch size exceeded. Flushing changes for {collNameSpace}");
 
 
 
@@ -780,7 +780,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix}Error processing operation {change.OperationType} on {collNameSpace} with _id {idValue}. Details : {ex.ToString()}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Error processing operation {change.OperationType} on {collNameSpace} with _id {idValue}. Details: {ex.ToString()}", LogType.Error);
 
             }
         }
@@ -913,7 +913,7 @@ namespace OnlineMongoMigrationProcessor
                         {
 
                             var result = await collection.BulkWriteAsync(updateModels, new BulkWriteOptions { IsOrdered = false });                            
-                            
+
                             updateCount += result.ModifiedCount + result.Upserts.Count;
                         }
                     }
