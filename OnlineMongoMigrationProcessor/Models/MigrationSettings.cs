@@ -17,6 +17,7 @@ namespace OnlineMongoMigrationProcessor
         public int ChangeStreamBatchDurationMin { get; set; }
         public int ChangeStreamMaxCollsInBatch { get; set; }
 		public int MongoCopyPageSize { get; set; }
+        public int CompareSampleSize { get; set; }
         private string _filePath = string.Empty;
 
         public MigrationSettings()
@@ -48,6 +49,7 @@ namespace OnlineMongoMigrationProcessor
                     ChangeStreamBatchDurationMin = loadedObject.ChangeStreamBatchDurationMin == 0 ? 30 : loadedObject.ChangeStreamBatchDurationMin;
                     ChangeStreamMaxCollsInBatch = loadedObject.ChangeStreamMaxCollsInBatch == 0 ? 5 : loadedObject.ChangeStreamMaxCollsInBatch;
 					MongoCopyPageSize = loadedObject.MongoCopyPageSize;
+                    CompareSampleSize = loadedObject.CompareSampleSize;
                     CACertContentsForSourceServer = loadedObject.CACertContentsForSourceServer;
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
@@ -67,6 +69,7 @@ namespace OnlineMongoMigrationProcessor
                 ChangeStreamBatchDurationMin = 30;
                 ChangeStreamMaxCollsInBatch = 5;
                 CACertContentsForSourceServer = string.Empty;
+                CompareSampleSize = 50;
             }
         }
 

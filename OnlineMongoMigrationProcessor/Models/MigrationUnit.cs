@@ -34,6 +34,9 @@ namespace OnlineMongoMigrationProcessor
         public DateTime? BulkCopyEndedOn { get; set; }
         public int IndexesMigrated { get; set; }
 
+        public DateTime? ComparedOn { get; set; }
+        public int VarianceCount { get; set; }
+
         public DateTime? ChangeStreamStartedOn { get; set; }
         public DateTime CursorUtcTimestamp { get; set; }
         public long CSUpdatesInLastBatch { get; set; }

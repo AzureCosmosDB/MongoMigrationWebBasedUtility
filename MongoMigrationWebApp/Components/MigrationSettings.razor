@@ -48,6 +48,13 @@
                     <label for="cs-colls-inbatch" class="form-label">Max Collections per Change Stream Batch</label>
                     <input type="number" id="cs-colls-inbatch" class="form-control" @bind="_configurationBackup.ChangeStreamMaxCollsInBatch" />
                 </div>
+
+                <div class="mb-3">
+                    <label for="cs-comapreSampleSize" class="form-label">Sample Size For Hash Comparison</label>
+                    <input type="number" id="cs-comapreSampleSize" class="form-control" @bind="_configurationBackup.CompareSampleSize" />
+                </div>
+
+
                 <div class="mb-3">
                     <label for="pem-text" class="form-label">CA Certificate file for Source Server(.pem)</label>
                     <InputFile OnChange="OnPemFileUpload" />
@@ -110,6 +117,11 @@
 
     private void HandleSubmit()
     {
+        if (_configurationBackup.CompareSampleSize < 5 || _configurationBackup.CompareSampleSize > 2000)
+        {
+            errorMessage = "Sample size for hash comaprison should be between 5 and 2000.";
+            return;
+        }
 
         if (_configurationBackup.ChangeStreamBatchDurationMin < 10 || _configurationBackup.ChangeStreamBatchDurationMin > 600)
         {
@@ -117,9 +129,9 @@
             return;
         }
 
-        if (_configurationBackup.ChangeStreamBatchDuration < 30 || _configurationBackup.ChangeStreamBatchDuration > 3600)
+        if (_configurationBackup.ChangeStreamBatchDuration < 20 || _configurationBackup.ChangeStreamBatchDuration > 3600)
         {
-            errorMessage = "Max Batch Duration should be between 30 and 3600 seconds.";
+            errorMessage = "Max Batch Duration should be between 20 and 3600 seconds.";
             return;
         }
 

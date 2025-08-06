@@ -167,6 +167,7 @@
     {
         <button class="btn btn-primary mx-2" title="Reset the change stream checkpoint to start from the beginning. This may add extra load to the migration process and could delay other collections. Ensure the job is paused before continuing." @onclick="ResetChangeStream">Reset Change Stream</button>
     }
+    <button class="btn btn-primary mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison" disabled="!JobManager.IsComparisonRunning()">Run Hash Check</button>
 </div>
 
 @if (LogBucket != null && VerboseMessages != null && VerboseMessages.Count > 0 && !_showLogBackupFile)
@@ -553,11 +554,26 @@ else if (@_showLogBackupFile)
 
             StartAutoRefresh();
         }
-        // else
-        // {
-        //     MigrationJob.CurrentlyActive = false;
-        // }
     }
+
+    private void RunComparison()
+    {
+        _errorMessage = string.Empty;
+        if (IsResumeEnabled() && !JobManager.IsComparisonRunning())
+        {
+            if (MigrationJob.MigrationUnits != null && MigrationJob.MigrationUnits.Count > 0)
+            {
+                _errorMessage = "Running hash comparison on sample documents..., Please wait for it to complete.";
+                JobManager.StartComparison();
+                _errorMessage = string.Empty; // Reset error message after starting comparison      
+            }
+            else
+            {
+                _errorMessage = "No collections to compare.";
+            }
+        }       
+    }
+
     private void ResetChangeStream()
     {
         _errorMessage = string.Empty;

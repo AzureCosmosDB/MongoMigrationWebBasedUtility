@@ -13,13 +13,13 @@ namespace MongoMigrationWebApp.Service
         private JobList? _jobList;
         private MigrationWorker? MigrationWorker { get; set; }
 
-        private DateTime _lastJobHeartBeat=DateTime.MinValue;
-        private string _lastJobID=string.Empty;
+        private DateTime _lastJobHeartBeat = DateTime.MinValue;
+        private string _lastJobID = string.Empty;
 
         #region _configuration Management
 
-        public bool UpdateConfig(OnlineMongoMigrationProcessor.MigrationSettings updated_config,out string errorMessage)
-        {           
+        public bool UpdateConfig(OnlineMongoMigrationProcessor.MigrationSettings updated_config, out string errorMessage)
+        {
             if (updated_config == null)
             {
                 errorMessage = "Migration settings cannot be null.";
@@ -51,7 +51,7 @@ namespace MongoMigrationWebApp.Service
             _jobList = null;
             _jobList = new JobList();
 
-            var success = _jobList.LoadJobs(out errorMessage,true);
+            var success = _jobList.LoadJobs(out errorMessage, true);
             if (!success)
             {
                 return false;
@@ -60,10 +60,10 @@ namespace MongoMigrationWebApp.Service
             if (MigrationWorker != null)
             {
                 MigrationWorker.StopMigration();
-                MigrationWorker = null;         
+                MigrationWorker = null;
             }
 
-            MigrationWorker =new MigrationWorker(_jobList);
+            MigrationWorker = new MigrationWorker(_jobList);
 
             errorMessage = string.Empty;
             return success;
@@ -74,16 +74,16 @@ namespace MongoMigrationWebApp.Service
             return _jobList.Save(out errorMessage);
         }
 
-        
+
 
         public List<MigrationJob> GetMigrations(out string errorMessage, bool force = false)
         {
-            errorMessage=string.Empty;
-            bool isSucess=true;
+            errorMessage = string.Empty;
+            bool isSucess = true;
             if (_jobList == null)
             {
                 _jobList = new JobList();
-                isSucess=_jobList.LoadJobs(out errorMessage, false);
+                isSucess = _jobList.LoadJobs(out errorMessage, false);
             }
             else
             {
@@ -118,43 +118,43 @@ namespace MongoMigrationWebApp.Service
         {
             //verbose messages  are only  there for active jobList so fetech from migration worker.
             if (MigrationWorker != null && MigrationWorker.IsProcessRunning(id))
-               return MigrationWorker.GetVerboseMessages(id);
+                return MigrationWorker.GetVerboseMessages(id);
             else
-               return new List<LogObject>();
+                return new List<LogObject>();
         }
 
         public bool DidMigrationJobExitRecently(string jobId)
         {
-            if(jobId != _lastJobID) return false;
+            if (jobId != _lastJobID) return false;
 
             if (System.DateTime.UtcNow.AddSeconds(-10) > _lastJobHeartBeat)
             {
-                _lastJobID= string.Empty;   
+                _lastJobID = string.Empty;
                 return false; ///hear beat can be max 10 seconds old
             }
-                            
+
             return true;
         }
 
-        public LogBucket GetLogBucket(string id,out string fileName, out bool isLiveLog)
+        public LogBucket GetLogBucket(string id, out string fileName, out bool isLiveLog)
         {
             //Check if migration workewr is initialized and active. Return migration workers log bucket if it is.
             LogBucket? bucket = null;
             if (MigrationWorker != null && MigrationWorker.IsProcessRunning(id)) //only if worker's current job Id matches param
             {
                 //Console.WriteLine($"Migration worker is running for job ID: {id}");
-                bucket = MigrationWorker.GetLogBucket(id); 
+                bucket = MigrationWorker.GetLogBucket(id);
                 _lastJobHeartBeat = DateTime.UtcNow;
                 _lastJobID = id;
                 isLiveLog = true;
-                fileName=string.Empty;
+                fileName = string.Empty;
                 return bucket;
             }
 
             //If migration worker is not running, get the log bucket from the file.Its static  
-            isLiveLog=false;
+            isLiveLog = false;
             Log log = new Log();
-            return log.ReadLogFile(id,out fileName);
+            return log.ReadLogFile(id, out fileName);
         }
 
         #endregion
@@ -206,6 +206,16 @@ namespace MongoMigrationWebApp.Service
 
         #endregion
 
+
+        public void StartComparison()
+        {
+            MigrationWorker?.StartComparison();
+        }
+
+        public bool IsComparisonRunning()
+        {
+            return MigrationWorker?.IsComparisonRunning() ?? false;
+        }
     }
 }
 

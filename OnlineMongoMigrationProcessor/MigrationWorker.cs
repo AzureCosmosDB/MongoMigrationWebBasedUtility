@@ -27,6 +27,8 @@ namespace OnlineMongoMigrationProcessor
 
     public class MigrationWorker
     {
+        public bool ProcessRunning { get; set; }
+
         private string _toolsDestinationFolder = $"{Helper.GetWorkingFolder()}mongo-tools";
         private string _toolsLaunchFolder = string.Empty;
         private bool _migrationCancelled = false;
@@ -36,8 +38,9 @@ namespace OnlineMongoMigrationProcessor
         private MongoClient? _sourceClient;
         private IMigrationProcessor _migrationProcessor;
         public MigrationSettings? _config;
-        public bool ProcessRunning { get; set; }
-
+        
+        private ComparisonHelper? comparisonHelper;
+        private CancellationTokenSource compare_cts;
 
         public MigrationWorker(JobList jobList)
         {            
@@ -100,6 +103,7 @@ namespace OnlineMongoMigrationProcessor
         {
             try
             {
+                StopComparison();
                 _jobList?.Save();
                 _migrationCancelled = true;
                 _migrationProcessor?.StopProcessing();
@@ -615,6 +619,31 @@ namespace OnlineMongoMigrationProcessor
             }
 
             return Tuple.Create(startId, endId);
+        }
+
+        
+        public void StartComparison()
+        {
+            if (comparisonHelper != null)
+            {
+                comparisonHelper = new ComparisonHelper();
+                comparisonHelper.CompareRandomDocumentsAsync(_log, _jobList, _job, _config, compare_cts.Token).GetAwaiter().GetResult();
+                comparisonHelper = null;
+            }
+        }
+
+        private void StopComparison()
+        {
+            compare_cts?.Cancel();
+        }
+
+        public bool IsComparisonRunning()
+        {
+            if (comparisonHelper != null)
+            {
+                return true;
+            }
+            return false;
         }
 
     }
