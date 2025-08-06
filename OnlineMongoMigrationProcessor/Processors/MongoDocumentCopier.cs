@@ -134,8 +134,7 @@ namespace OnlineMongoMigrationProcessor
                     tasks.Add(Task.Run(async () =>
                     {
                         try
-                        {
-                            
+                        {                            
                             await ProcessSegmentAsync(segment, combinedFilter, jobList, item, migrationChunkIndex, basePercent, contribFactor, targetCount, errors, cancellationToken, isWriteSimulated);
                         }
                         finally
@@ -189,12 +188,10 @@ namespace OnlineMongoMigrationProcessor
                 if (item.MigrationChunks[migrationChunkIndex].DocCountInTarget == item.MigrationChunks[migrationChunkIndex].DumpQueryDocCount)
                 {
                    _log.WriteLine($"Document copy for chunk [{migrationChunkIndex}], verified no documents missing, count in target: {item.MigrationChunks[migrationChunkIndex].DocCountInTarget}");
-                    
                 }
                 else
                 {
-                   _log.WriteLine($"Document copy for chunk [{migrationChunkIndex}] count mismatch. Chunk will be reprocessed.", LogType.Error);
-                    
+                   _log.WriteLine($"Document copy for chunk [{migrationChunkIndex}] count mismatch. Chunk will be reprocessed.", LogType.Error);                    
                     return false;
                 }
                 jobList?.Save(); //persists state

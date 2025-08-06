@@ -6,6 +6,7 @@ using OnlineMongoMigrationProcessor.Processors;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -477,10 +478,10 @@ namespace OnlineMongoMigrationProcessor
         private async Task<List<MigrationChunk>> PartitionCollection(string databaseName, string collectionName, string idField = "_id")
         {
 
-            var stas = await MongoHelper.GetCollectionStatsAsync(_sourceClient, databaseName, collectionName);
+            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient, databaseName, collectionName);
 
-            long documentCount = stas.DocumentCount;
-            long totalCollectionSizeBytes = stas.CollectionSizeBytes;
+            long documentCount = stats.DocumentCount;
+            long totalCollectionSizeBytes = stats.CollectionSizeBytes;
 
             var database = _sourceClient.GetDatabase(databaseName);
             var collection = database.GetCollection<BsonDocument>(collectionName);
@@ -511,8 +512,7 @@ namespace OnlineMongoMigrationProcessor
 
             if (totalChunks > 1 || !_job.UseMongoDump)
             {
-                _log.WriteLine($"Chunking {databaseName}.{collectionName}");
-                
+                _log.WriteLine($"Chunking {databaseName}.{collectionName}");                
 
                 List<DataType> dataTypes = new List<DataType> { DataType.Int, DataType.Int64, DataType.String, DataType.Object, DataType.Decimal128, DataType.Date, DataType.ObjectId };
 
@@ -526,62 +526,13 @@ namespace OnlineMongoMigrationProcessor
                     long docCountByType;
                     ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log,_job.UseMongoDump, collection, idField, totalChunks, dataType, minDocsInChunk, out docCountByType);
 
-                    if (docCountByType == 0)   continue;
+                    if (docCountByType == 0 || _job.UseMongoDump)   continue;
 
-
-                    if (chunkBoundaries == null)
+                    if (chunkBoundaries == null )
                     {
-                        if (_job.UseMongoDump)
-                        {
-                            continue;
-                        }
-                        else
-                        {
-                            var min = BsonNull.Value;
-                            var max = BsonNull.Value;
-
-                            var chunkBoundary = new Boundary
-                            {
-                                StartId = min,
-                                EndId = max,
-                                SegmentBoundaries = new List<Boundary>()
-                            };
-
-                            chunkBoundaries.Boundaries ??= new List<Boundary>();
-                            chunkBoundaries.Boundaries.Add(chunkBoundary);
-                            var segmentBoundary = new Boundary
-                            {
-                                StartId = min,
-                                EndId = max
-                            };
-                            chunkBoundary.SegmentBoundaries.Add(segmentBoundary);
-                        }
+                       ProcessSegmentBoundaries(chunkBoundaries);                        
                     }
-
-                    for (int i = 0; i < chunkBoundaries.Boundaries.Count; i++)
-                    {
-                        var (startId, endId) = GetStartEnd(true, chunkBoundaries.Boundaries[i], chunkBoundaries.Boundaries.Count, i);
-                        var chunk = new MigrationChunk(startId, endId, dataType, false, false);
-                        migrationChunks.Add(chunk);
-
-                        if (!_job.UseMongoDump && (chunkBoundaries.Boundaries[i].SegmentBoundaries == null || chunkBoundaries.Boundaries[i].SegmentBoundaries.Count == 0))
-                        {
-                            chunk.Segments ??= new List<Segment>();
-                            chunk.Segments.Add(new Segment { Gte = startId, Lt = endId, IsProcessed = false, Id = "1" });
-                        }
-
-                        if (!_job.UseMongoDump && chunkBoundaries.Boundaries[i].SegmentBoundaries.Count > 0)
-                        {
-                            for (int j = 0; j < chunkBoundaries.Boundaries[i].SegmentBoundaries.Count; j++)
-                            {
-                                var segment = chunkBoundaries.Boundaries[i].SegmentBoundaries[j];
-                                var (segmentStartId, segmentEndId) = GetStartEnd(false, segment, chunkBoundaries.Boundaries[i].SegmentBoundaries.Count, j, chunk.Lt, chunk.Gte);
-
-                                chunk.Segments ??= new List<Segment>();
-                                chunk.Segments.Add(new Segment { Gte = segmentStartId, Lt = segmentEndId, IsProcessed = false, Id = (j + 1).ToString() });
-                            }
-                        }
-                    }
+                    CreateSegments(chunkBoundaries, migrationChunks, dataType);
                 }
             }
             else
@@ -593,6 +544,55 @@ namespace OnlineMongoMigrationProcessor
             return migrationChunks;
         }
 
+        private void ProcessSegmentBoundaries(ChunkBoundaries chunkBoundaries)
+        {           
+            var min = BsonNull.Value;
+            var max = BsonNull.Value;
+
+            var chunkBoundary = new Boundary
+            {
+                StartId = min,
+                EndId = max,
+                SegmentBoundaries = new List<Boundary>()
+            };
+
+            chunkBoundaries.Boundaries ??= new List<Boundary>();
+            chunkBoundaries.Boundaries.Add(chunkBoundary);
+            var segmentBoundary = new Boundary
+            {
+                StartId = min,
+                EndId = max
+            };
+            chunkBoundary.SegmentBoundaries.Add(segmentBoundary);            
+        }
+
+        private void CreateSegments(ChunkBoundaries chunkBoundaries, List<MigrationChunk> migrationChunks, DataType dataType)
+        {
+            for (int i = 0; i < chunkBoundaries.Boundaries.Count; i++)
+            {
+                var (startId, endId) = GetStartEnd(true, chunkBoundaries.Boundaries[i], chunkBoundaries.Boundaries.Count, i);
+                var chunk = new MigrationChunk(startId, endId, dataType, false, false);
+                migrationChunks.Add(chunk);
+
+                if (!_job.UseMongoDump && (chunkBoundaries.Boundaries[i].SegmentBoundaries == null || chunkBoundaries.Boundaries[i].SegmentBoundaries.Count == 0))
+                {
+                    chunk.Segments ??= new List<Segment>();
+                    chunk.Segments.Add(new Segment { Gte = startId, Lt = endId, IsProcessed = false, Id = "1" });
+                }
+
+                if (!_job.UseMongoDump && chunkBoundaries.Boundaries[i].SegmentBoundaries.Count > 0)
+                {
+                    for (int j = 0; j < chunkBoundaries.Boundaries[i].SegmentBoundaries.Count; j++)
+                    {
+                        var segment = chunkBoundaries.Boundaries[i].SegmentBoundaries[j];
+                        var (segmentStartId, segmentEndId) = GetStartEnd(false, segment, chunkBoundaries.Boundaries[i].SegmentBoundaries.Count, j, chunk.Lt, chunk.Gte);
+
+                        chunk.Segments ??= new List<Segment>();
+                        chunk.Segments.Add(new Segment { Gte = segmentStartId, Lt = segmentEndId, IsProcessed = false, Id = (j + 1).ToString() });
+                    }
+                }
+            }
+        }
         private Tuple<string, string> GetStartEnd(bool isChunk, Boundary boundary, int totalBoundaries, int currentIndex, string chunkLt = "", string chunkGte = "")
         {
             string startId;
