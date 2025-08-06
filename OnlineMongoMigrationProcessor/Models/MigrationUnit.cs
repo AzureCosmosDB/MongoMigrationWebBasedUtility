@@ -29,6 +29,11 @@ namespace OnlineMongoMigrationProcessor
             set => _resumeDocumentIdRaw = value;
         }
 
+
+        public DateTime? BulkCopyStartedOn { get; set; }
+        public DateTime? BulkCopyEndedOn { get; set; }
+        public int IndexesMigrated { get; set; }
+
         public DateTime? ChangeStreamStartedOn { get; set; }
         public DateTime CursorUtcTimestamp { get; set; }
         public long CSUpdatesInLastBatch { get; set; }

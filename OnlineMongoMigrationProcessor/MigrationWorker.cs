@@ -224,13 +224,13 @@ namespace OnlineMongoMigrationProcessor
                         {
                             var database = _sourceClient.GetDatabase(unit.DatabaseName);
                             var collection = database.GetCollection<BsonDocument>(unit.CollectionName);
-                            var result=await MongoHelper.DeleteAndCopyIndexesAsync(_log, _job.TargetConnectionString, collection, _job.SkipIndexes);
+                            var result=await MongoHelper.DeleteAndCopyIndexesAsync(_log,unit, _job.TargetConnectionString, collection, _job.SkipIndexes);
 
                             if (!result)
                             {
                                 return TaskResult.Retry;
                             }
-
+                            _jobList?.Save();
                             if (_job.SyncBackEnabled && !_job.IsSimulatedRun && _job.IsOnline && !checkedCS)
                             {
                                 _log.WriteLine("Sync Back: Checking if change stream is enabled on target");

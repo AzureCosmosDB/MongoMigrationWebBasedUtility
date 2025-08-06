@@ -66,6 +66,11 @@ namespace OnlineMongoMigrationProcessor
                 item.RestorePercent = item.DumpPercent;
                 item.DumpComplete = item.DumpPercent == 100;
                 item.RestoreComplete = item.DumpComplete;
+
+                if(item.DumpComplete && item.RestoreComplete)
+                {
+                    item.BulkCopyEndedOn = DateTime.UtcNow;
+                }
             }
 
             migrationChunk.SkippedAsDuplicateCount = skippedCount;
@@ -92,6 +97,8 @@ namespace OnlineMongoMigrationProcessor
             {
                _log.WriteLine($"Document copy for Chunk [{migrationChunkIndex}] with {item.MigrationChunks[migrationChunkIndex].Segments.Count}. Segments started");
                 
+                if(!item.BulkCopyStartedOn.HasValue || item.BulkCopyStartedOn == DateTime.MinValue)
+                    item.BulkCopyStartedOn = DateTime.UtcNow;
 
                 List<Task> tasks = new List<Task>();
                 int segmentIndex = 0;

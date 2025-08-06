@@ -10,7 +10,7 @@
             <div class="modal-body">
                 @if (Properties?.Any() == true)
                 {
-                    <table class="table table-borderless">
+                    <table class="table table-borderless" style="font-size: 0.85rem; line-height: 1.1;">
                         <thead>
                             <tr>
                                 <th style="width: 30%; white-space: nowrap;">Property</th>
@@ -64,26 +64,26 @@
         // Add properties to display
 
         Properties.Add("Source Status", MigrationUnit.SourceStatus.ToString() ?? "N/A");
+
+        Properties.Add("Offline Copy Start Time", MigrationUnit.BulkCopyStartedOn.ToString() ?? "N/A");
+        Properties.Add("Offline Copy End Time", MigrationUnit.BulkCopyEndedOn.ToString() ?? "N/A");
+
+        if (MigrationUnit.BulkCopyStartedOn.HasValue && MigrationUnit.BulkCopyEndedOn.HasValue
+            && MigrationUnit.BulkCopyStartedOn != DateTime.MinValue && MigrationUnit.BulkCopyEndedOn != DateTime.MinValue)
+        {
+            var duration = MigrationUnit.BulkCopyEndedOn.Value - MigrationUnit.BulkCopyStartedOn.Value;
+            Properties.Add("Offline Copy Duration", $"{(int)duration.TotalMinutes} min {(int)duration.Seconds} sec");
+        }
+        else
+        {
+            Properties.Add("Offline Copy Duration", "N/A");
+        }
+
+
         Properties.Add("Source Document Count Initial Estimate", MigrationUnit.EstimatedDocCount.ToString() ?? "N/A");
         Properties.Add("Source Document Count Before Copying", MigrationUnit.ActualDocCount.ToString() ?? "N/A");
 
-        /*
-
-        if (MigrationJob.UseMongoDump)
-        {
-            if (MigrationUnit.DumpPercent != 100)
-                Properties.Add("Documents Missing After Dump", MigrationUnit.DumpGap.ToString() ?? "N/A");
-            else
-                Properties.Add("Documents Missing After Dump", "0");
-
-
-            if (MigrationUnit.RestorePercent != 100)
-                Properties.Add("Documents Missing After Restore", MigrationUnit.RestoreGap.ToString() ?? "N/A");
-            else
-                Properties.Add("Documents Missing After Restore", "0");
-
-        }*/
-        
+                
         long totalSkipped = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.SkippedAsDuplicateCount);
         long totalInserted = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.RestoredSuccessDocCount) - totalSkipped;
         long totalFailed = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.RestoredFailedDocCount);
@@ -93,6 +93,7 @@
         Properties.Add("*********** Insert", (totalInserted).ToString() ?? "N/A");
         Properties.Add("*********** Duplicates(skipped)", (totalSkipped).ToString() ?? "N/A");
         Properties.Add("*********** Failed", (totalFailed).ToString() ?? "N/A");
+        Properties.Add("*********** Indexes Created", MigrationUnit.IndexesMigrated.ToString() ?? "N/A");
 
 
         if (MigrationJob.IsOnline)

@@ -298,6 +298,8 @@ namespace OnlineMongoMigrationProcessor
                 //only  check for failed documents
                 if (failed == 0)
                 {
+                    item.BulkCopyEndedOn = DateTime.UtcNow;
+
                     item.DumpPercent = 100;
                     item.DumpComplete = true;
 

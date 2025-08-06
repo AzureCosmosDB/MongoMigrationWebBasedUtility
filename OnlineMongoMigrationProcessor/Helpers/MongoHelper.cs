@@ -459,7 +459,7 @@ namespace OnlineMongoMigrationProcessor
         }
 
 
-        public static async Task<bool> DeleteAndCopyIndexesAsync(Log log,string targetConnectionString, IMongoCollection<BsonDocument> sourceCollection, bool skipIndexes)
+        public static async Task<bool> DeleteAndCopyIndexesAsync(Log log,MigrationUnit mu, string targetConnectionString, IMongoCollection<BsonDocument> sourceCollection, bool skipIndexes)
         {
             try
             {
@@ -501,7 +501,7 @@ namespace OnlineMongoMigrationProcessor
 
                 IndexCopier indexCopier = new IndexCopier();
                 int count=await indexCopier.CopyIndexesAsync(sourceCollection, targetClient, targetDatabaseName, targetCollectionName, log);
-
+                mu.IndexesMigrated = count;
                 log.WriteLine($"{count} Indexes copied successfully to {targetDatabaseName}.{targetCollectionName}");
                 
                 return true;

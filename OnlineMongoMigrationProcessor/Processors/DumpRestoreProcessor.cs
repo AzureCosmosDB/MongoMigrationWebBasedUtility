@@ -124,6 +124,9 @@ namespace OnlineMongoMigrationProcessor
 
             // starting the  regular dump and restore process                       
 
+            if (!item.BulkCopyStartedOn.HasValue || item.BulkCopyStartedOn == DateTime.MinValue)
+                item.BulkCopyStartedOn = DateTime.UtcNow;
+
             // MongoDump
             if (!item.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
@@ -223,6 +226,7 @@ namespace OnlineMongoMigrationProcessor
 
                                 if (Directory.Exists($"folder\\{i}.bson"))
                                     Directory.Delete($"folder\\{i}.bson", true);
+
 
                                 var task = Task.Run(() => _processExecutor.Execute(_jobList, item, item.MigrationChunks[i],i, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongodump.exe", args), _cts.Token);
                                 task.Wait(_cts.Token); // Wait for the task to complete with cancellation support
@@ -572,6 +576,10 @@ namespace OnlineMongoMigrationProcessor
                         item.RestoreGap = Math.Max(item.ActualDocCount, item.EstimatedDocCount) - restoredDocs;
                         item.RestorePercent = 100;
                         item.RestoreComplete = true;
+                        if (item.DumpComplete && item.RestoreComplete)
+                        {
+                            item.BulkCopyEndedOn = DateTime.UtcNow;
+                        }
                         _jobList?.Save(); // Persist state
                     }
                     else
