@@ -157,21 +157,13 @@ namespace OnlineMongoMigrationProcessor
             _migrationProcessor?.StopProcessing(false);
 
             _migrationProcessor = null;
-            switch (_job.JobType)
+            if (!_job.UseMongoDump)
             {
-                case JobType.MongoDriver:
-                    _migrationProcessor = new CopyProcessor(_log, _jobList, _job, _sourceClient, _config);
-                    break;
-                case JobType.DumpAndRestore:
-                    _migrationProcessor = new DumpRestoreProcessor(_log, _jobList, _job, _sourceClient, _config, _toolsLaunchFolder);
-                    break;
-                case JobType.RUOptimizedCopy:
-                    _migrationProcessor = new RUCopyProcessor(_log, _jobList, _job, _sourceClient, _config);
-                    break;
-                default:
-                    _log.WriteLine($"Unknown JobType: {_job.JobType}. Defaulting to MongoDriver.", LogType.Error);
-                    _migrationProcessor = new CopyProcessor(_log, _jobList, _job, _sourceClient, _config);
-                    break;
+                _migrationProcessor = new CopyProcessor(_log, _jobList, _job, _sourceClient, _config);
+            }
+            else
+            {
+                _migrationProcessor = new DumpRestoreProcessor(_log, _jobList, _job, _sourceClient, _config, _toolsLaunchFolder);
             }
             _migrationProcessor.ProcessRunning = true;
 
@@ -356,7 +348,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, OnlineMongoMigrationProcessor.Models.JobType jobtype, bool trackChangeStreams)
+        public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, bool doBulkCopy, bool trackChangeStreams)
         {
             _job = job;
             StopMigration(); //stop any existing
@@ -384,6 +376,17 @@ namespace OnlineMongoMigrationProcessor
             }
             _log.WriteLine($"{_job.Id} Started on {_job.StartedOn} (UTC)");
                         
+
+            if (_job.UseMongoDump)
+            {
+                _toolsLaunchFolder = await Helper.EnsureMongoToolsAvailableAsync(_log,_toolsDestinationFolder, _config);
+                if (string.IsNullOrEmpty(_toolsLaunchFolder))
+                {
+                    StopMigration();
+                    return;
+                }
+            }
+
 
             if (_job.MigrationUnits == null)
             {
@@ -427,8 +430,8 @@ namespace OnlineMongoMigrationProcessor
             if (_job.RunComparison)
             { 
                 var compareHelper = new ComparisonHelper();
-                _compare_cts = new CancellationTokenSource();
-                await compareHelper.CompareRandomDocumentsAsync(_log, _jobList, _job, _config, _compare_cts.Token);
+                _compare_cts= new CancellationTokenSource();
+                await compareHelper.CompareRandomDocumentsAsync(_log,_jobList,_job,_config, _compare_cts.Token);
                 compareHelper = null;
                 _job.RunComparison = false;
                 _jobList?.Save();
@@ -506,7 +509,7 @@ namespace OnlineMongoMigrationProcessor
             var totalChunksBySize = (int)Math.Ceiling((double)totalCollectionSizeBytes / targetChunkSizeBytes);
 
 
-            if (_job.JobType == JobType.DumpAndRestore)
+            if (_job.UseMongoDump)
             {
                 totalChunks = totalChunksBySize;
                 minDocsInChunk = documentCount / totalChunks;
@@ -523,7 +526,7 @@ namespace OnlineMongoMigrationProcessor
 
             List<MigrationChunk> migrationChunks = new List<MigrationChunk>();
 
-            if (totalChunks > 1 || _job.JobType != JobType.DumpAndRestore)
+            if (totalChunks > 1 || !_job.UseMongoDump)
             {
                 _log.WriteLine($"Chunking {databaseName}.{collectionName}");                
 
@@ -537,9 +540,9 @@ namespace OnlineMongoMigrationProcessor
                 foreach (var dataType in dataTypes)
                 {
                     long docCountByType;
-                    ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log, _job.JobType == JobType.DumpAndRestore, collection, idField, totalChunks, dataType, minDocsInChunk, out docCountByType);
+                    ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log,_job.UseMongoDump, collection, idField, totalChunks, dataType, minDocsInChunk, out docCountByType);
 
-                    if (docCountByType == 0 || _job.JobType == JobType.DumpAndRestore) continue;
+                    if (docCountByType == 0 || _job.UseMongoDump)   continue;
 
                     if (chunkBoundaries == null )
                     {
@@ -587,13 +590,13 @@ namespace OnlineMongoMigrationProcessor
                 var chunk = new MigrationChunk(startId, endId, dataType, false, false);
                 migrationChunks.Add(chunk);
 
-                if (_job.JobType == JobType.MongoDriver && (chunkBoundaries.Boundaries[i].SegmentBoundaries == null || chunkBoundaries.Boundaries[i].SegmentBoundaries.Count == 0))
+                if (!_job.UseMongoDump && (chunkBoundaries.Boundaries[i].SegmentBoundaries == null || chunkBoundaries.Boundaries[i].SegmentBoundaries.Count == 0))
                 {
                     chunk.Segments ??= new List<Segment>();
                     chunk.Segments.Add(new Segment { Gte = startId, Lt = endId, IsProcessed = false, Id = "1" });
                 }
 
-                if (_job.JobType == JobType.MongoDriver && chunkBoundaries.Boundaries[i].SegmentBoundaries.Count > 0)
+                if (!_job.UseMongoDump && chunkBoundaries.Boundaries[i].SegmentBoundaries.Count > 0)
                 {
                     for (int j = 0; j < chunkBoundaries.Boundaries[i].SegmentBoundaries.Count; j++)
                     {

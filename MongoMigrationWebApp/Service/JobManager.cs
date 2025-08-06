@@ -177,12 +177,12 @@ namespace MongoMigrationWebApp.Service
             return Task.CompletedTask;
         }
 
-        public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, bool doBulkCopy, bool trackChangeStreams)
+        public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, OnlineMongoMigrationProcessor.Models.JobType jobType,bool trackChangeStreams)
         {
 
             MigrationWorker = new MigrationWorker(_jobList);
 
-            MigrationWorker?.StartMigrationAsync(job, sourceConnectionString, targetConnectionString, namespacesToMigrate, doBulkCopy, trackChangeStreams);
+            MigrationWorker?.StartMigrationAsync(job, sourceConnectionString, targetConnectionString, namespacesToMigrate, jobType, trackChangeStreams);
         }
 
 

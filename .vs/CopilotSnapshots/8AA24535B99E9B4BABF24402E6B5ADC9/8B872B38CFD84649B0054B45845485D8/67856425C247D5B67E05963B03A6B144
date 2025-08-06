@@ -1,0 +1,104 @@
+﻿using Newtonsoft.Json;
+using OnlineMongoMigrationProcessor.Models;
+using System;
+using System.Collections.Generic;
+
+#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
+
+namespace OnlineMongoMigrationProcessor
+{
+    public class MigrationJob
+    {
+        public string? Id { get; set; }
+        public string? Name { get; set; }
+        public string? SourceEndpoint { get; set; }
+        public string? TargetEndpoint { get; set; }
+        [JsonIgnore]
+        public string? SourceConnectionString { get; set; }
+        [JsonIgnore]
+        public string? TargetConnectionString { get; set; }
+        public string? SourceServerVersion { get; set; }
+        public string? NameSpaces { get; set; }
+        public DateTime? StartedOn { get; set; }
+        public bool IsCompleted { get; set; }
+        public bool IsOnline { get; set; }
+        public bool IsCancelled { get; set; }
+        public bool IsStarted { get; set; }
+        //public bool CurrentlyActive { get; set; }
+        
+        // Legacy property for backward compatibility - will be removed in future versions
+        [JsonProperty("UseMongoDump")]
+        private bool? _useMongoDumpLegacy { get; set; }
+        
+        // New property to replace UseMongoDump
+        public JobType JobType { get; set; } = JobType.MongoCopy;
+        
+        // Backward compatibility property that maps to JobType
+        [JsonIgnore]
+        public bool UseMongoDump
+        {
+            get => JobType == JobType.MongoDump;
+            set => JobType = value ? JobType.MongoDump : JobType.MongoCopy;
+        }
+
+        public bool IsSimulatedRun { get; set; }
+        public bool SkipIndexes { get; set; }
+        public bool AppendMode { get; set; }
+        public bool SyncBackEnabled { get; set; }
+        public bool ProcessingSyncBack { get; set; }
+        public bool RunComparison { get; set; }
+        public bool CSStartsAfterAllUploads { get; set; }
+        public bool CSPostProcessingStarted { get; set; }
+        public List<MigrationUnit>? MigrationUnits { get; set; }
+
+        // Handle deserialization to migrate from UseMongoDump to JobType
+        [JsonExtensionData]
+        private IDictionary<string, Newtonsoft.Json.Linq.JToken>? _additionalData;
+
+        [Newtonsoft.Json.JsonConstructor]
+        public MigrationJob()
+        {
+            // Default constructor for JSON deserialization
+        }
+
+        // Called after deserialization to handle legacy data migration
+        [Newtonsoft.Json.JsonExtensionData]
+        private void HandleAdditionalData(string key, Newtonsoft.Json.Linq.JToken value)
+        {
+            if (key == "UseMongoDump" && value.Type == Newtonsoft.Json.Linq.JTokenType.Boolean)
+            {
+                _useMongoDumpLegacy = value.Value<bool>();
+                // Migrate legacy UseMongoDump to JobType if JobType is not explicitly set
+                if (JobType == JobType.MongoCopy) // Default value, likely not set from JSON
+                {
+                    JobType = _useMongoDumpLegacy.Value ? JobType.MongoDump : JobType.MongoCopy;
+                }
+            }
+        }
+
+        // Ensure JobType is set correctly after JSON deserialization
+        [Newtonsoft.Json.JsonExtensionData]
+        private IDictionary<string, Newtonsoft.Json.Linq.JToken>? ExtensionData
+        {
+            get => _additionalData;
+            set
+            {
+                _additionalData = value;
+                // Handle legacy UseMongoDump migration during deserialization
+                if (_additionalData?.ContainsKey("UseMongoDump") == true)
+                {
+                    var useMongoDumpValue = _additionalData["UseMongoDump"];
+                    if (useMongoDumpValue.Type == Newtonsoft.Json.Linq.JTokenType.Boolean)
+                    {
+                        _useMongoDumpLegacy = useMongoDumpValue.Value<bool>();
+                        // Only migrate if JobType is still the default value
+                        if (JobType == JobType.MongoCopy)
+                        {
+                            JobType = _useMongoDumpLegacy.Value ? JobType.MongoDump : JobType.MongoCopy;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

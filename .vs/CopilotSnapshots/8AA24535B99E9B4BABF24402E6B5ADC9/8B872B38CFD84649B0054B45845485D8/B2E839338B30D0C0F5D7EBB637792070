@@ -2,7 +2,6 @@
 @inject IConfiguration Configuration
 
 @using OnlineMongoMigrationProcessor
-@using OnlineMongoMigrationProcessor.Models
 
 <div class="modal fade show d-block bg-dark bg-opacity-75" id="myModal" aria-modal="true" role="dialog">
     <div class="modal-dialog bg-dark">
@@ -125,7 +124,7 @@
 
 
     private string errorMessage = string.Empty;
-    private JobType jobType = JobType.MongoDriver; // Use JobType enum instead of boolean
+    private JobType jobType = JobType.MongoCopy; // Use JobType enum instead of boolean
     private string selectedOption = "Use Mongo Driver"; // Default dropdown value
     private bool isSimulatedRun = false; // Variable to track the dummy run option
     private bool isOnline = true; // Default to online migration
@@ -152,9 +151,9 @@
         selectedOption = e.Value.ToString();
         jobType = selectedOption switch
         {
-            "Use MongoDump and MongoRestore" => JobType.DumpAndRestore,
-            "Use Cosmos DB RU Optimized Copy" => JobType.RUOptimizedCopy,
-            _ => JobType.MongoDriver
+            "Use MongoDump and MongoRestore" => JobType.MongoDump,
+            "Use RU Copy (Cosmos DB Optimized)" => JobType.RUCopy,
+            _ => JobType.MongoCopy
         };
     }
 
@@ -171,8 +170,8 @@
             namespaces = string.Empty;
             isOnline = false;
             enableSyncBack = false;
-            jobType = JobType.DumpAndRestore;
-            selectedOption = "Use MongoDump and MongoRestore";
+            jobType = JobType.MongoCopy;
+            selectedOption = "Use Mongo Driver";
             isSimulatedRun = false;
             skipIndexes = false;
             appendMode = false;
@@ -190,8 +189,8 @@
             jobType = Job.JobType;
             selectedOption = jobType switch
             {
-                JobType.DumpAndRestore => "Use DumpAndRestore and MongoRestore",
-                JobType.RUOptimizedCopy => "Use RU Copy (Cosmos DB Optimized)",
+                JobType.MongoDump => "Use MongoDump and MongoRestore",
+                JobType.RUCopy => "Use RU Copy (Cosmos DB Optimized)",
                 _ => "Use Mongo Driver"
             };
             isSimulatedRun = Job.IsSimulatedRun;
@@ -276,7 +275,7 @@
             SourceEndpoint = tmpSrcEndpoint,
             TargetEndpoint = tmpTgtEndpoint,
             NameSpaces = namespaces,
-            JobType = jobType,
+            UseMongoDump = jobType == JobType.MongoDump,
             IsSimulatedRun = isSimulatedRun,
             SkipIndexes = skipIndexes,
             AppendMode = appendMode,

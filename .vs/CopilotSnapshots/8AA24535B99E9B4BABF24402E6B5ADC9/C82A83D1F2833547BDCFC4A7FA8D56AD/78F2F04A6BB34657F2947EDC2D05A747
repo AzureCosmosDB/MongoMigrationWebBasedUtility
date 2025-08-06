@@ -1,0 +1,573 @@
+﻿using MongoDB.Bson;
+using MongoDB.Driver;
+using OnlineMongoMigrationProcessor.Helpers;
+using OnlineMongoMigrationProcessor.Models;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+#pragma warning disable CS8602
+#pragma warning disable CS8604
+#pragma warning disable CS8600
+#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
+#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+
+namespace OnlineMongoMigrationProcessor.Processors
+{
+    /// <summary>
+    /// RU (Request Unit) Copy Processor - Implements incremental Change Feed processing via extension command
+    /// for Cosmos DB MongoDB API to efficiently handle large collections with partition-based processing.
+    /// </summary>
+    internal class RUCopyProcessor : IMigrationProcessor
+    {
+        private JobList? _jobList;
+        private MigrationJob? _job;
+        private MongoClient? _sourceClient;
+        private MongoClient? _targetClient;
+        private MigrationSettings? _config;
+        private CancellationTokenSource _cts;
+        private MongoChangeStreamProcessor? _changeStreamProcessor;
+        private bool _postUploadCSProcessing = false;
+        private Log _log;
+
+        // RU-specific configuration
+        private const int MaxConcurrentPartitions = 5;
+        private static readonly TimeSpan BatchDuration = TimeSpan.FromMinutes(5);
+        private readonly ConcurrentDictionary<string, PartitionWatchState> _partitionStates = new();
+
+        public bool ProcessRunning { get; set; }
+
+        public RUCopyProcessor(Log log, JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config)
+        {
+            _log = log;
+            _jobList = jobList;
+            _job = job;
+            _sourceClient = sourceClient;
+            _config = config;
+            _cts = new CancellationTokenSource();
+        }
+
+        public void StopProcessing(bool updateStatus = true)
+        {
+            if (_job != null)
+                _job.IsStarted = false;
+
+            _jobList?.Save();
+
+            if (updateStatus)
+                ProcessRunning = false;
+
+            _cts?.Cancel();
+
+            if (_changeStreamProcessor != null)
+                _changeStreamProcessor.ExecutionCancelled = true;
+        }
+
+        private CopyProcessContext InitializeCopyProcessContext(MigrationUnit item, string sourceConnectionString, string targetConnectionString)
+        {
+            var context = new CopyProcessContext
+            {
+                Item = item,
+                SourceConnectionString = sourceConnectionString,
+                TargetConnectionString = targetConnectionString,
+                JobId = _job.Id,
+                DatabaseName = item.DatabaseName,
+                CollectionName = item.CollectionName,
+                MaxRetries = 10
+            };
+
+            context.Database = _sourceClient.GetDatabase(context.DatabaseName);
+            context.Collection = context.Database.GetCollection<BsonDocument>(context.CollectionName);
+            context.MigrationJobStartTime = DateTime.Now;
+
+            return context;
+        }
+
+        private bool CheckChangeStreamAlreadyProcessingAsync(CopyProcessContext ctx)
+        {
+            if (_postUploadCSProcessing)
+                return true; // Skip processing if post-upload CS processing is already in progress
+
+            if (_job.IsOnline && Helper.IsOfflineJobCompleted(_job) && !_postUploadCSProcessing)
+            {
+                _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
+
+                if (_targetClient == null && !_job.IsSimulatedRun)
+                    _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
+
+                if (_changeStreamProcessor == null)
+                    _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
+
+                var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Fetch change stream tokens for all partitions using the custom Cosmos DB command
+        /// </summary>
+        private async Task<List<BsonDocument>> GetChangeStreamTokensAsync(string databaseName, string collectionName)
+        {
+            try
+            {
+                var database = _sourceClient.GetDatabase(databaseName);
+                var command = new BsonDocument
+                {
+                    ["customAction"] = "GetChangeStreamTokens",
+                    ["collection"] = collectionName,
+                    ["startAtOperationTime"] = BsonTimestamp.Create(DateTime.UtcNow)
+                };
+
+                _log.WriteLine($"Getting Change Stream Tokens for {databaseName}.{collectionName}");
+                var result = await database.RunCommandAsync<BsonDocument>(command);
+
+                if (result.Contains("tokens"))
+                {
+                    var tokens = result["tokens"].AsBsonArray.Select(t => t.AsBsonDocument).ToList();
+                    _log.WriteLine($"Found {tokens.Count} partition tokens for {databaseName}.{collectionName}");
+                    return tokens;
+                }
+                else if (result.Contains("token"))
+                {
+                    var token = new List<BsonDocument> { result["token"].AsBsonDocument };
+                    _log.WriteLine($"Found single partition token for {databaseName}.{collectionName}");
+                    return token;
+                }
+                else
+                {
+                    throw new InvalidOperationException("No tokens found in command response");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error getting change stream tokens: {ex}", LogType.Error);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Get the current resume token for a partition (StopFeedItem)
+        /// </summary>
+        private async Task<BsonDocument> GetCurrentResumeTokenAsync(BsonDocument partitionToken, IMongoCollection<BsonDocument> collection)
+        {
+            var options = new ChangeStreamOptions
+            {
+                FullDocument = ChangeStreamFullDocumentOption.Default,
+                ResumeAfter = partitionToken
+            };
+
+            using var cursor = await collection
+                .WatchAsync(new EmptyPipelineDefinition<ChangeStreamDocument<BsonDocument>>(), options);
+
+            await cursor.MoveNextAsync();
+            return cursor.GetResumeTokenOrLast();
+        }
+
+        /// <summary>
+        /// Process one partition's historical changes for a batch duration
+        /// </summary>
+        private async Task ProcessOnePartitionBatchAsync(PartitionWatchState state, IMongoCollection<BsonDocument> sourceCollection, 
+            IMongoCollection<BsonDocument> targetCollection, CancellationToken token, bool isSimulated)
+        {
+            if (state.IsComplete)
+                return;
+
+            var options = new ChangeStreamOptions
+            {
+                FullDocument = ChangeStreamFullDocumentOption.UpdateLookup
+            };
+
+            if (state.ResumeToken != null)
+                options.ResumeAfter = state.ResumeToken;
+            else
+                options.StartAtOperationTime = BsonTimestamp.Create(DateTime.MinValue);
+
+            _log.WriteLine($"[{state.PartitionId}] Starting batch from token {state.ResumeToken}");
+
+            try
+            {
+                using var cursor = await sourceCollection.WatchAsync(
+                    new EmptyPipelineDefinition<ChangeStreamDocument<BsonDocument>>(), options, token);
+
+                var batchEndTime = DateTime.UtcNow + BatchDuration;
+
+                while (await cursor.MoveNextAsync(token))
+                {
+                    foreach (var change in cursor.Current)
+                    {
+                        // Process the change document
+                        await ProcessChangeDocumentAsync(change, targetCollection, state, isSimulated, token);
+
+                        // Save the latest token
+                        state.ResumeToken = change.ResumeToken;
+                        state.ProcessedDocumentCount++;
+                        state.LastProcessedTime = DateTime.UtcNow;
+
+                        // If current resume token == StopFeedItem, this partition's history is complete
+                        if (EqualsResumeToken(state.ResumeToken, state.StopFeedItem))
+                        {
+                            state.IsComplete = true;
+                            _log.WriteLine($"[{state.PartitionId}] Partition processing completed.");
+                            return;
+                        }
+
+                        // If batch time expired, pause processing
+                        if (DateTime.UtcNow >= batchEndTime)
+                        {
+                            _log.WriteLine($"[{state.PartitionId}] Batch time expired. Saving resume token for next round.");
+                            return;
+                        }
+
+                        // Check for cancellation
+                        if (token.IsCancellationRequested)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error processing partition {state.PartitionId}: {ex}", LogType.Error);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Process a single change document
+        /// </summary>
+        private async Task ProcessChangeDocumentAsync(ChangeStreamDocument<BsonDocument> change, 
+            IMongoCollection<BsonDocument> targetCollection, PartitionWatchState state, bool isSimulated, CancellationToken token)
+        {
+            try
+            {
+                if (isSimulated)
+                {
+                    _log.AddVerboseMessage($"[{state.PartitionId}] Simulated change processing: {change.OperationType} for document {change.DocumentKey}");
+                    return;
+                }
+
+                switch (change.OperationType)
+                {
+                    case ChangeStreamOperationType.Insert:
+                        if (change.FullDocument != null)
+                        {
+                            await targetCollection.InsertOneAsync(change.FullDocument, null, token);
+                            _log.AddVerboseMessage($"[{state.PartitionId}] Inserted document {change.DocumentKey}");
+                        }
+                        break;
+
+                    case ChangeStreamOperationType.Update:
+                        if (change.FullDocument != null)
+                        {
+                            var filter = Builders<BsonDocument>.Filter.Eq("_id", change.DocumentKey["_id"]);
+                            await targetCollection.ReplaceOneAsync(filter, change.FullDocument, new ReplaceOptions(), token);
+                            _log.AddVerboseMessage($"[{state.PartitionId}] Updated document {change.DocumentKey}");
+                        }
+                        break;
+
+                    case ChangeStreamOperationType.Delete:
+                        var deleteFilter = Builders<BsonDocument>.Filter.Eq("_id", change.DocumentKey["_id"]);
+                        await targetCollection.DeleteOneAsync(deleteFilter, null, token);
+                        _log.AddVerboseMessage($"[{state.PartitionId}] Deleted document {change.DocumentKey}");
+                        break;
+
+                    case ChangeStreamOperationType.Replace:
+                        if (change.FullDocument != null)
+                        {
+                            var replaceFilter = Builders<BsonDocument>.Filter.Eq("_id", change.DocumentKey["_id"]);
+                            await targetCollection.ReplaceOneAsync(replaceFilter, change.FullDocument, new ReplaceOptions(), token);
+                            _log.AddVerboseMessage($"[{state.PartitionId}] Replaced document {change.DocumentKey}");
+                        }
+                        break;
+
+                    default:
+                        _log.AddVerboseMessage($"[{state.PartitionId}] Unhandled change type: {change.OperationType}");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error processing change document in partition {state.PartitionId}: {ex}", LogType.Error);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Compare two resume tokens for equality
+        /// </summary>
+        private static bool EqualsResumeToken(BsonDocument? a, BsonDocument? b)
+        {
+            if (a == null || b == null)
+                return false;
+            return a.ToJson() == b.ToJson();
+        }
+
+        /// <summary>
+        /// Custom exception handler for RU processing
+        /// </summary>
+        private Task<TaskResult> RUProcess_ExceptionHandler(Exception ex, int attemptCount, string processName, string dbName, string colName, string partitionId, int currentBackoff)
+        {
+            if (ex is OperationCanceledException)
+            {
+                _log.WriteLine($"RU copy operation was cancelled for {dbName}.{colName} partition {partitionId}");
+                return Task.FromResult(TaskResult.Abort);
+            }
+            else if (ex is MongoExecutionTimeoutException)
+            {
+                _log.WriteLine($"{processName} attempt {attemptCount} failed due to timeout. Details: {ex}", LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+            else if (ex.Message.Contains("Change Stream Token"))
+            {
+                _log.WriteLine($"{processName} attempt for {dbName}.{colName} partition {partitionId} failed. Retrying in {currentBackoff} seconds...");
+                return Task.FromResult(TaskResult.Retry);
+            }
+            else
+            {
+                _log.WriteLine($"{processName} error: {ex}", LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+        }
+
+        /// <summary>
+        /// Process partitions using RU-optimized approach
+        /// </summary>
+        private async Task<TaskResult> ProcessPartitionsAsync(MigrationUnit item, CopyProcessContext ctx)
+        {
+            try
+            {
+                // Get partition tokens
+                var tokens = await GetChangeStreamTokensAsync(ctx.DatabaseName, ctx.CollectionName);
+                
+                if (!tokens.Any())
+                {
+                    _log.WriteLine($"No partition tokens found for {ctx.DatabaseName}.{ctx.CollectionName}", LogType.Error);
+                    return TaskResult.Failed;
+                }
+
+                // Initialize partition states
+                foreach (var token in tokens)
+                {
+                    var stopToken = await GetCurrentResumeTokenAsync(token, ctx.Collection);
+                    var partitionId = token.ToJson();
+                    
+                    _partitionStates[partitionId] = new PartitionWatchState
+                    {
+                        ResumeToken = null, // Start from beginning of history
+                        StopFeedItem = stopToken,
+                        PartitionId = partitionId,
+                        IsComplete = false,
+                        CollectionKey = $"{ctx.DatabaseName}.{ctx.CollectionName}",
+                        LastProcessedTime = DateTime.UtcNow
+                    };
+                }
+
+                _log.WriteLine($"Initialized {_partitionStates.Count} partitions for {ctx.DatabaseName}.{ctx.CollectionName}");
+
+                // Setup target client and collection
+                if (_targetClient == null && !_job.IsSimulatedRun)
+                    _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
+
+                IMongoCollection<BsonDocument>? targetCollection = null;
+                if (!_job.IsSimulatedRun)
+                {
+                    var targetDatabase = _targetClient.GetDatabase(ctx.DatabaseName);
+                    targetCollection = targetDatabase.GetCollection<BsonDocument>(ctx.CollectionName);
+                }
+
+                // Process partitions in batches
+                while (_partitionStates.Values.Any(s => !s.IsComplete) && !_cts.Token.IsCancellationRequested)
+                {
+                    var partitionsToProcess = _partitionStates.Values
+                        .Where(s => !s.IsComplete)
+                        .Take(MaxConcurrentPartitions)
+                        .ToList();
+
+                    var batchCts = new CancellationTokenSource(BatchDuration);
+                    var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, batchCts.Token);
+
+                    var tasks = partitionsToProcess.Select(state =>
+                        ProcessOnePartitionBatchAsync(state, ctx.Collection, targetCollection, combinedCts.Token, _job.IsSimulatedRun)
+                    ).ToList();
+
+                    await Task.WhenAll(tasks);
+
+                    var completedCount = _partitionStates.Values.Count(s => s.IsComplete);
+                    var totalProcessed = _partitionStates.Values.Sum(s => s.ProcessedDocumentCount);
+                    
+                    _log.WriteLine($"Batch completed. Partitions completed: {completedCount}/{_partitionStates.Count}, " +
+                                   $"Total documents processed: {totalProcessed}");
+
+                    // Update progress
+                    var progressPercent = Math.Min(100, (double)completedCount / _partitionStates.Count * 100);
+                    item.DumpPercent = progressPercent;
+                    item.RestorePercent = progressPercent;
+                    
+                    if (progressPercent >= 100)
+                    {
+                        item.DumpComplete = true;
+                        item.RestoreComplete = true;
+                        item.BulkCopyEndedOn = DateTime.UtcNow;
+                    }
+
+                    _jobList?.Save();
+
+                    batchCts.Dispose();
+                    combinedCts.Dispose();
+                }
+
+                if (_partitionStates.Values.All(s => s.IsComplete))
+                {
+                    _log.WriteLine($"All partitions completed for {ctx.DatabaseName}.{ctx.CollectionName}");
+                    return TaskResult.Success;
+                }
+                else if (_cts.Token.IsCancellationRequested)
+                {
+                    _log.WriteLine($"Processing cancelled for {ctx.DatabaseName}.{ctx.CollectionName}");
+                    return TaskResult.Abort;
+                }
+                else
+                {
+                    _log.WriteLine($"Processing failed for {ctx.DatabaseName}.{ctx.CollectionName}", LogType.Error);
+                    return TaskResult.Failed;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error in RU partition processing: {ex}", LogType.Error);
+                return TaskResult.Failed;
+            }
+        }
+
+        private async Task PostCopyChangeStreamProcessor(CopyProcessContext ctx, MigrationUnit item)
+        {
+            if (item.RestoreComplete && item.DumpComplete && !_cts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    if (_job.IsOnline && !_cts.Token.IsCancellationRequested && !_job.CSStartsAfterAllUploads)
+                    {
+                        if (_targetClient == null && !_job.IsSimulatedRun)
+                            _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
+
+                        if (_changeStreamProcessor == null)
+                            _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
+
+                        _changeStreamProcessor.AddCollectionsToProcess(item, _cts);
+                    }
+
+                    if (!_cts.Token.IsCancellationRequested)
+                    {
+                        var migrationJob = _jobList.MigrationJobs.Find(m => m.Id == ctx.JobId);
+                        if (!_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
+                        {
+                            _log.WriteLine($"{migrationJob.Id} completed.");
+                            migrationJob.IsCompleted = true;
+                            StopProcessing(true);
+                        }
+                        else if (_job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(migrationJob) && !_postUploadCSProcessing)
+                        {
+                            _postUploadCSProcessing = true;
+
+                            if (_targetClient == null && !_job.IsSimulatedRun)
+                                _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
+
+                            if (_changeStreamProcessor == null)
+                                _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
+
+                            var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Do nothing
+                }
+            }
+        }
+
+        public async Task StartProcessAsync(MigrationUnit item, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        {
+            ProcessRunning = true;
+
+            if (_job != null)
+                _job.IsStarted = true;
+
+            var ctx = InitializeCopyProcessContext(item, sourceConnectionString, targetConnectionString);
+
+            // Check if post-upload change stream processing is already in progress
+            if (CheckChangeStreamAlreadyProcessingAsync(ctx))
+                return;
+
+            _log.WriteLine($"RU Copy Processor started for {ctx.DatabaseName}.{ctx.CollectionName}");
+
+            if (!item.DumpComplete && !_cts.Token.IsCancellationRequested)
+            {
+                if (!item.BulkCopyStartedOn.HasValue || item.BulkCopyStartedOn == DateTime.MinValue)
+                    item.BulkCopyStartedOn = DateTime.UtcNow;
+
+                // Get estimated document count
+                item.EstimatedDocCount = ctx.Collection.EstimatedDocumentCount();
+
+                Task.Run(() =>
+                {
+                    long count = MongoHelper.GetActualDocumentCount(ctx.Collection, item);
+                    item.ActualDocCount = count;
+                    _jobList?.Save();
+                }, _cts.Token);
+
+                // Process using RU-optimized partition approach
+                TaskResult result = await new RetryHelper().ExecuteTask(
+                    () => ProcessPartitionsAsync(item, ctx),
+                    (ex, attemptCount, currentBackoff) => RUProcess_ExceptionHandler(
+                        ex, attemptCount,
+                        "RU Partition processor", ctx.DatabaseName, ctx.CollectionName, "all", currentBackoff
+                    ),
+                    _log
+                );
+
+                if (result == TaskResult.Abort || result == TaskResult.Failed)
+                {
+                    _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} failed after multiple attempts.", LogType.Error);
+                    StopProcessing();
+                    return;
+                }
+
+                // Update final statistics
+                var totalProcessed = _partitionStates.Values.Sum(s => s.ProcessedDocumentCount);
+                item.SourceCountDuringCopy = totalProcessed;
+                item.DumpGap = Math.Max(item.ActualDocCount, item.EstimatedDocCount) - totalProcessed;
+                item.RestoreGap = 0; // RU processing writes directly to target
+
+                if (item.DumpComplete && item.RestoreComplete)
+                {
+                    _log.WriteLine($"RU Copy completed successfully for {ctx.DatabaseName}.{ctx.CollectionName}. " +
+                                   $"Processed {totalProcessed} changes across {_partitionStates.Count} partitions.");
+                }
+            }
+
+            await PostCopyChangeStreamProcessor(ctx, item);
+        }
+    }
+
+    /// <summary>
+    /// Helper extension method to get resume token from cursor
+    /// </summary>
+    public static class MongoCursorExtensions
+    {
+        public static BsonDocument GetResumeTokenOrLast<T>(this IAsyncCursor<T> cursor)
+        {
+            var property = cursor.GetType().GetProperty("ResumeToken", 
+                System.Reflection.BindingFlags.Instance | 
+                System.Reflection.BindingFlags.Public | 
+                System.Reflection.BindingFlags.NonPublic);
+            return property?.GetValue(cursor) as BsonDocument ?? new BsonDocument();
+        }
+    }
+}

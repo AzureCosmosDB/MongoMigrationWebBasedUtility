@@ -127,7 +127,7 @@ namespace OnlineMongoMigrationProcessor
             if (!item.BulkCopyStartedOn.HasValue || item.BulkCopyStartedOn == DateTime.MinValue)
                 item.BulkCopyStartedOn = DateTime.UtcNow;
 
-            // MongoDump
+            // DumpAndRestore
             if (!item.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
                 _log.WriteLine($"{dbName}.{colName} download started");

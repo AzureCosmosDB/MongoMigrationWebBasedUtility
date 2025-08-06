@@ -1,0 +1,195 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using MongoDB.Bson;
+using MongoDB.Driver; // For watch/commands
+
+namespace CosmosMongoChangeStream
+{
+    public class PartitionWatchState
+    {
+        public BsonDocument ResumeToken { get; set; }
+        public BsonDocument StopFeedItem { get; set; }
+        public string PartitionId { get; set; } // for reference/logging/etc.
+        public bool IsComplete { get; set; }
+    }
+
+    class Program
+    {
+        // App config
+        const int MaxConcurrentPartitions = 5;   // Max partitions processed in parallel
+        static readonly TimeSpan BatchDuration = TimeSpan.FromMinutes(5);
+        static readonly string MongoConnectionString = "<your-mongodb-connection-string>";
+        static readonly string DatabaseName = "<your-database-name>";
+        static readonly string CollectionName = "<your-collection-name>";
+        
+        static readonly ConcurrentDictionary<string, PartitionWatchState> PartitionStates = new();
+
+        static IMongoDatabase database;
+        static IMongoCollection<BsonDocument> collection;
+
+        static async Task Main(string[] args)
+        {
+            var client = new MongoClient(MongoConnectionString);
+            database = client.GetDatabase(DatabaseName);
+            collection = database.GetCollection<BsonDocument>(CollectionName);
+
+            Console.WriteLine("Getting Change Stream Tokens (one per physical partition)...");
+            var tokens = await GetChangeStreamTokensAsync();
+
+            // Step 1: For each token, get StopFeedItem (the resume token at 'now')
+            foreach(var token in tokens)
+            {
+                var stopToken = await GetCurrentResumeTokenAsync(token);
+                PartitionStates[token.ToJson()] = new PartitionWatchState
+                {
+                    ResumeToken = null, // start historical from beginning
+                    StopFeedItem = stopToken,
+                    PartitionId = token.ToJson(),
+                    IsComplete = false
+                };
+            }
+            Console.WriteLine($"Found {PartitionStates.Count} partitions for collection '{CollectionName}'.");
+
+            // Process partitions in batches, max 5 concurrect
+            while(PartitionStates.Values.Any(s => !s.IsComplete))
+            {
+                var partitionsToProcess = PartitionStates.Values.Where(s => !s.IsComplete).Take(MaxConcurrentPartitions).ToList();
+                var cts = new CancellationTokenSource(BatchDuration);
+
+                var tasks = partitionsToProcess.Select(state =>
+                    ProcessOnePartitionBatchAsync(state, cts.Token)
+                ).ToList();
+
+                await Task.WhenAll(tasks);
+
+                Console.WriteLine($"Batch completed at {DateTime.UtcNow}. Partitions left: {PartitionStates.Values.Count(s => !s.IsComplete)}");
+                // Optionally persist PartitionStates for resume
+            }
+
+            Console.WriteLine("All partitions processed!");
+        }
+
+        // Fetch tokens for all partitions (using custom command)
+        static async Task<List<BsonDocument>> GetChangeStreamTokensAsync()
+        {
+            var command = new BsonDocument
+            {
+                ["customAction"] = "GetChangeStreamTokens",
+                ["collection"] = CollectionName,
+                ["startAtOperationTime"] = BsonTimestamp.Create(DateTime.UtcNow) // as per docs, optional
+            };
+            var result = await database.RunCommandAsync<BsonDocument>(command);
+
+            // Result will be an array of resume tokens
+            if (result.Contains("tokens"))
+            {
+                return result["tokens"].AsBsonArray.Select(t => t.AsBsonDocument).ToList();
+            }
+            else if (result.Contains("token")) // in some Cosmos DB versions, field may be singular
+            {
+                return new List<BsonDocument> { result["token"].AsBsonDocument };
+            }
+            else
+            {
+                throw new InvalidOperationException("No tokens found in command response");
+            }
+        }
+
+        // For a token/partition, get the latest (StopFeedItem) token as of NOW
+        static async Task<BsonDocument> GetCurrentResumeTokenAsync(BsonDocument partitionToken)
+        {
+            var options = new ChangeStreamOptions
+            {
+                FullDocument = ChangeStreamFullDocumentOption.Default,
+                ResumeAfter = partitionToken
+                // startAtOperationTime could be now, but ResumeAfter is required for Cosmos' physical partition
+            };
+
+            // do an empty watch with no time to force getting the current resume token ("now")
+            using var cursor = await collection
+                .WatchAsync(new EmptyPipelineDefinition<ChangeStreamDocument<BsonDocument>>(), options);
+
+            await cursor.MoveNextAsync();
+            // Get resume token from an empty batch (should be available as cursor.ResumeToken)
+            return cursor.GetResumeTokenOrLast();
+        }
+
+        // Process one partition's (historical) changes for a batch of up to 5 minutes
+        static async Task ProcessOnePartitionBatchAsync(PartitionWatchState state, CancellationToken token)
+        {
+            if (state.IsComplete)
+                return;
+
+            // Start watch, resuming from current state.ResumeToken (or start at minvalue)
+            var options = new ChangeStreamOptions
+            {
+                FullDocument = ChangeStreamFullDocumentOption.UpdateLookup
+            };
+            if (state.ResumeToken != null)
+                options.ResumeAfter = state.ResumeToken;
+            else
+                options.StartAtOperationTime = BsonTimestamp.Create(DateTime.MinValue);
+
+            Console.WriteLine($"[{state.PartitionId}] Starting batch from token {state.ResumeToken}");
+
+            using var cursor = await collection.WatchAsync(
+                new EmptyPipelineDefinition<ChangeStreamDocument<BsonDocument>>(), options, token);
+
+            var batchEndTime = DateTime.UtcNow + BatchDuration;
+
+            while (await cursor.MoveNextAsync(token))
+            {
+                foreach (var change in cursor.Current)
+                {
+                    // --- APPLICATION LOGIC: process 'change' here ---
+                    // For demo, just print _id of changed document
+                    Console.WriteLine($"[{state.PartitionId}] Change _id: {change.DocumentKey}");
+
+                    // Save the latest token
+                    state.ResumeToken = change.ResumeToken;
+
+                    // If current resume token == StopFeedItem, this partition’s history complete
+                    if (EqualsResumeToken(state.ResumeToken, state.StopFeedItem))
+                    {
+                        state.IsComplete = true;
+                        Console.WriteLine($"[{state.PartitionId}] Partition is fully processed.");
+                        return;
+                    }
+
+                    // If batch time expired, pause processing
+                    if (DateTime.UtcNow >= batchEndTime)
+                    {
+                        Console.WriteLine($"[{state.PartitionId}] Batch time is up. Save resume token for next round.");
+                        return;
+                    }
+
+                    // Or test cancellation token
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Helper: compare resume tokens (BsonDocument)
+        static bool EqualsResumeToken(BsonDocument a, BsonDocument b)
+        {
+            return a.ToJson() == b.ToJson(); // enough for demo, can optimize if needed
+        }
+    }
+
+    // Helper extension: get current resume token or last from cursor
+    public static class MongoCursorExtensions
+    {
+        public static BsonDocument GetResumeTokenOrLast<T>(this IAsyncCursor<T> cursor)
+        {
+            var property = cursor.GetType().GetProperty("ResumeToken", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+            return property?.GetValue(cursor) as BsonDocument;
+        }
+    }
+}

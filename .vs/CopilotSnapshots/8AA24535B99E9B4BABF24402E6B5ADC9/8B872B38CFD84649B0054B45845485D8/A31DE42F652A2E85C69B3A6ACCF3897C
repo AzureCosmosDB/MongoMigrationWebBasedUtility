@@ -1,5 +1,4 @@
-using Newtonsoft.Json;
-using OnlineMongoMigrationProcessor.Models;
+﻿using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 
@@ -25,34 +24,7 @@ namespace OnlineMongoMigrationProcessor
         public bool IsCancelled { get; set; }
         public bool IsStarted { get; set; }
         //public bool CurrentlyActive { get; set; }
-        
-        // New property to replace UseMongoDump
-        public JobType JobType { get; set; } = JobType.MongoDriver;
-        
-        // Legacy property for backward compatibility - will be removed in future versions
-        // This will only be deserialized if present in JSON, but never serialized
-        [JsonProperty("UseMongoDump", DefaultValueHandling = DefaultValueHandling.Ignore)]
-        private bool? _useMongoDumpLegacy
-        {
-            get => null; // Never serialize this
-            set
-            {
-                // Handle deserialization of legacy UseMongoDump property
-                if (value.HasValue)
-                {
-                    JobType = value.Value ? JobType.DumpAndRestore : JobType.MongoDriver;
-                }
-            }
-        }
-        
-        //// Backward compatibility property that maps to JobType
-        //[JsonIgnore]
-        //public bool UseMongoDump
-        //{
-        //    get => JobType == JobType.DumpAndRestore;
-        //    set => JobType = value ? JobType.DumpAndRestore : JobType.MongoDriver;
-        //}
-
+        public bool UseMongoDump { get; set; }
         public bool IsSimulatedRun { get; set; }
         public bool SkipIndexes { get; set; }
         public bool AppendMode { get; set; }

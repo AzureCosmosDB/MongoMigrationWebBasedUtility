@@ -101,7 +101,7 @@
         <tr>
             <th>Database Name</th>
             <th>Collection Name</th>
-            @if (MigrationJob != null && MigrationJob.UseMongoDump)
+            @if (MigrationJob != null && MigrationJob.JobType==OnlineMongoMigrationProcessor.Models.JobType.DumpAndRestore)
             {
                 <th>Download Status</th>
                 <th>Upload Status</th>
@@ -139,7 +139,7 @@
                         @(unit.SourceStatus == CollectionStatus.NotFound ? "MISSING or EMPTY" : (unit.DumpComplete ? "Success" : $"{unit.DumpPercent:F1}%"))
                     </td>
 
-                    @if (MigrationJob != null && MigrationJob.UseMongoDump)
+                    @if (MigrationJob != null && MigrationJob.JobType == OnlineMongoMigrationProcessor.Models.JobType.DumpAndRestore)
                     {
                         <td>
                             @(unit.SourceStatus == CollectionStatus.NotFound ? "MISSING or EMPTY" : (unit.RestoreComplete || unit.RestorePercent == 100 ? "Success" : $"{unit.RestorePercent:F1}%"))
@@ -552,7 +552,7 @@ else if (@_showLogBackupFile)
                 }
                 else
                 {
-                    JobManager.StartMigrationAsync(MigrationJob, MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob.NameSpaces, MigrationJob.UseMongoDump, MigrationJob.IsOnline);
+                    JobManager.StartMigrationAsync(MigrationJob, MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob.NameSpaces, MigrationJob.JobType, MigrationJob.IsOnline);
                 }
             });
 

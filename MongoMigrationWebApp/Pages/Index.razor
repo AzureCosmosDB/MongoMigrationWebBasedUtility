@@ -56,7 +56,7 @@
                             }
                         </td>
                         <td>@migration.Name</td>
-                        <td>@GetToolName(migration.UseMongoDump)</td>
+                        <td>@GetToolName(migration.JobType)</td>
                         <td>@migration.StartedOn</td>
                         <td class="tooltip-text" title="@migration.NameSpaces">@migration.SourceEndpoint<br /> to <br /> @migration.TargetEndpoint</td>
                         <td>@migration.IsOnline</td>
@@ -122,9 +122,9 @@
     private bool _loadingComplete;
     private bool _jobLoadError;
 
-    private string GetToolName(bool useMongoDump)
+    private string GetToolName(OnlineMongoMigrationProcessor.Models.JobType jobType)
     {
-        return useMongoDump ? "MongoDump and MongoRestore" : "Mongo Driver";
+        return jobType.ToString(); //useMongoDump ? "DumpAndRestore and MongoRestore" : "Mongo Driver";
     }
 
 #pragma warning disable CS1998
