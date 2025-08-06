@@ -129,7 +129,7 @@
             if (MigrationUnit.ComparedOn.HasValue && MigrationUnit.ComparedOn != DateTime.MinValue)
             {
                 Properties.Add("Hash Compared Time", MigrationUnit.ComparedOn.Value.ToString() ?? "N/A");
-                Properties.Add("Variance Count", MigrationUnit.VarianceCount.ToString() ?? "N/A");
+                Properties.Add("***********Differences", MigrationUnit.VarianceCount.ToString() ?? "N/A");
             }
 
         }

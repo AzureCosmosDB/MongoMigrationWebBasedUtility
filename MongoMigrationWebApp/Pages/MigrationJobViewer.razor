@@ -164,8 +164,13 @@
     <button class="btn btn-primary mx-2" title="You can add or remove collections from this job. Be sure to pause the job before doing so." @onclick="ManageCollections">Update Collections</button>
     @if (MigrationJob.IsOnline)
     {
-        <button class="btn btn-primary mx-2" title="Reset the change stream checkpoint to start from the beginning. This may add extra load to the migration process and could delay other collections. Ensure the job is paused before continuing." @onclick="ResetChangeStream">Reset Change Stream</button>
-        <button class="btn btn-primary mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison">Run Hash Check</button>
+        <button class="btn btn-warning mx-2" title="Reset the change stream checkpoint to start from the beginning. This may add extra load to the migration process and could delay other collections. Ensure the job is paused before continuing." @onclick="ResetChangeStream">
+            @(MigrationJob.MigrationUnits.Any(MigrationUnit => MigrationUnit.ResetChangeStream) ? "✓ Reset Change Stream" : "☐ Reset Change Stream")
+        </button>
+
+        <button class="btn btn-warning mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison">
+            @(MigrationJob.RunComparison ? "✓ Run Hash Check" : "☐ Run Hash Check")
+        </button>
     }
     
 </div>
@@ -563,11 +568,11 @@ else if (@_showLogBackupFile)
             _yesNoDiaLogType=YesNoDialog.Category.RunComparisonNot;
             _message = "Comparing collections using random sampling may take some time. This process will block the migration and could cause delays. Please confirm if you want to continue with the comparison. You will need to resume the job to continue.";
             _yesNoDialogOpen = true;
-            
+
         }
         else
         {
-           _errorMessage = "Please pause the job before you run the comparison.";
+            _errorMessage = "Please pause the job before you run the comparison.";
         }
     }
 
@@ -741,7 +746,15 @@ else if (@_showLogBackupFile)
                 MigrationJob.RunComparison = true;
                 if (!SaveJobs()) return;
             }
-           
+
+        }
+        else
+        {
+            if (result.DiaLogType == YesNoDialog.Category.RunComparisonNot)
+            {
+                MigrationJob.RunComparison = false;
+                if (!SaveJobs()) return;
+            }
         }
     }
 
