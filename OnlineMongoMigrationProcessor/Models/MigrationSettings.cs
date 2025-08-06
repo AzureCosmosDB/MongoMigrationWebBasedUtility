@@ -49,7 +49,7 @@ namespace OnlineMongoMigrationProcessor
                     ChangeStreamBatchDurationMin = loadedObject.ChangeStreamBatchDurationMin == 0 ? 30 : loadedObject.ChangeStreamBatchDurationMin;
                     ChangeStreamMaxCollsInBatch = loadedObject.ChangeStreamMaxCollsInBatch == 0 ? 5 : loadedObject.ChangeStreamMaxCollsInBatch;
 					MongoCopyPageSize = loadedObject.MongoCopyPageSize;
-                    CompareSampleSize = loadedObject.CompareSampleSize;
+                    CompareSampleSize = loadedObject.CompareSampleSize == 0 ? 50 : loadedObject.CompareSampleSize;
                     CACertContentsForSourceServer = loadedObject.CACertContentsForSourceServer;
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)

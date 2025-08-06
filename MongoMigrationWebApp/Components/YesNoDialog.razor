@@ -34,6 +34,10 @@
                         <button type="button" class="btn btn-primary" @onclick=@Ok>Recover</button>
                         <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Recover</button>
                         break;
+                    case Category.RunComparisonNot:
+                        <button type="button" class="btn btn-primary" @onclick=@Ok>Run Comparison</button>
+                        <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Run Comparison</button>
+                        break;
                 }
             </div>
         </div>
@@ -65,7 +69,8 @@
         CompleteNot,
         SyncBackNot,
         DeleteNot,
-        RecoverNot
+        RecoverNot,
+        RunComparisonNot
 
     }
 

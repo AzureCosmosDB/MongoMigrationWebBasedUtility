@@ -81,7 +81,6 @@
 {
    <YesNoDialog Type=_yesNoDiaLogType Caption="Confirmation Required" Message="@_message" OnClose="@YesNoDialogSubmit" />
 }
-
 @if (_manageCollectionDialogOpen && MigrationJob != null)
 {
     <ManageCollections MigrationUnits="@MigrationJob.MigrationUnits" OnCollectionsUpdated="@OnCollectionsUpdated" />
@@ -166,8 +165,9 @@
     @if (MigrationJob.IsOnline)
     {
         <button class="btn btn-primary mx-2" title="Reset the change stream checkpoint to start from the beginning. This may add extra load to the migration process and could delay other collections. Ensure the job is paused before continuing." @onclick="ResetChangeStream">Reset Change Stream</button>
+        <button class="btn btn-primary mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison">Run Hash Check</button>
     }
-    <button class="btn btn-primary mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison" disabled="!JobManager.IsComparisonRunning()">Run Hash Check</button>
+    
 </div>
 
 @if (LogBucket != null && VerboseMessages != null && VerboseMessages.Count > 0 && !_showLogBackupFile)
@@ -284,6 +284,7 @@ else if (@_showLogBackupFile)
     private bool _manageCollectionDialogOpen;
     private bool _resetChangeStreamDialogOpen;
     private bool _collectionDetailsDialogOpen;
+
     private bool _showLogBackupFile = false;
     private string _logBackupFile = string.Empty;
     private MigrationUnit? _selectedMigrationUnit;
@@ -402,8 +403,6 @@ else if (@_showLogBackupFile)
         }
 
     }
-
-
 
     private async Task UpdateTimerStatus(string id, int seconds)
     {
@@ -559,19 +558,17 @@ else if (@_showLogBackupFile)
     private void RunComparison()
     {
         _errorMessage = string.Empty;
-        if (IsResumeEnabled() && !JobManager.IsComparisonRunning())
+        if (IsResumeEnabled())
         {
-            if (MigrationJob.MigrationUnits != null && MigrationJob.MigrationUnits.Count > 0)
-            {
-                _errorMessage = "Running hash comparison on sample documents..., Please wait for it to complete.";
-                JobManager.StartComparison();
-                _errorMessage = string.Empty; // Reset error message after starting comparison      
-            }
-            else
-            {
-                _errorMessage = "No collections to compare.";
-            }
-        }       
+            _yesNoDiaLogType=YesNoDialog.Category.RunComparisonNot;
+            _message = "Comparing collections using random sampling may take some time. This process will block the migration and could cause delays. Please confirm if you want to continue with the comparison. You will need to resume the job to continue.";
+            _yesNoDialogOpen = true;
+            
+        }
+        else
+        {
+           _errorMessage = "Please pause the job before you run the comparison.";
+        }
     }
 
     private void ResetChangeStream()
@@ -739,6 +736,12 @@ else if (@_showLogBackupFile)
                 JobManager.SyncBackToSource(MigrationJob.SourceConnectionString, MigrationJob.TargetConnectionString, MigrationJob);
                 if (!SaveJobs()) return;
             }
+            else if( result.DiaLogType == YesNoDialog.Category.RunComparisonNot)
+            {
+                MigrationJob.RunComparison = true;
+                if (!SaveJobs()) return;
+            }
+           
         }
     }
 

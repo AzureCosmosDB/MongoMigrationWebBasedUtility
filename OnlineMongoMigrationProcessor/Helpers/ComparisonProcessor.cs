@@ -29,16 +29,25 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
             try
             {
+
+                log.WriteLine($"Running hash comparison using {config.CompareSampleSize} sample documents.");
+
                 // Assuming your MongoClientFactory.Create returns MongoClient (or IMongoClient).
                 sourceClient = MongoClientFactory.Create(log, job.SourceConnectionString, false, config.CACertContentsForSourceServer);
                 targetClient = MongoClientFactory.Create(log, job.TargetConnectionString);
 
                 foreach (var mu in job.MigrationUnits)
                 {
+
+                    log.WriteLine($"Processing {mu.DatabaseName}.{mu.CollectionName}.");
+
                     cancellationToken.ThrowIfCancellationRequested();
 
                     if (mu.SourceStatus != CollectionStatus.OK)
+                    {
+                        log.WriteLine($"Skipping {mu.DatabaseName}.{mu.CollectionName} as source collection status is empty.");
                         continue; //skip if collection is not OK
+                    }
 
                     var sourceDb = sourceClient.GetDatabase(mu.DatabaseName);
                     var targetDb = targetClient.GetDatabase(mu.DatabaseName);
@@ -68,7 +77,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
                         if (targetDoc == null)
                         {
-                            log.WriteLine($"Comparison report for {mu.DatabaseName}.{mu.CollectionName}: Document with _id {id} missing in target.");
+                            log.WriteLine($"Error found in {mu.DatabaseName}.{mu.CollectionName}: Document with _id {id} missing in target.");
                             mismatched++;
                             continue;
                         }
@@ -78,7 +87,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
                         if (sourceHash != targetHash)
                         {
-                            log.WriteLine($"Comparison report for {mu.DatabaseName}.{mu.CollectionName}: Hash mismatch for _id {id}.", LogType.Error);
+                            log.WriteLine($"Error found in {mu.DatabaseName}.{mu.CollectionName}: Hash mismatch for _id {id}.", LogType.Error);
                             mismatched++;
                             continue;
                         }
@@ -86,7 +95,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
                     if (mismatched == 0)
                     {
-                        log.WriteLine($"Comparison report for {mu.DatabaseName}.{mu.CollectionName}: No mismatch found");
+                        log.WriteLine($"No mismatch found in {mu.DatabaseName}.{mu.CollectionName}");
                     }
 
                     mu.VarianceCount = mismatched;

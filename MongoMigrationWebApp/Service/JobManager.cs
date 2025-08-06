@@ -205,17 +205,7 @@ namespace MongoMigrationWebApp.Service
         }
 
         #endregion
-
-
-        public void StartComparison()
-        {
-            MigrationWorker?.StartComparison();
-        }
-
-        public bool IsComparisonRunning()
-        {
-            return MigrationWorker?.IsComparisonRunning() ?? false;
-        }
+                
     }
 }
 

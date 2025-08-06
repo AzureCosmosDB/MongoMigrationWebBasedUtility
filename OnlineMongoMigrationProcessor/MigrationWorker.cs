@@ -40,7 +40,7 @@ namespace OnlineMongoMigrationProcessor
         public MigrationSettings? _config;
         
         private ComparisonHelper? comparisonHelper;
-        private CancellationTokenSource compare_cts;
+        private CancellationTokenSource _compare_cts;
 
         public MigrationWorker(JobList jobList)
         {            
@@ -103,7 +103,7 @@ namespace OnlineMongoMigrationProcessor
         {
             try
             {
-                StopComparison();
+                _compare_cts?.Cancel();
                 _jobList?.Save();
                 _migrationCancelled = true;
                 _migrationProcessor?.StopProcessing();
@@ -426,6 +426,18 @@ namespace OnlineMongoMigrationProcessor
                 return;
             }
 
+            //if run comparison is set by customer.
+            if (_job.RunComparison)
+            { 
+                var compareHelper = new ComparisonHelper();
+                _compare_cts= new CancellationTokenSource();
+                await compareHelper.CompareRandomDocumentsAsync(_log,_jobList,_job,_config, _compare_cts.Token);
+                compareHelper = null;
+                _job.RunComparison = false;
+                _jobList?.Save();
+
+                _log.WriteLine("Resuming migration.");
+            }
             
             result = await new RetryHelper().ExecuteTask(
                 () => MigrateJobCollections(),
@@ -619,32 +631,7 @@ namespace OnlineMongoMigrationProcessor
             }
 
             return Tuple.Create(startId, endId);
-        }
-
-        
-        public void StartComparison()
-        {
-            if (comparisonHelper != null)
-            {
-                comparisonHelper = new ComparisonHelper();
-                comparisonHelper.CompareRandomDocumentsAsync(_log, _jobList, _job, _config, compare_cts.Token).GetAwaiter().GetResult();
-                comparisonHelper = null;
-            }
-        }
-
-        private void StopComparison()
-        {
-            compare_cts?.Cancel();
-        }
-
-        public bool IsComparisonRunning()
-        {
-            if (comparisonHelper != null)
-            {
-                return true;
-            }
-            return false;
-        }
-
+        }           
+ 
     }
 }

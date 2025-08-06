@@ -44,15 +44,15 @@
 
 @code
 {
-        [Parameter]
-        public MigrationUnit MigrationUnit { get; set; }
+    [Parameter]
+    public MigrationUnit MigrationUnit { get; set; }
 
-        [Parameter]
-        public MigrationJob MigrationJob { get; set; }
+    [Parameter]
+    public MigrationJob MigrationJob { get; set; }
 
 
-        [Parameter]
-        public EventCallback OnClose { get; set; }
+    [Parameter]
+    public EventCallback OnClose { get; set; }
 
     private Dictionary<string, string> Properties = new();
 
@@ -83,7 +83,7 @@
         Properties.Add("Source Document Count Initial Estimate", MigrationUnit.EstimatedDocCount.ToString() ?? "N/A");
         Properties.Add("Source Document Count Before Copying", MigrationUnit.ActualDocCount.ToString() ?? "N/A");
 
-                
+
         long totalSkipped = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.SkippedAsDuplicateCount);
         long totalInserted = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.RestoredSuccessDocCount) - totalSkipped;
         long totalFailed = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.RestoredFailedDocCount);
@@ -103,7 +103,7 @@
 
             Properties.Add("CS Current TimeStamp", MigrationUnit.CursorUtcTimestamp.ToString() ?? "N/A");
             Properties.Add("CS CurrentResume Token", MigrationUnit.ResumeToken ?? "N/A");
-            
+
             Properties.Add("CS First Change Replayed", MigrationUnit.InitialDocumenReplayed.ToString());
             Properties.Add("CS First Change Document", MigrationUnit.ResumeDocumentId?.ToString() ?? "N/A");
             Properties.Add("CS First Change Operation", MigrationUnit.ResumeTokenOperation.ToString());
@@ -124,7 +124,14 @@
                 Properties.Add("SyncBack Deleted", $"{MigrationUnit.SyncBackDocsDeleted.ToString()} (from {MigrationUnit.SyncBackDeleteEvents.ToString()} events)");
                 Properties.Add("SyncBack Updated", $"{MigrationUnit.SyncBackDocsUpdated.ToString()} (from {MigrationUnit.SyncBackUpdateEvents.ToString()} events)");
                 Properties.Add("SyncBack Duplicate Processed", $"{MigrationUnit.SyncBackDuplicateDocsSkipped.ToString()} skipped");
-            }           
+            } 
+
+            if (MigrationUnit.ComparedOn.HasValue && MigrationUnit.ComparedOn != DateTime.MinValue)
+            {
+                Properties.Add("Hash Compared Time", MigrationUnit.ComparedOn.Value.ToString() ?? "N/A");
+                Properties.Add("Variance Count", MigrationUnit.VarianceCount.ToString() ?? "N/A");
+            }
+
         }
     }
 

@@ -5,12 +5,12 @@
     <div class="modal-dialog bg-dark">
         <div class="modal-content">
             <div class="modal-header">
-                <h4 class="modal-title">Edit _configuration Settings</h4>
+                <h4 class="modal-title">Edit Configuration Settings</h4>
                 <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button>
             </div>
             <div class="modal-body">
                 <div class="mb-3">
-                    <label for="mongo-url" class="form-label">Mongo Tools Download URL</label>
+                    <label for="mongo-url" class="form-label">Mongo tools download URL</label>
                     <input type="text" id="mongo-url" class="form-control" @bind="_configurationBackup.MongoToolsDownloadUrl" />
                 </div>
                 <div class="mb-3">
@@ -20,43 +20,43 @@
                     </label>
                 </div>
                 <div class="mb-3">
-                    <label for="chunk-size" class="form-label">Chunk Size (in MB) for MongoDump</label>
+                    <label for="chunk-size" class="form-label">Chunk size (in MB) for mongodump</label>
                     <input type="number" id="chunk-size" class="form-control" @bind="_configurationBackup.ChunkSizeInMb" />
                 </div>
 
                 <div class="mb-3">
-                    <label for="csbatchsize" class="form-label">Mongo Copy Page Size</label>
-                    <input type="number" id="csbatchsize" class="form-control" @bind="_configurationBackup.MongoCopyPageSize" />
+                    <label for="mongo-copy-page-size" class="form-label">Mongo driver page size</label>
+                    <input type="number" id="mongo-copy-page-size" class="form-control" @bind="_configurationBackup.MongoCopyPageSize" />
                 </div>
 
                 <div class="mb-3">
-                    <label for="csbatchsize" class="form-label">Max Documents per Change Stream Batch</label>
-                    <input type="number" id="csbatchsize" class="form-control" @bind="_configurationBackup.ChangeStreamMaxDocsInBatch" />
+                    <label for="max-docs-per-batch" class="form-label">Max documents per change stream batch</label>
+                    <input type="number" id="max-docs-per-batch" class="form-control" @bind="_configurationBackup.ChangeStreamMaxDocsInBatch" />
                 </div>
 
                 <div class="mb-3">
-                    <label for="csbatchdurationmax" class="form-label">Max Duration (in seconds) Change Stream Batch</label>
+                    <label for="csbatchdurationmax" class="form-label">Max duration (in seconds) for change stream batch</label>
                     <input type="number" id="csbatchdurationmax" class="form-control" @bind="_configurationBackup.ChangeStreamBatchDuration" />
                 </div>
 
                 <div class="mb-3">
-                    <label for="csbatchdurationmin" class="form-label">Min Duration (in seconds) Change Stream Batch</label>
+                    <label for="csbatchdurationmin" class="form-label">Min duration (in seconds) for change stream batch</label>
                     <input type="number" id="csbatchdurationmin" class="form-control" @bind="_configurationBackup.ChangeStreamBatchDurationMin" />
                 </div>
 
                 <div class="mb-3">
-                    <label for="cs-colls-inbatch" class="form-label">Max Collections per Change Stream Batch</label>
+                    <label for="cs-colls-inbatch" class="form-label">Max collections per change stream batch</label>
                     <input type="number" id="cs-colls-inbatch" class="form-control" @bind="_configurationBackup.ChangeStreamMaxCollsInBatch" />
                 </div>
 
                 <div class="mb-3">
-                    <label for="cs-comapreSampleSize" class="form-label">Sample Size For Hash Comparison</label>
-                    <input type="number" id="cs-comapreSampleSize" class="form-control" @bind="_configurationBackup.CompareSampleSize" />
+                    <label for="cs-compareSampleSize" class="form-label">Sample size for hash comparison</label>
+                    <input type="number" id="cs-compareSampleSize" class="form-control" @bind="_configurationBackup.CompareSampleSize" />
                 </div>
 
 
                 <div class="mb-3">
-                    <label for="pem-text" class="form-label">CA Certificate file for Source Server(.pem)</label>
+                    <label for="pem-text" class="form-label">CA certificate file for source server (.pem)</label>
                     <InputFile OnChange="OnPemFileUpload" />
 
                     @if (!string.IsNullOrWhiteSpace(_configurationBackup.CACertContentsForSourceServer))
@@ -74,7 +74,7 @@
                 }
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-primary" @onclick=@HandleSubmit>Ok</button>
+                <button type="button" class="btn btn-primary" @onclick=@HandleSubmit>OK</button>
                 <button type="button" class="btn btn-secondary" @onclick="@Cancel">Cancel</button>
             </div>
         </div>
@@ -119,48 +119,48 @@
     {
         if (_configurationBackup.CompareSampleSize < 5 || _configurationBackup.CompareSampleSize > 2000)
         {
-            errorMessage = "Sample size for hash comaprison should be between 5 and 2000.";
+            errorMessage = "Sample size for hash comparison should be between 5 and 2000.";
             return;
         }
 
         if (_configurationBackup.ChangeStreamBatchDurationMin < 10 || _configurationBackup.ChangeStreamBatchDurationMin > 600)
         {
-            errorMessage = "Min Batch Duration should be between 10 and 600 seconds.";
+            errorMessage = "Minimum batch duration should be between 10 and 600 seconds.";
             return;
         }
 
         if (_configurationBackup.ChangeStreamBatchDuration < 20 || _configurationBackup.ChangeStreamBatchDuration > 3600)
         {
-            errorMessage = "Max Batch Duration should be between 20 and 3600 seconds.";
+            errorMessage = "Maximum batch duration should be between 20 and 3600 seconds.";
             return;
         }
 
         if (_configurationBackup.ChangeStreamBatchDurationMin >= _configurationBackup.ChangeStreamBatchDuration)
         {
-            errorMessage = "Min Batch Duration should be less than Max Batch Duration.";
+            errorMessage = "Minimum batch duration should be less than maximum batch duration.";
             return;
         }
 
         if (_configurationBackup.ChangeStreamMaxCollsInBatch < 1 || _configurationBackup.ChangeStreamMaxCollsInBatch > 30)
         {
-            errorMessage = "Max Collections per Batch should be between 1 and 30.";
+            errorMessage = "Maximum collections per batch should be between 1 and 30.";
             return;
         }
         if (_configurationBackup.MongoCopyPageSize < 50 || _configurationBackup.MongoCopyPageSize > 40000)
         {
-            errorMessage = "Page Size should be between 50 and 40000.";
+            errorMessage = "Page size should be between 50 and 40000.";
             return;
         }
 
-        if (_configurationBackup.ChangeStreamMaxDocsInBatch < 100 || _configurationBackup.ChangeStreamMaxDocsInBatch > 10000) // Fixed condition to compare correctly
+        if (_configurationBackup.ChangeStreamMaxDocsInBatch < 100 || _configurationBackup.ChangeStreamMaxDocsInBatch > 10000)
         {
-            errorMessage = "Max Documents per Batch should be between 100 and 10000."; // Corrected error message
+            errorMessage = "Maximum documents per batch should be between 100 and 10000.";
             return;
         }
 
         if (_configurationBackup.ChunkSizeInMb < 2 || _configurationBackup.ChunkSizeInMb > 5120)
         {
-            errorMessage = "Chunk Size (in MB) should be between 2 and 5120.";
+            errorMessage = "Chunk size (in MB) should be between 2 and 5120.";
             return;
         }
 
