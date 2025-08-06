@@ -47,7 +47,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             _syncBackToSource = null;   
         }
 
-        public void StartProcess(MigrationUnit item, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public async Task StartProcessAsync(MigrationUnit item, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
             ProcessRunning = true;
 
