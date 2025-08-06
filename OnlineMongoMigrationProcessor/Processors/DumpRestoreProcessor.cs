@@ -107,11 +107,6 @@ namespace OnlineMongoMigrationProcessor
             if (_postUploadCSProcessing)
                 return; // S
 
-            //if (_job.CSPostProcessingStarted && !Helper.IsOfflineJobCompleted(_job))
-            //{
-            //    _job.CSPostProcessingStarted = false;
-            //    _jobList?.Save(); // Save the job state to indicate that CS post-processing has started
-            //}
 
             if (_job.IsOnline && Helper.IsOfflineJobCompleted(_job) && !_postUploadCSProcessing)
             {
