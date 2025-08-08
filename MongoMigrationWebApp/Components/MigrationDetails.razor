@@ -23,10 +23,10 @@
                         <select id="mongo-options" class="form-select" @onchange="OnSelectionChanged">
                             @if (AllowMongoDump)
                             {
-                                <option value="Use MongoDump and MongoRestore">Use MongoDump and MongoRestore</option>
+                                <option value="MongoDump and MongoRestore">MongoDump and MongoRestore</option>
                             }
-                            <option value="Use Mongo Driver">Use Mongo Driver</option>
-                            <option value="Use RU Copy">Use RU Copy (Cosmos DB Optimized)</option>
+                            <option value="MongoDB Driver">MongoDB Driver</option>
+                            <option value="MongoDB Driver (Cosmos DB RU read optimized)">MongoDB Driver (Cosmos DB RU read optimized)</option>
                         </select>
                     </div>
                 }                
@@ -39,7 +39,7 @@
                     </div>
                     <div class="checkbox-group">                    
                         <label title="Skip copying indexes from the source; only data will be migrated.">
-                            <input type="checkbox" id="copyIndex" disabled="@(!NewMode || appendMode)" @bind="skipIndexes" />
+                            <input type="checkbox" id="copyIndex" disabled="@(!NewMode || appendMode || jobType==JobType.RUOptimizedCopy)" @bind="skipIndexes" />
                             Skip Indexes
                         </label>
                     </div>
@@ -126,7 +126,7 @@
 
     private string errorMessage = string.Empty;
     private JobType jobType = JobType.MongoDriver; // Use JobType enum instead of boolean
-    private string selectedOption = "Use Mongo Driver"; // Default dropdown value
+    private string selectedOption = "MongoDB Driver"; // Default dropdown value
     private bool isSimulatedRun = false; // Variable to track the dummy run option
     private bool isOnline = true; // Default to online migration
     private bool startCSAfterUploads = true; // Start change streams after all uploads are done
@@ -152,13 +152,16 @@
         selectedOption = e.Value.ToString();
         jobType = selectedOption switch
         {
-            "Use MongoDump and MongoRestore" => JobType.DumpAndRestore,
-            "Use Cosmos DB RU Optimized Copy" => JobType.RUOptimizedCopy,
+            "MongoDump and MongoRestore" => JobType.DumpAndRestore,
+            "MongoDB Driver (Cosmos DB RU read optimized)" => JobType.RUOptimizedCopy,
             _ => JobType.MongoDriver
         };
+
+        if (jobType == JobType.RUOptimizedCopy)
+        {
+            skipIndexes = true; // Skip indexes for RU optimized copy
+        }       
     }
-
-
 
 
     protected override void OnInitialized()
@@ -172,7 +175,7 @@
             isOnline = false;
             enableSyncBack = false;
             jobType = JobType.DumpAndRestore;
-            selectedOption = "Use MongoDump and MongoRestore";
+            selectedOption = "MongoDump and MongoRestore";
             isSimulatedRun = false;
             skipIndexes = false;
             appendMode = false;
@@ -190,9 +193,9 @@
             jobType = Job.JobType;
             selectedOption = jobType switch
             {
-                JobType.DumpAndRestore => "Use DumpAndRestore and MongoRestore",
-                JobType.RUOptimizedCopy => "Use RU Copy (Cosmos DB Optimized)",
-                _ => "Use Mongo Driver"
+                JobType.DumpAndRestore => "MongoDump and MongoRestore",
+                JobType.RUOptimizedCopy => "MongoDB Driver (Cosmos DB RU read optimized)",
+                _ => "MongoDB Driver"
             };
             isSimulatedRun = Job.IsSimulatedRun;
             skipIndexes = Job.SkipIndexes;

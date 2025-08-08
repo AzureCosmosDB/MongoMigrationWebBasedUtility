@@ -124,7 +124,17 @@
 
     private string GetToolName(OnlineMongoMigrationProcessor.Models.JobType jobType)
     {
-        return jobType.ToString(); //useMongoDump ? "DumpAndRestore and MongoRestore" : "Mongo Driver";
+        switch(jobType)
+        {
+            case OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy:
+                return "MongoDB Driver (Cosmos DB RU read optimized)";
+            case OnlineMongoMigrationProcessor.Models.JobType.MongoDriver:
+                return "MongoDB Driver";
+            case OnlineMongoMigrationProcessor.Models.JobType.DumpAndRestore:
+                return "MongoDump and MongoRestore";
+            default:
+                return "NA";
+        }
     }
 
 #pragma warning disable CS1998

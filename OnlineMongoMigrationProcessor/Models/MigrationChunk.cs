@@ -16,7 +16,11 @@ namespace OnlineMongoMigrationProcessor
         public long SkippedAsDuplicateCount { get; set; }
         public DataType DataType { get; set; }
         public List<Segment> Segments { get; set; }
+        public string RUPartitionResumeToken { get; set; } = string.Empty;
+        public string RUStopToken { get; set; } = string.Empty;
+        public string Id { get; set; } = string.Empty;
 
+        public MigrationChunk() { } 
 
         public MigrationChunk(string startId, string endId, DataType dataType, bool? downloaded, bool? uploaded)
         {
@@ -25,6 +29,15 @@ namespace OnlineMongoMigrationProcessor
             IsDownloaded = downloaded;
             IsUploaded = uploaded;
             DataType = dataType;
+        }
+
+        public MigrationChunk(string id, string partitonKey_RU, string stopToken_RU)
+        {
+            Id = id;
+            RUStopToken = stopToken_RU;
+            RUPartitionResumeToken = partitonKey_RU;
+            IsUploaded = false;
+            IsDownloaded = false;
         }
     }
 }

@@ -2,6 +2,7 @@
 using MongoDB.Driver;
 using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Models;
+using OnlineMongoMigrationProcessor.Partitioner;
 using OnlineMongoMigrationProcessor.Processors;
 using System;
 using System.Collections;
@@ -222,15 +223,23 @@ namespace OnlineMongoMigrationProcessor
 
                     if (unit.MigrationChunks == null || unit.MigrationChunks.Count == 0)
                     {
+                        List<MigrationChunk> chunks=null;
 
-                        var chunks = await PartitionCollection(unit.DatabaseName, unit.CollectionName);
-
-                        if (chunks.Count == 0)
+                        if (_job.JobType == JobType.RUOptimizedCopy)
                         {
-                            _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has no records to migrate", LogType.Error);
-                            unit.SourceStatus = CollectionStatus.NotFound;
-                            continue;
-                        }                     
+                            chunks= new RUPartitioner().CreatePartitions(_log, _sourceClient , unit.DatabaseName, unit.CollectionName);
+                        }
+                        else
+                        { 
+                            chunks = await PartitionCollection(unit.DatabaseName, unit.CollectionName);
+                        
+                            if (chunks.Count == 0)
+                            {
+                                _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has no records to migrate", LogType.Error);
+                                unit.SourceStatus = CollectionStatus.NotFound;
+                                continue;
+                            }
+                        }
 
                         if (!_job.IsSimulatedRun && !_job.AppendMode)
                         {
@@ -266,9 +275,10 @@ namespace OnlineMongoMigrationProcessor
                             });
 
                         }
-                        _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has {chunks.Count} chunk(s)");
-
+                        
+                        _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has {chunks.Count} chunk(s)");                        
                         unit.MigrationChunks = chunks;
+                       
                         unit.ChangeStreamStartedOn = currrentTime;
 
                     }
@@ -372,32 +382,32 @@ namespace OnlineMongoMigrationProcessor
             _job.TargetConnectionString = targetConnectionString;
             _job.SourceConnectionString = sourceConnectionString;
 
-            LoadConfig();                      
+            LoadConfig();
 
             _migrationCancelled = false;
 
 
-            string logfile=_log.Init(_job.Id);
+            string logfile = _log.Init(_job.Id);
             if (logfile != _job.Id)
             {
                 _log.WriteLine($"Error in reading _log. Orginal log backed up as {logfile}");
             }
             _log.WriteLine($"{_job.Id} Started on {_job.StartedOn} (UTC)");
-                        
+
 
             if (_job.MigrationUnits == null)
             {
                 _job.MigrationUnits = new List<MigrationUnit>();
             }
             PopulateJobCollections(namespacesToMigrate);
-                                 
+
 
 
             TaskResult result = await new RetryHelper().ExecuteTask(
                 () => PrepareForMigration(),
                 (ex, attemptCount, currentBackoff) => Default_ExceptionHandler(
                     ex, attemptCount,
-                    "Preperation step",  currentBackoff
+                    "Preperation step", currentBackoff
                 ),
                 _log
             );
@@ -407,6 +417,8 @@ namespace OnlineMongoMigrationProcessor
                 StopMigration();
                 return;
             }
+
+
 
             result = await new RetryHelper().ExecuteTask(
                 () => PreparePartitions(),
@@ -422,6 +434,7 @@ namespace OnlineMongoMigrationProcessor
                 StopMigration();
                 return;
             }
+          
 
             //if run comparison is set by customer.
             if (_job.RunComparison)
