@@ -4,8 +4,8 @@ C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationPro
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\xunit.runner.visualstudio.testadapter.dll
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\xunit.runner.reporters.netcoreapp10.dll
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\xunit.runner.utility.netcoreapp10.dll
-C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.deps.json
-C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.runtimeconfig.json
+c:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.deps.json
+c:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.runtimeconfig.json
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.dll
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.pdb
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\bin\Debug\net9.0\DnsClient.dll
@@ -105,9 +105,9 @@ C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationPro
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.AssemblyInfo.cs
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.csproj.CoreCompileInputs.cache
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.sourcelink.json
-C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMo.1194A8C9.Up2Date
+c:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMo.1194A8C9.Up2Date
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.dll
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\refint\OnlineMongoMigrationProcessor.Tests.dll
 C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.pdb
-C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.genruntimeconfig.cache
-C:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\ref\OnlineMongoMigrationProcessor.Tests.dll
+c:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\OnlineMongoMigrationProcessor.Tests.genruntimeconfig.cache
+c:\Work\GitHub\repos\MongoMigrationWebBasedUtility\tests\OnlineMongoMigrationProcessor.Tests\obj\Debug\net9.0\ref\OnlineMongoMigrationProcessor.Tests.dll

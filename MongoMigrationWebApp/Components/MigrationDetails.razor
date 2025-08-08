@@ -105,24 +105,18 @@
 
 @code {
 
-    #pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
-#pragma warning disable CS8601
-#pragma warning disable CS8602
 
     [Parameter]
     public bool NewMode { get; set; }
 
     [Parameter]
-    public MigrationJob Job { get; set; }
-
-
+    public MigrationJob? Job { get; set; }
 
     [Parameter]
     public EventCallback<MigrationJob> OnSubmit { get; set; }
 
     [Parameter]
-    public Func<string, Task<bool>> CheckNameExists { get; set; }
-
+    public Func<string, Task<bool>>? CheckNameExists { get; set; }
 
     private string errorMessage = string.Empty;
     private JobType jobType = JobType.MongoDriver; // Use JobType enum instead of boolean
@@ -144,12 +138,13 @@
 
     private void OnModeSelectionChanged(ChangeEventArgs e)
     {
-        isOnline = e.Value.ToString() == "Online";
+    var val = e?.Value?.ToString() ?? string.Empty;
+    isOnline = val == "Online";
     }
 
     private void OnSelectionChanged(ChangeEventArgs e)
     {
-        selectedOption = e.Value.ToString();
+    selectedOption = e?.Value?.ToString() ?? selectedOption;
         jobType = selectedOption switch
         {
             "MongoDump and MongoRestore" => JobType.DumpAndRestore,
@@ -182,24 +177,24 @@
         }
         else
         {
-            name = Job.Name;
-            sourceConnectionString = Job.SourceConnectionString;
-            targetConnectionString = Job.TargetConnectionString;
-            namespaces = Job.NameSpaces;
-            sourceEndpoint = Job.SourceEndpoint;
-            targetEndpoint = Job.TargetEndpoint;
-            isOnline = Job.IsOnline;
-            enableSyncBack = Job.SyncBackEnabled && isOnline && !Job.IsSimulatedRun; // Reverse sync only if online and not a simulated run
-            jobType = Job.JobType;
+            name = Job?.Name ?? string.Empty;
+            sourceConnectionString = Job?.SourceConnectionString ?? string.Empty;
+            targetConnectionString = Job?.TargetConnectionString ?? string.Empty;
+            namespaces = Job?.NameSpaces ?? string.Empty;
+            sourceEndpoint = Job?.SourceEndpoint ?? string.Empty;
+            targetEndpoint = Job?.TargetEndpoint ?? string.Empty;
+            isOnline = Job?.IsOnline ?? false;
+            enableSyncBack = (Job?.SyncBackEnabled ?? false) && isOnline && !(Job?.IsSimulatedRun ?? false); // Reverse sync only if online and not a simulated run
+            jobType = Job?.JobType ?? JobType.MongoDriver;
             selectedOption = jobType switch
             {
                 JobType.DumpAndRestore => "MongoDump and MongoRestore",
                 JobType.RUOptimizedCopy => "MongoDB Driver (Cosmos DB RU read optimized)",
                 _ => "MongoDB Driver"
             };
-            isSimulatedRun = Job.IsSimulatedRun;
-            skipIndexes = Job.SkipIndexes;
-            appendMode = Job.AppendMode;
+            isSimulatedRun = Job?.IsSimulatedRun ?? false;
+            skipIndexes = Job?.SkipIndexes ?? false;
+            appendMode = Job?.AppendMode ?? false;
 
             if(isOnline)
             {
@@ -219,7 +214,7 @@
             errorMessage = "Name can't be empty.";
             return;
         }
-        if (NewMode && CheckNameExists != null) // Ensure callback is provided
+    if (NewMode && CheckNameExists != null) // Ensure callback is provided
         {
             var nameExists = await CheckNameExists(name);
             if (nameExists)

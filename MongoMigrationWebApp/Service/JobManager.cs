@@ -4,13 +4,10 @@ using OnlineMongoMigrationProcessor;
 
 namespace MongoMigrationWebApp.Service
 {
-#pragma warning disable CS8602
-#pragma warning disable CS8603
-#pragma warning disable CS8604
 
     public class JobManager
     {
-        private JobList? _jobList;
+    private JobList? _jobList;
         private MigrationWorker? MigrationWorker { get; set; }
 
         private DateTime _lastJobHeartBeat = DateTime.MinValue;
@@ -39,10 +36,15 @@ namespace MongoMigrationWebApp.Service
         #endregion 
         #region Job Management
 
+        private JobList EnsureJobList()
+        {
+            return _jobList ??= new JobList();
+        }
+
 
         public DateTime GetJobBackupDate()
         {
-            return _jobList.GetBackupDate();
+            return EnsureJobList().GetBackupDate();
         }
 
 
@@ -71,7 +73,7 @@ namespace MongoMigrationWebApp.Service
 
         public bool SaveJobs(out string errorMessage)
         {
-            return _jobList.Save(out errorMessage);
+            return EnsureJobList().Save(out errorMessage);
         }
 
 
@@ -120,7 +122,7 @@ namespace MongoMigrationWebApp.Service
         {
             //verbose messages  are only  there for active jobList so fetech from migration worker.
             if (MigrationWorker != null && MigrationWorker.IsProcessRunning(id))
-                return MigrationWorker.GetVerboseMessages(id);
+                return MigrationWorker.GetVerboseMessages(id) ?? new List<LogObject>();
             else
                 return new List<LogObject>();
         }
@@ -150,13 +152,13 @@ namespace MongoMigrationWebApp.Service
                 _lastJobID = id;
                 isLiveLog = true;
                 fileName = string.Empty;
-                return bucket;
+                return bucket ?? new LogBucket { Logs = new List<LogObject>() };
             }
 
             //If migration worker is not running, get the log bucket from the file.Its static  
             isLiveLog = false;
             Log log = new Log();
-            return log.ReadLogFile(id, out fileName);
+            return log.ReadLogFile(id, out fileName) ?? new LogBucket { Logs = new List<LogObject>() };
         }
 
         #endregion
@@ -170,19 +172,22 @@ namespace MongoMigrationWebApp.Service
 
         public Task CancelMigration(string id)
         {
-            var migration = _jobList.MigrationJobs.Find(m => m.Id == id);
-            if (migration != null)
+            var list = EnsureJobList().MigrationJobs;
+            if (list != null)
             {
-                migration.IsCancelled = true;
-                migration.IsStarted = false;
+                var migration = list.Find(m => m.Id == id);
+                if (migration != null)
+                {
+                    migration.IsCancelled = true;
+                    migration.IsStarted = false;
+                }
             }
             return Task.CompletedTask;
         }
 
         public Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, OnlineMongoMigrationProcessor.Models.JobType jobType,bool trackChangeStreams)
         {
-
-            MigrationWorker = new MigrationWorker(_jobList);
+            MigrationWorker = new MigrationWorker(EnsureJobList());
             // Fire-and-forget: UI should not block on long-running migration
             _ = MigrationWorker?.StartMigrationAsync(job, sourceConnectionString, targetConnectionString, namespacesToMigrate, jobType, trackChangeStreams);
             return Task.CompletedTask;
@@ -191,8 +196,7 @@ namespace MongoMigrationWebApp.Service
 
         public void SyncBackToSource(string sourceConnectionString, string targetConnectionString, MigrationJob job)
         {
-
-            MigrationWorker = new MigrationWorker(_jobList);
+            MigrationWorker = new MigrationWorker(EnsureJobList());
             MigrationWorker?.SyncBackToSource(sourceConnectionString, targetConnectionString, job);
         }
 

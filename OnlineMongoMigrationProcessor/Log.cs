@@ -18,11 +18,10 @@ namespace OnlineMongoMigrationProcessor
 
     public class Log
     {
-    private LogBucket _logBucket = new LogBucket();
-    private List<LogObject> _verboseMessages = new List<LogObject>();
+        private LogBucket _logBucket = new LogBucket();
+        private List<LogObject> _verboseMessages = new List<LogObject>();
         private string _currentId = string.Empty;
 
-        //private static readonly object _syncLock = new();
         private static readonly object _verboseLock = new object();
         private static readonly object _readLock = new object();
         private static readonly object _writeLock = new object();

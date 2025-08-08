@@ -15,8 +15,8 @@ namespace OnlineMongoMigrationProcessor.Partitioner
     public class RUPartitioner
     {
 
-    Log _log = new Log();
-    IMongoCollection<BsonDocument> _sourceCollection = null!;
+        Log _log = new Log();
+        IMongoCollection<BsonDocument> _sourceCollection = null!;
         /// <summary>
         /// Process partitions using RU-optimized approach
         /// </summary>

@@ -19,8 +19,8 @@ namespace OnlineMongoMigrationProcessor
         private string _backupFolderPath = string.Empty;
         private static readonly object _fileLock = new object();
         private static readonly object _loadLock = new object();
-        private Log log;
-        private string processedMin = string.Empty;
+        private Log _log;
+        private string _processedMin = string.Empty;
 
         private const int TUMBLING_INTERVAL_MINUTES = 5;
 
@@ -38,9 +38,9 @@ namespace OnlineMongoMigrationProcessor
 
         }
 
-        public void SetLog(Log log)
+        public void SetLog(Log _log)
         {
-            this.log = log;
+            this._log = _log;
         }
 
         public bool LoadJobs(out string errorMessage,bool loadBackup= false)
@@ -59,7 +59,7 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 int max= loadBackup? 1 : 5; //if loading backup, try once  else 4 attempts 
-                //this.log = log;
+                //this._log = _log;
                 try
                 {
                     if (File.Exists(path)) 
@@ -212,7 +212,7 @@ namespace OnlineMongoMigrationProcessor
 
                     bool hasJobs = this.MigrationJobs != null && this.MigrationJobs.Count > 0;
 
-                    if (File.Exists(_filePath) && hasJobs && (processedMin != now.ToString("MM/dd/yyyy HH:mm")|| forceBackup))
+                    if (File.Exists(_filePath) && hasJobs && (_processedMin != now.ToString("MM/dd/yyyy HH:mm")|| forceBackup))
                     {
 
                         // Rotate every 15 minutes
@@ -220,7 +220,7 @@ namespace OnlineMongoMigrationProcessor
                         {
 
                             //set processed minute               
-                            processedMin = now.ToString("MM/dd/yyyy HH:mm");
+                            _processedMin = now.ToString("MM/dd/yyyy HH:mm");
 
                             int slotIndex = (now.Minute / TUMBLING_INTERVAL_MINUTES) % SlotNames.Length; // 0, 1, 2, or 3
 
@@ -236,7 +236,7 @@ namespace OnlineMongoMigrationProcessor
             catch (Exception ex)
             {
                 errorMessage = $"Error saving data: {ex}";
-                log?.WriteLine(errorMessage, LogType.Error);
+                _log?.WriteLine(errorMessage, LogType.Error);
                 return false;
             }
         }

@@ -45,13 +45,6 @@ namespace OnlineMongoMigrationProcessor
             }
         }
         
-        //// Backward compatibility property that maps to JobType
-        //[JsonIgnore]
-        //public bool UseMongoDump
-        //{
-        //    get => JobType == JobType.DumpAndRestore;
-        //    set => JobType = value ? JobType.DumpAndRestore : JobType.MongoDriver;
-        //}
 
         public bool IsSimulatedRun { get; set; }
         public bool SkipIndexes { get; set; }

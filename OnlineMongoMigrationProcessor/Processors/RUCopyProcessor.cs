@@ -33,7 +33,7 @@ namespace OnlineMongoMigrationProcessor.Processors
 
         // RU-specific configuration
         private const int MaxConcurrentPartitions = 2;
-        //private static readonly TimeSpan BatchDuration = TimeSpan.FromMinutes(5);
+
        
         public bool ProcessRunning { get; set; }
 
