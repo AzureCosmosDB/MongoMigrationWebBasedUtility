@@ -33,10 +33,10 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 log.WriteLine($"Running hash comparison using {config.CompareSampleSize} sample documents.");
 
                 // Assuming your MongoClientFactory.Create returns MongoClient (or IMongoClient).
-                sourceClient = MongoClientFactory.Create(log, job.SourceConnectionString, false, config.CACertContentsForSourceServer);
-                targetClient = MongoClientFactory.Create(log, job.TargetConnectionString);
+                sourceClient = MongoClientFactory.Create(log, job.SourceConnectionString ?? string.Empty, false, config.CACertContentsForSourceServer);
+                targetClient = MongoClientFactory.Create(log, job.TargetConnectionString ?? string.Empty);
 
-                foreach (var mu in job.MigrationUnits)
+                foreach (var mu in job.MigrationUnits ?? new List<MigrationUnit>())
                 {
 
                     log.WriteLine($"Processing {mu.DatabaseName}.{mu.CollectionName}.");

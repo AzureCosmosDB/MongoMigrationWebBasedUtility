@@ -15,7 +15,7 @@ namespace OnlineMongoMigrationProcessor
         public long DocCountInTarget { get; set; }
         public long SkippedAsDuplicateCount { get; set; }
         public DataType DataType { get; set; }
-        public List<Segment> Segments { get; set; }
+        public List<Segment> Segments { get; set; } = new();
         public string RUPartitionResumeToken { get; set; } = string.Empty;
         public string RUStopToken { get; set; } = string.Empty;
         public string Id { get; set; } = string.Empty;

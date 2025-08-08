@@ -110,7 +110,12 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
                     // Bucket size (for geo 2d indexes)
                     if (indexDocument.TryGetValue("bucketSize", out var bucketSize))
+                    {
+                        // GeoHaystack bucketSize is obsolete in modern MongoDB; suppress warning for backward compatibility.
+#pragma warning disable CS0618
                         options.BucketSize = bucketSize.ToDouble();
+#pragma warning restore CS0618
+                    }
 
                     if (indexDocument.TryGetValue("wildcardProjection", out var wildcardProjection))
                     {

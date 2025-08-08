@@ -25,7 +25,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                         return result;
 
                     attempt++;
-                    log.WriteLine($"Retrying in {delay/1000} seconds...");
+                    log.WriteLine($"Retrying attempt {attempt} in {delay/1000} seconds...");
                     await Task.Delay(delay);
                     delay = delay * 2; // Exponential backoff
 
@@ -42,7 +42,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     delay = delay * 2; // Exponential backoff
                 }
             }
-            return TaskResult.Failed;
+            return TaskResult.FailedAfterRetries;
         }
     }
 

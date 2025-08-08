@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using System.Web;
 using static System.Net.Mime.MediaTypeNames;
@@ -12,26 +13,26 @@ namespace OnlineMongoMigrationProcessor.Helpers
 {
     public static class MongoClientFactory
     {
-        public static MongoClient Create(Log log,string connectionString, bool ReadConcernMajority=false, string PEMFileContents=null)
+        public static MongoClient Create(Log log,string connectionString, bool ReadConcernMajority=false, string? PEMFileContents=null)
         {
             
             var cleanConnStr = RemovePemPathFromConnectionString(connectionString);
 
             var settings = MongoClientSettings.FromUrl(new MongoUrl(cleanConnStr));
 
-            if (!string.IsNullOrWhiteSpace(PEMFileContents))
+        if (!string.IsNullOrWhiteSpace(PEMFileContents))
             {
 
                 settings.SslSettings = new SslSettings
                 {
-                    ServerCertificateValidationCallback = ValidateAmazonDocDbCertificate(log,PEMFileContents)
+                    ServerCertificateValidationCallback = ValidateAmazonDocDbCertificate(log,PEMFileContents!)
                 };
-
-                if(ReadConcernMajority)
-                {
-                   settings.ReadConcern = ReadConcern.Majority;
-                }
             }
+
+        if(ReadConcernMajority)
+        {
+           settings.ReadConcern = ReadConcern.Majority;
+        }
 
             return new MongoClient(settings);
         }
@@ -54,10 +55,11 @@ namespace OnlineMongoMigrationProcessor.Helpers
             var query = HttpUtility.ParseQueryString(queryString);
             query.Remove("pemPath");
 
-            var newQuery = string.Join("&", query.AllKeys
-            .Where(k => !string.IsNullOrWhiteSpace(k))
-            .Select(k =>
-                $"{HttpUtility.UrlEncode(k.Trim())}={HttpUtility.UrlEncode((query[k] ?? "").Trim())}"));
+            var keys = query.AllKeys ?? Array.Empty<string>();
+            var newQuery = string.Join("&", keys
+                .Where(k => !string.IsNullOrWhiteSpace(k))
+                .Select(k =>
+                    $"{HttpUtility.UrlEncode((k ?? string.Empty).Trim())}={HttpUtility.UrlEncode((query[k] ?? string.Empty).Trim())}"));
 
 
             return string.IsNullOrWhiteSpace(newQuery) ? baseConnStr : $"{baseConnStr}?{newQuery}";
@@ -76,7 +78,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     foreach (var certText in certs)
                     {
                         var raw = Convert.FromBase64String(certText);
+                        #pragma warning disable SYSLIB0057
                         var cert = new X509Certificate2(raw);
+                        #pragma warning restore SYSLIB0057
                         caCerts.Add(cert);
                     }
 

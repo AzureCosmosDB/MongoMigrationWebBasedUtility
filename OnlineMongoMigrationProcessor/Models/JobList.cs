@@ -52,7 +52,7 @@ namespace OnlineMongoMigrationProcessor
 
                 path = loadBackup ? GetBestRestoreSlotFilePath() : _filePath;
 
-                if (path == null || !File.Exists(path))
+                if (string.IsNullOrEmpty(path) || !File.Exists(path))
                 {
                     errorMessage = "No suitable backup file found for restoration.";
                     return false;
@@ -70,8 +70,10 @@ namespace OnlineMongoMigrationProcessor
                             {
                                 string json = File.ReadAllText(path);
                                 var loadedObject = JsonConvert.DeserializeObject<JobList>(json);
-
-                                MigrationJobs = loadedObject.MigrationJobs;
+                                if (loadedObject != null)
+                                {
+                                    MigrationJobs = loadedObject.MigrationJobs;
+                                }
 
                                 if (loadBackup)
                                 {
@@ -136,7 +138,7 @@ namespace OnlineMongoMigrationProcessor
         }
 
 
-        private string? GetBestRestoreSlotFilePath()
+    private string GetBestRestoreSlotFilePath()
         {
             DateTime now = DateTime.Now;
             DateTime minAllowedTime = now.AddMinutes(-1 * TUMBLING_INTERVAL_MINUTES * (SlotNames.Length-1));
@@ -154,7 +156,7 @@ namespace OnlineMongoMigrationProcessor
                 .ToList();
 
 
-            string ? latestFile = string.Empty;
+            string latestFile = string.Empty;
             for (int i = slotFiles.Count - 1; i >= 0; i--)
             {
                 if (slotFiles[i].Timestamp < minAllowedTime)
@@ -168,9 +170,13 @@ namespace OnlineMongoMigrationProcessor
                 latestFile = slotFiles.First().Path;
 
             if (latestFile != string.Empty)
-                return backupFolder.Any() ? latestFile : null;
+            {
+                return backupFolder.Any() ? latestFile : string.Empty;
+            }
             else
+            {
                 return string.Empty;
+            }
 
         }
 
@@ -178,7 +184,7 @@ namespace OnlineMongoMigrationProcessor
         {
             var path = GetBestRestoreSlotFilePath();
 
-            var backupDataUpdatedOn= File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+            var backupDataUpdatedOn= !string.IsNullOrEmpty(path) && File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
             return backupDataUpdatedOn;
         }
 

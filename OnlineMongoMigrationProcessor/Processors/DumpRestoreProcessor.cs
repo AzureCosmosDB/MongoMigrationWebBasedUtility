@@ -8,25 +8,23 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using OnlineMongoMigrationProcessor.Models;
 
-#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
-#pragma warning disable CS8602 // Dereference of a possibly null reference.
-#pragma warning disable CS8604 // Possible null reference argument.\
-#pragma warning disable CS8600 // Possible null reference argument.
+#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
 
 namespace OnlineMongoMigrationProcessor
 {
     internal class DumpRestoreProcessor : IMigrationProcessor
     {
-        private JobList? _jobList;
-        private MigrationJob? _job;
+        private JobList _jobList;
+        private MigrationJob _job;
         private string _toolsLaunchFolder = string.Empty;
         private string _mongoDumpOutputFolder = $"{Helper.GetWorkingFolder()}mongodump";
-        private MongoClient? _sourceClient;
+        private MongoClient _sourceClient;
         private MongoClient? _targetClient;
-        private MigrationSettings? _config;
+        private MigrationSettings _config;
         private ProcessExecutor _processExecutor;
-        private MongoChangeStreamProcessor _changeStreamProcessor;
+        private MongoChangeStreamProcessor? _changeStreamProcessor;
         private CancellationTokenSource _cts;
         private Log _log;
 
@@ -39,16 +37,38 @@ namespace OnlineMongoMigrationProcessor
 
         public bool ProcessRunning { get; set; }
 
+        private ProcessorContext SetProcessorContext(MigrationUnit mu, string sourceConnectionString, string targetConnectionString)
+        {
+            var databaseName = mu.DatabaseName;
+            var collectionName = mu.CollectionName;
+            var database = _sourceClient.GetDatabase(databaseName);
+            var collection = database.GetCollection<BsonDocument>(collectionName);
 
-        public DumpRestoreProcessor(Log log,JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config, string toolsLaunchFolder)
+            var context = new ProcessorContext
+            {
+                Item = mu,
+                SourceConnectionString = sourceConnectionString,
+                TargetConnectionString = targetConnectionString,
+                JobId = _job?.Id ?? string.Empty,
+                DatabaseName = databaseName,
+                CollectionName = collectionName,
+                Database = database,
+                Collection = collection,
+            };
+
+            return context;
+        }
+
+
+        public DumpRestoreProcessor(Log log, JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config, string toolsLaunchFolder)
 
         {
-            _log = log;
-            _jobList = jobList;
-            _job = job;
-            _toolsLaunchFolder = toolsLaunchFolder;
-            _sourceClient = sourceClient;
-            _config = config;
+            _log = log ?? throw new ArgumentNullException(nameof(log));
+            _jobList = jobList ?? throw new ArgumentNullException(nameof(jobList));
+            _job = job ?? throw new ArgumentNullException(nameof(job));
+            _toolsLaunchFolder = toolsLaunchFolder ?? string.Empty;
+            _sourceClient = sourceClient ?? throw new ArgumentNullException(nameof(sourceClient));
+            _config = config ?? throw new ArgumentNullException(nameof(config));
 
             _processExecutor = new ProcessExecutor(_log);
             _cts = new CancellationTokenSource();
@@ -56,10 +76,9 @@ namespace OnlineMongoMigrationProcessor
 
         public void StopProcessing(bool updateStatus = true)
         {
-             if (_job != null)
-                _job.IsStarted = false;
+            _job.IsStarted = false;
 
-            _jobList?.Save();
+            _jobList.Save();
 
             if(updateStatus)
                 ProcessRunning = false;
@@ -72,518 +91,433 @@ namespace OnlineMongoMigrationProcessor
             
         }
 
-        public async Task StartProcessAsync(MigrationUnit item, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        private bool CheckChangeStreamAlreadyProcessingAsync(string targetConnectionString)
         {
-            ProcessRunning = true;
-
-            int maxRetries = 10;
-            string jobId = _job.Id;
-            //_job.CurrentlyActive = true;
-
-            TimeSpan backoff = TimeSpan.FromSeconds(2);
-
-            string dbName = item.DatabaseName;
-            string colName = item.CollectionName;
-
-            // Create mongodump output folder if it does not exist
-            string folder = $"{_mongoDumpOutputFolder}\\{jobId}\\{Helper.SafeFileName($"{dbName}.{colName}")}";
-            Directory.CreateDirectory(folder);
-
-            var database = _sourceClient.GetDatabase(dbName);
-            var collection = database.GetCollection<BsonDocument>(colName);
-
-            try
-            {
-                _uploadLock.Release(); // reset the flag 
-            }
-            catch
-            {
-                // Do nothing, just reset the flag
-            }
-            DateTime migrationJobStartTime = DateTime.Now;
-
-            //when resuming a job, we need to check if post-upload change stream processing is already in progress
-
             if (_postUploadCSProcessing)
-                return; // S
-
+                return true; // Skip if post-upload CS processing is already in progress
 
             if (_job.IsOnline && Helper.IsOfflineJobCompleted(_job) && !_postUploadCSProcessing)
             {
                 _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
 
-                if (_targetClient == null)
-                    _targetClient = MongoClientFactory.Create(_log,targetConnectionString);
+                if (_targetClient == null && !_job.IsSimulatedRun)
+                    _targetClient = MongoClientFactory.Create(_log, targetConnectionString);
 
-                if (_changeStreamProcessor == null)
-                    _changeStreamProcessor = new MongoChangeStreamProcessor(_log,_sourceClient, _targetClient, _jobList, _job, _config);
+                // Only start change stream processor if not a simulated run
+                if (!_job.IsSimulatedRun)
+                {
+                    if (_changeStreamProcessor == null)
+                        _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient!, _jobList, _job, _config);
 
-                var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
-                return;
+                    var _ = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                }
+                return true;
             }
 
-            // starting the  regular dump and restore process                       
+            return false;
+        }
 
-            if (!item.BulkCopyStartedOn.HasValue || item.BulkCopyStartedOn == DateTime.MinValue)
-                item.BulkCopyStartedOn = DateTime.UtcNow;
+        // Custom exception handler delegate with logic to control retry flow (parity with CopyProcessor)
+        private Task<TaskResult> DumpChunk_ExceptionHandler(Exception ex, int attemptCount, string processName, string dbName, string colName, int chunkIndex, int currentBackoff)
+        {
+            if (ex is OperationCanceledException)
+            {
+                _log.WriteLine($"Dump operation was cancelled for {dbName}.{colName}-{chunkIndex}");
+                return Task.FromResult(TaskResult.Canceled);
+            }
+            else if (ex is MongoExecutionTimeoutException)
+            {
+                _log.WriteLine($" {processName} attempt {attemptCount} failed due to timeout. Details:{ex}", LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+            else
+            {
+                _log.WriteLine(ex.ToString(), LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+        }
+
+        private Task<TaskResult> DumpChunkAsync(MigrationUnit mu, int chunkIndex, IMongoCollection<BsonDocument> collection,
+            string folder, string sourceConnectionString, string targetConnectionString,
+            double initialPercent, double contributionFactor, string dbName, string colName)
+        {
+            _cts.Token.ThrowIfCancellationRequested();
+
+            // Build base args per attempt
+            string args = $" --uri=\"{sourceConnectionString}\" --gzip --db={dbName} --collection={colName}  --out {folder}\\{chunkIndex}.bson";
+
+            // Disk space/backpressure check (retain existing behavior)
+            bool continueDownloads;
+            double pendingUploadsGB = 0;
+            double freeSpaceGB = 0;
+            while (true)
+            {
+                continueDownloads = Helper.CanProceedWithDownloads(folder, _config.ChunkSizeInMb * 2, out pendingUploadsGB, out freeSpaceGB);
+                if (!continueDownloads)
+                {
+                    _log.WriteLine($"{dbName}.{colName} added to upload queue");
+                    MigrationUnitsPendingUpload.AddOrUpdate($"{mu.DatabaseName}.{mu.CollectionName}", mu);
+                    Task.Run(() => Upload(mu, targetConnectionString), _cts.Token);
+
+                    _log.WriteLine($"Disk space is running low, with only {freeSpaceGB}GB available. Pending jobList are using {pendingUploadsGB}GB of space. Free up disk space by deleting unwanted jobList. Alternatively, you can scale up tp Premium App Service plan, which will reset the WebApp. New downloads will resume in 5 minutes...", LogType.Error);
+
+                    try { Task.Delay(TimeSpan.FromMinutes(5), _cts.Token).Wait(_cts.Token); }
+                    catch (OperationCanceledException) { return Task.FromResult(TaskResult.Canceled); }
+                }
+                else break;
+            }
+
+            long docCount = 0;
+            if (mu.MigrationChunks.Count > 1)
+            {
+                var bounds = SamplePartitioner.GetChunkBounds(mu.MigrationChunks[chunkIndex].Gte!, mu.MigrationChunks[chunkIndex].Lt!, mu.MigrationChunks[chunkIndex].DataType);
+                var gte = bounds.gte;
+                var lt = bounds.lt;
+
+                _log.WriteLine($"{dbName}.{colName}-Chunk [{chunkIndex}] generating query");
+
+                string query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType);
+                docCount = MongoHelper.GetDocumentCount(collection, gte, lt, mu.MigrationChunks[chunkIndex].DataType);
+                mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
+                _log.WriteLine($"{dbName}.{colName}- Chunk [{chunkIndex}] Count is  {docCount}");
+                args = $"{args} --query=\"{query}\"";
+            }
+            else
+            {
+                docCount = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+                mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
+            }
+
+            // Ensure previous dump file (if any) is removed before fresh dump
+            var dumpFilePath = $"{folder}\\{chunkIndex}.bson";
+            if (File.Exists(dumpFilePath))
+            {
+                try { File.Delete(dumpFilePath); } catch { }
+            }
+
+            try
+            {
+                var task = Task.Run(() => _processExecutor.Execute(_jobList, mu, mu.MigrationChunks[chunkIndex], chunkIndex, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongodump.exe", args), _cts.Token);
+                task.Wait(_cts.Token);
+                bool result = task.Result;
+
+                if (result)
+                {
+                    mu.MigrationChunks[chunkIndex].IsDownloaded = true;
+                    _jobList.Save();
+                    _log.WriteLine($"{dbName}.{colName} added to upload queue.");
+                    MigrationUnitsPendingUpload.AddOrUpdate($"{mu.DatabaseName}.{mu.CollectionName}", mu);
+                    Task.Run(() => Upload(mu, targetConnectionString), _cts.Token);
+                    return Task.FromResult(TaskResult.Success);
+                }
+                else
+                {
+                    return Task.FromResult(TaskResult.Retry);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return Task.FromResult(TaskResult.Canceled);
+            }
+        }
+
+        // Custom exception handler delegate for restore path (parity with CopyProcessor)
+        private Task<TaskResult> RestoreChunk_ExceptionHandler(Exception ex, int attemptCount, string processName, string dbName, string colName, int chunkIndex, int currentBackoff)
+        {
+            if (ex is OperationCanceledException)
+            {
+                _log.WriteLine($"Restore operation was cancelled for {dbName}.{colName}-{chunkIndex}");
+                return Task.FromResult(TaskResult.Canceled);
+            }
+            else if (ex is MongoExecutionTimeoutException)
+            {
+                _log.WriteLine($" {processName} attempt {attemptCount} failed due to timeout. Details:{ex}", LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+            else
+            {
+                _log.WriteLine(ex.ToString(), LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+        }
+
+        private Task<TaskResult> RestoreChunkAsync(MigrationUnit mu, int chunkIndex,
+            string folder, string targetConnectionString,
+            double initialPercent, double contributionFactor,
+            string dbName, string colName)
+        {
+            _cts.Token.ThrowIfCancellationRequested();
+
+            // Build args per attempt
+            string args = $" --uri=\"{targetConnectionString}\" --gzip {folder}\\{chunkIndex}.bson";
+
+            // If first mu, drop collection, else append. Also No drop in AppendMode
+            if (chunkIndex == 0 && !_job.AppendMode)
+            {
+                args = $"{args} --drop";
+                if (_job.SkipIndexes)
+                {
+                    args = $"{args} --noIndexRestore"; // No index to create for all chunks.
+                }
+            }
+            else
+            {
+                args = $"{args} --noIndexRestore"; // No index to create. Index restore only for 1st chunk.
+            }
+
+            long docCount = (mu.MigrationChunks.Count > 1)
+                ? mu.MigrationChunks[chunkIndex].DumpQueryDocCount
+                : Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+
+            try
+            {
+                var task = Task.Run(() => _processExecutor.Execute(_jobList, mu, mu.MigrationChunks[chunkIndex], chunkIndex, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongorestore.exe", args), _cts.Token);
+                task.Wait(_cts.Token);
+                bool result = task.Result;
+
+                if (result)
+                {
+                    bool skipFinalize = false;
+
+                    if (mu.MigrationChunks[chunkIndex].RestoredFailedDocCount > 0)
+                    {
+                        if (_targetClient == null && !_job.IsSimulatedRun)
+                            _targetClient = MongoClientFactory.Create(_log, targetConnectionString);
+
+                        try
+                        {
+                            var targetDb = _targetClient!.GetDatabase(mu.DatabaseName);
+                            var targetCollection = targetDb.GetCollection<BsonDocument>(mu.CollectionName);
+
+                            var bounds = SamplePartitioner.GetChunkBounds(mu.MigrationChunks[chunkIndex].Gte!, mu.MigrationChunks[chunkIndex].Lt!, mu.MigrationChunks[chunkIndex].DataType);
+                            var gte = bounds.gte;
+                            var lt = bounds.lt;
+
+                            // get count in target collection
+                            mu.MigrationChunks[chunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(targetCollection, gte, lt, mu.MigrationChunks[chunkIndex].DataType);
+
+                            // checking if source and target doc counts are same or more
+                            if (mu.MigrationChunks[chunkIndex].DocCountInTarget >= mu.MigrationChunks[chunkIndex].DumpQueryDocCount)
+                            {
+                                _log.WriteLine($"Restore for {dbName}.{colName}-{chunkIndex} No documents missing, count in Target: {mu.MigrationChunks[chunkIndex].DocCountInTarget}");
+                            }
+                            else
+                            {
+                                // since count is mismatched, we will reprocess the chunk
+                                skipFinalize = true;
+                                _log.WriteLine($"Restore for {dbName}.{colName}-{chunkIndex} Documents missing, Chunk will be reprocessed", LogType.Error);
+                            }
+
+                            _jobList?.Save();
+                        }
+                        catch (Exception ex)
+                        {
+                            _log.WriteLine($"Restore for {dbName}.{colName}-{chunkIndex} encountered error while counting documents on target. Chunk will be reprocessed. Details: {ex}", LogType.Error);
+                            skipFinalize = true;
+                        }
+                    }
+
+                    if (!skipFinalize)
+                    {
+                        mu.MigrationChunks[chunkIndex].IsUploaded = true;
+                        _jobList?.Save();
+
+                        try { File.Delete($"{folder}\\{chunkIndex}.bson"); } catch { }
+
+                        return Task.FromResult(TaskResult.Success);
+                    }
+                    else
+                    {
+                        return Task.FromResult(TaskResult.Retry);
+                    }
+                }
+                else
+                {
+                    if (mu.MigrationChunks[chunkIndex].IsUploaded == true)
+                    {
+                        // Already uploaded, treat as success
+                        _jobList?.Save();
+                        return Task.FromResult(TaskResult.Success);
+                    }
+
+                    return Task.FromResult(TaskResult.Retry);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return Task.FromResult(TaskResult.Canceled);
+            }
+        }
+
+        public async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        {
+            ProcessRunning = true;
+
+            // Initialize processor context (parity with CopyProcessor)
+            ProcessorContext ctx = SetProcessorContext(mu, sourceConnectionString, targetConnectionString);
+
+            string jobId = ctx.JobId;
+            string dbName = ctx.DatabaseName;
+            string colName = ctx.CollectionName;
+
+            // Create mongodump output folder if it does not exist
+            string folder = $"{_mongoDumpOutputFolder}\\{jobId}\\{Helper.SafeFileName($"{dbName}.{colName}")}";
+            Directory.CreateDirectory(folder);
+
+            try
+            {
+                _uploadLock.Release(); // reset the flag
+            }
+            catch
+            {
+                // Do nothing, just reset the flag
+            }
+
+            // when resuming a job, check if post-upload change stream processing is already in progress
+            if (CheckChangeStreamAlreadyProcessingAsync(ctx.TargetConnectionString))
+                return;
+
+            // starting the regular dump and restore process
+            if (!mu.BulkCopyStartedOn.HasValue || mu.BulkCopyStartedOn == DateTime.MinValue)
+                mu.BulkCopyStartedOn = DateTime.UtcNow;
 
             // DumpAndRestore
-            if (!item.DumpComplete && !_cts.Token.IsCancellationRequested)
+            if (!mu.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
                 _log.WriteLine($"{dbName}.{colName} download started");
 
-                item.EstimatedDocCount = collection.EstimatedDocumentCount();
+                mu.EstimatedDocCount = ctx.Collection.EstimatedDocumentCount();
 
-                Task.Run(() =>
+                try
                 {
-                    long count = MongoHelper.GetActualDocumentCount(collection, item);
-                    item.ActualDocCount = count;
-                    _jobList?.Save();
-                }, _cts.Token);
+                    var count = await Task.Run(() => MongoHelper.GetActualDocumentCount(ctx.Collection, mu), _cts.Token);
+                    mu.ActualDocCount = count;
+                    _jobList.Save();
+                }
+                catch (OperationCanceledException)
+                {
+                    // ignore
+                }
 
                 long downloadCount = 0;
 
-                for (int i = 0; i < item.MigrationChunks.Count; i++)
+                for (int i = 0; i < mu.MigrationChunks.Count; i++)
                 {
                     _cts.Token.ThrowIfCancellationRequested();
 
-                    double initialPercent = ((double)100 / item.MigrationChunks.Count) * i;
-                    double contributionFactor = 1.0 / item.MigrationChunks.Count;
+                    double initialPercent = ((double)100 / mu.MigrationChunks.Count) * i;
+                    double contributionFactor = 1.0 / mu.MigrationChunks.Count;
 
-                    long docCount = 0;
-
-                    if (!item.MigrationChunks[i].IsDownloaded == true)
+                    // docCount is computed inside DumpChunkAsync now
+                    if (!mu.MigrationChunks[i].IsDownloaded == true)
                     {
-                        int dumpAttempts = 0;
-                        backoff = TimeSpan.FromSeconds(2);
-                        bool continueProcessing = true;
+                        TaskResult result = await new RetryHelper().ExecuteTask(
+                            () => DumpChunkAsync(mu, i, ctx.Collection, folder, ctx.SourceConnectionString, ctx.TargetConnectionString, initialPercent, contributionFactor, dbName, colName),
+                            (ex, attemptCount, currentBackoff) => DumpChunk_ExceptionHandler(ex, attemptCount, "Dump Executor", dbName, colName, i, currentBackoff),
+                            _log
+                        );
 
-                        while (dumpAttempts < maxRetries && !_cts.Token.IsCancellationRequested && continueProcessing)
+                        if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries)
                         {
-                            dumpAttempts++;
-                            string args = $" --uri=\"{sourceConnectionString}\" --gzip --db={dbName} --collection={colName}  --out {folder}\\{i}.bson";
-                            try
-                            {
-                                //checking if there are too many downloads or disk full. Caused by limited uploads.
-                                bool continueDownlods;
-                                double pendingUploadsGB = 0;
-                                double freeSpaceGB = 0;
-                                while (true)
-                                {
-                                    continueDownlods = Helper.CanProceedWithDownloads(folder, _config.ChunkSizeInMb * 2, out pendingUploadsGB, out freeSpaceGB);
-
-                                    if (!continueDownlods)
-                                    {
-                                        _log.WriteLine($"{dbName}.{colName} added to upload queue");
-                                        
-                                        MigrationUnitsPendingUpload.AddOrUpdate($"{item.DatabaseName}.{item.CollectionName}",item);
-                                        Task.Run(() => Upload(item, targetConnectionString), _cts.Token);
-
-                                        _log.WriteLine($"Disk space is running low, with only {freeSpaceGB}GB available. Pending jobList are using {pendingUploadsGB}GB of space. Free up disk space by deleting unwanted jobList. Alternatively, you can scale up tp Premium App Service plan, which will reset the WebApp. New downloads will resume in 5 minutes...", LogType.Error);
-                                        
-                                        try
-                                        {
-                                            Task.Delay(TimeSpan.FromMinutes(5), _cts.Token).Wait(_cts.Token);
-                                        }
-                                        catch (OperationCanceledException)
-                                        {
-                                            return; // Exit if cancellation was requested during delay
-                                        }
-                                    }
-                                    else
-                                        break;
-                                }
-
-
-                                if (item.MigrationChunks.Count > 1)
-                                {
-                                    var bounds = SamplePartitioner.GetChunkBounds(item.MigrationChunks[i].Gte, item.MigrationChunks[i].Lt, item.MigrationChunks[i].DataType);
-                                    var gte = bounds.gte;
-                                    var lt = bounds.lt;
-
-                                    _log.WriteLine($"{dbName}.{colName}-Chunk [{i}] generating query");
-                                    
-
-                                    // Generate query and get document count
-                                    string query = MongoHelper.GenerateQueryString(gte, lt, item.MigrationChunks[i].DataType);
-
-                                    docCount = MongoHelper.GetDocumentCount(collection, gte, lt, item.MigrationChunks[i].DataType);
-
-                                    item.MigrationChunks[i].DumpQueryDocCount = docCount;
-
-                                    downloadCount += item.MigrationChunks[i].DumpQueryDocCount;
-
-                                    _log.WriteLine($"{dbName}.{colName}- Chunk [{i}] Count is  {docCount}");
-                                    
-
-                                    args = $"{args} --query=\"{query}\"";
-                                }
-                                else
-                                {
-                                    docCount = Math.Max(item.ActualDocCount, item.EstimatedDocCount);
-                                    item.MigrationChunks[i].DumpQueryDocCount = docCount;
-                                }
-
-                                if (Directory.Exists($"folder\\{i}.bson"))
-                                    Directory.Delete($"folder\\{i}.bson", true);
-
-
-                                var task = Task.Run(() => _processExecutor.Execute(_jobList, item, item.MigrationChunks[i],i, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongodump.exe", args), _cts.Token);
-                                task.Wait(_cts.Token); // Wait for the task to complete with cancellation support
-                                bool result = task.Result; // Capture the result after the task completes
-
-                                if (result)
-                                {
-                                    continueProcessing = false;
-                                    item.MigrationChunks[i].IsDownloaded = true;
-                                    _jobList?.Save(); // Persist state
-                                    dumpAttempts = 0;
-         
-                                    _log.WriteLine($"{dbName}.{colName} added to upload queue.");
-                                    
-                                    MigrationUnitsPendingUpload.AddOrUpdate($"{item.DatabaseName}.{item.CollectionName}", item);
-                                    Task.Run(() => Upload(item, targetConnectionString), _cts.Token);
-          
-                                }
-                                else
-                                {
-                                    if (!_cts.Token.IsCancellationRequested)
-                                    {
-                                        _log.WriteLine($"Attempt {dumpAttempts} {dbName}.{colName}-{i} of Dump Executor failed. Retrying in {backoff.TotalSeconds} seconds...");
-                                        
-                                        try
-                                        {
-                                            Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
-                                        }
-                                        catch (OperationCanceledException)
-                                        {
-                                            return; // Exit if cancellation was requested during delay
-                                        }
-                                        
-                                        backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-                                    }
-                                }
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                _log.WriteLine($"Dump operation was cancelled for {dbName}.{colName}-{i}");
-                                return;
-                            }
-                            catch (MongoExecutionTimeoutException ex)
-                            {
-                                _log.WriteLine($" Dump attempt {dumpAttempts} failed due to timeout: {ex.ToString()}", LogType.Error);
-
-                                if (dumpAttempts >= maxRetries)
-                                {
-                                    _log.WriteLine("Maximum dump attempts reached. Aborting operation.", LogType.Error);
-
-                                    StopProcessing();
-                                }
-
-                                if (!_cts.Token.IsCancellationRequested)
-                                {
-                                    // Wait for the backoff duration before retrying
-                                    _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                    
-                                    try
-                                    {
-                                        Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
-                                    }
-                                    catch (OperationCanceledException)
-                                    {
-                                        return; // Exit if cancellation was requested during delay
-                                    }
-                                    
-
-                                    // Exponentially increase the backoff duration
-                                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                _log.WriteLine(ex.ToString(), LogType.Error);
-                                StopProcessing();
-                            }
-                        }
-                        if (dumpAttempts == maxRetries)
-                        {
+                            _log.WriteLine($"Dump operation for {dbName}.{colName}-{i} failed after multiple attempts.", LogType.Error);
                             StopProcessing();
                         }
                     }
                     else
                     {
-                        downloadCount += item.MigrationChunks[i].DumpQueryDocCount;
+                        downloadCount += mu.MigrationChunks[i].DumpQueryDocCount;
                     }
                 }
+
                 if (!_cts.Token.IsCancellationRequested)
                 {
-                    item.SourceCountDuringCopy = item.MigrationChunks.Sum(chunk => chunk.DumpQueryDocCount);
-                    item.DumpGap = Math.Max(item.ActualDocCount, item.EstimatedDocCount) - downloadCount;
-                    item.DumpPercent = 100;
-                    item.DumpComplete = true;
+                    mu.SourceCountDuringCopy = mu.MigrationChunks.Sum(chunk => chunk.DumpQueryDocCount);
+                    downloadCount = mu.SourceCountDuringCopy; // recompute from chunks to avoid incremental tracking
+                    mu.DumpGap = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount) - downloadCount;
+                    mu.DumpPercent = 100;
+                    mu.DumpComplete = true;
                 }
             }
-            else if (item.DumpComplete && !item.RestoreComplete && !_cts.Token.IsCancellationRequested)
+            else if (mu.DumpComplete && !mu.RestoreComplete && !_cts.Token.IsCancellationRequested)
             {
                 _log.WriteLine($"{dbName}.{colName} added to upload queue");
-                
-                MigrationUnitsPendingUpload.AddOrUpdate($"{item.DatabaseName}.{item.CollectionName}", item);
-                Task.Run(() => Upload(item, targetConnectionString), _cts.Token);
-            }
 
+                MigrationUnitsPendingUpload.AddOrUpdate($"{mu.DatabaseName}.{mu.CollectionName}", mu);
+                Task.Run(() => Upload(mu, ctx.TargetConnectionString), _cts.Token);
+            }
         }
         
 
-        private void Upload(MigrationUnit item, string targetConnectionString, bool force=false)
+        private void Upload(MigrationUnit mu, string targetConnectionString, bool force=false)
         {
-
-            if (!_uploadLock.WaitAsync(0).GetAwaiter().GetResult()) // don't wait, just check
+            if (!TryEnterUploadLock())
             {
-                return; // Prevent concurrent uploads
-            }
-                      
+        return; // Prevent concurrent uploads
+        }
 
-            string dbName = item.DatabaseName;
-            string colName = item.CollectionName;
-            int maxRetries = 10;
-            string jobId = _job.Id;
-
-            string key = $"{item.DatabaseName}.{item.CollectionName}";
-
-            TimeSpan backoff = TimeSpan.FromSeconds(2);
-
-            string folder = $"{_mongoDumpOutputFolder}\\{jobId}\\{Helper.SafeFileName($"{dbName}.{colName}")}";
+            string dbName = mu.DatabaseName;
+            string colName = mu.CollectionName;
+            string jobId = _job.Id ?? string.Empty;
+            string key = $"{mu.DatabaseName}.{mu.CollectionName}";
+            string folder = GetDumpFolder(jobId, dbName, colName);
 
             _log.WriteLine($"{dbName}.{colName} upload started.");
 
-            while (!item.RestoreComplete && Directory.Exists(folder) && !_cts.Token.IsCancellationRequested && !_job.IsSimulatedRun)
+            try
             {
-                int restoredChunks = 0;
-                long restoredDocs = 0;
+                ProcessRestoreLoop(mu, folder, targetConnectionString, dbName, colName);
 
-                // MongoRestore
-                if (!item.RestoreComplete && !_cts.Token.IsCancellationRequested && item.SourceStatus == CollectionStatus.OK)
+                if ((mu.RestoreComplete && mu.DumpComplete) || (mu.DumpComplete && _job.IsSimulatedRun))
                 {
-                    for (int i = 0; i < item.MigrationChunks.Count; i++)
+                    FinalizeUpload(mu, key, folder, targetConnectionString, jobId);
+                }
+            }
+            finally
+            {
+                // Always release the upload lock if we acquired it
+                try { _uploadLock.Release(); } catch { }
+            }
+        }
+
+        // Attempts to enter the upload semaphore without waiting
+        private bool TryEnterUploadLock() => _uploadLock.WaitAsync(0).GetAwaiter().GetResult();
+
+        // Builds the dump folder path for a db/collection under the current job
+        private string GetDumpFolder(string jobId, string dbName, string colName)
+            => $"{_mongoDumpOutputFolder}\\{jobId}\\{Helper.SafeFileName($"{dbName}.{colName}")}";
+
+        // Core restore loop: iterates until all chunks are restored or cancellation/simulation stops it
+        private void ProcessRestoreLoop(MigrationUnit mu, string folder, string targetConnectionString, string dbName, string colName)
+        {
+
+            while (ShouldContinueUploadLoop(mu, folder))
+            {
+                // MongoRestore
+                if (!mu.RestoreComplete && !_cts.Token.IsCancellationRequested && mu.SourceStatus == CollectionStatus.OK)
+                {
+                    int restoredChunks;
+                    long restoredDocs;
+                    RestoreAllPendingChunksOnce(mu, folder, targetConnectionString, dbName, colName, out restoredChunks, out restoredDocs);
+
+                    if (restoredChunks == mu.MigrationChunks.Count && !_cts.Token.IsCancellationRequested)
                     {
-                        _cts.Token.ThrowIfCancellationRequested();
-
-                        if (!item.MigrationChunks[i].IsUploaded == true && item.MigrationChunks[i].IsDownloaded == true)
+                        mu.RestoreGap = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount) - restoredDocs;
+                        mu.RestorePercent = 100;
+                        mu.RestoreComplete = true;
+                        if (mu.DumpComplete && mu.RestoreComplete)
                         {
-                            string args = $" --uri=\"{targetConnectionString}\" --gzip {folder}\\{i}.bson";
-
-                            // If first item, drop collection, else append. Also No drop in AppendMode
-                            if (i == 0 && !_job.AppendMode)
-                            {
-                                args = $"{args} --drop";
-                                if (_job.SkipIndexes)
-                                {
-                                    args = $"{args} --noIndexRestore"; // No index to create for all chunks.
-                                }
-                            }
-                            else
-                            {
-                                args = $"{args} --noIndexRestore"; // No index to create. Index restore only for 1st chunk.
-
-                            }
-
-                            double initialPercent = ((double)100 / item.MigrationChunks.Count) * i;
-                            double contributionFactor = (double)item.MigrationChunks[i].DumpQueryDocCount / Math.Max(item.ActualDocCount, item.EstimatedDocCount);
-                            if (item.MigrationChunks.Count == 1) contributionFactor = 1;
-
-                            _log.WriteLine($"{dbName}.{colName}-{i} uploader processing");
-
-                            int restoreAttempts = 0;
-                            backoff = TimeSpan.FromSeconds(2);
-                            bool continueProcessing = true;
-                            bool skipRestore = false;
-                            while (restoreAttempts < maxRetries && !_cts.Token.IsCancellationRequested && continueProcessing && !item.RestoreComplete)
-                            {
-                                restoreAttempts++;
-                                skipRestore=false;
-                                try
-                                {
-                                    long docCount;
-                                    if (item.MigrationChunks.Count > 1)
-                                        docCount = item.MigrationChunks[i].DumpQueryDocCount; 
-                                    else
-                                        docCount = Math.Max(item.ActualDocCount, item.EstimatedDocCount);
-
-
-                                    var task = Task.Run(() => _processExecutor.Execute(_jobList, item, item.MigrationChunks[i],i, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongorestore.exe", args), _cts.Token);
-                                    task.Wait(_cts.Token); // Wait for the task to complete with cancellation support
-                                    bool result = task.Result; // Capture the result after the task completes
-                                    _log.WriteLine($"{dbName}.{colName}-{i} uploader processing completed");
-                                    if (result)
-                                    {                                       
-
-                                        if (item.MigrationChunks[i].RestoredFailedDocCount > 0)
-                                        {
-                                            if (_targetClient == null)
-                                                _targetClient = MongoClientFactory.Create(_log, targetConnectionString);
-
-                                            var targetDb = _targetClient.GetDatabase(item.DatabaseName);
-                                            var targetCollection = targetDb.GetCollection<BsonDocument>(item.CollectionName);
-
-                                            var bounds = SamplePartitioner.GetChunkBounds(item.MigrationChunks[i].Gte, item.MigrationChunks[i].Lt, item.MigrationChunks[i].DataType);
-                                            var gte = bounds.gte;
-                                            var lt = bounds.lt;
-
-                                            // get count in target collection
-                                            try
-                                            {
-                                                item.MigrationChunks[i].DocCountInTarget = MongoHelper.GetDocumentCount(targetCollection, gte, lt, item.MigrationChunks[i].DataType);
-                                            }
-                                            catch (Exception ex)
-                                            {
-                                                _log.WriteLine($"Restore for {dbName}.{colName}-{i} encountered error while counting documents on target. Chunk will be reprocessed. Details: {ex.ToString()}", LogType.Error);
-                                                                                                
-                                            }
-
-                                            // checking if source  and target doc counts are same
-                                            if (item.MigrationChunks[i].DocCountInTarget == item.MigrationChunks[i].DumpQueryDocCount)
-                                            {
-                                                _log.WriteLine($"Restore for {dbName}.{colName}-{i} No documents missing, count in Target: {item.MigrationChunks[i].DocCountInTarget}");
-                                                
-                                            }
-                                            else
-                                            {
-                                                //since count is mismatched, we will reprocess the chunk
-                                                skipRestore = true;
-                                                _log.WriteLine($"Restore for {dbName}.{colName}-{i} Documents missing, Chunk will be reprocessed", LogType.Error);
-                                                
-                                            }
-
-                                            _jobList?.Save(); // Persist state
-                                        }
-
-                                        //skip updating the chunk status as we are reprocessing the chunk
-                                        if (!skipRestore)
-                                        {
-                                            
-                                            continueProcessing = false;
-                                            item.MigrationChunks[i].IsUploaded = true;
-                                            _jobList?.Save(); // Persist state
-
-                                            restoreAttempts = 0;
-
-                                            restoredChunks++;
-                                            restoredDocs += Math.Max(item.MigrationChunks[i].RestoredSuccessDocCount, item.MigrationChunks[i].DocCountInTarget);
-
-
-                                            try
-                                            {
-                                                Directory.Delete($"{folder}\\{i}.bson", true);
-                                            }
-                                            catch { }
-                                        }                                        
-                                    }
-                                    else
-                                    {
-                                        if (item.MigrationChunks[i].IsUploaded == true)
-                                        {
-                                            continueProcessing = false;
-                                            _jobList?.Save(); // Persist state
-                                        }
-                                        else if (!_cts.Token.IsCancellationRequested)
-                                        {
-                                            _log.WriteLine($"Restore attempt {restoreAttempts} {dbName}.{colName}-{i} failed", LogType.Error);
-                                            // Wait for the backoff duration before retrying
-                                            _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                            
-                                            try
-                                            {
-                                                Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
-                                            }
-                                            catch (OperationCanceledException)
-                                            {
-                                                return; // Exit if cancellation was requested during delay
-                                            }
-                                            
-                                            // Exponentially increase the backoff duration
-                                            backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-                                        }
-                                    }
-                                }
-                                catch (OperationCanceledException)
-                                {
-                                    _log.WriteLine($"Restore operation was cancelled for {dbName}.{colName}-{i}");
-                                    return;
-                                }
-                                catch (MongoExecutionTimeoutException ex)
-                                {
-                                    _log.WriteLine($" Restore attempt {restoreAttempts} failed due to timeout: {ex.ToString()}", LogType.Error);
-                                    i--;
-
-                                    if (restoreAttempts >= maxRetries)
-                                    {
-                                        if (!_cts.Token.IsCancellationRequested)
-                                        {
-                                            _log.WriteLine("Maximum retry attempts reached. Aborting operation.", LogType.Error);
-                                            
-                                        }
-
-                                        StopProcessing();
-                                    }
-
-                                    if (!_cts.Token.IsCancellationRequested)
-                                    {
-                                        // Wait for the backoff duration before retrying
-                                        _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                                        
-                                        try
-                                        {
-                                            Task.Delay(backoff, _cts.Token).Wait(_cts.Token);
-                                        }
-                                        catch (OperationCanceledException)
-                                        {
-                                            return; // Exit if cancellation was requested during delay
-                                        }
-                                        
-                                    }
-
-                                    // Exponentially increase the backoff duration
-                                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-                                }
-                                catch (Exception ex)
-                                {
-                                    if (!_cts.Token.IsCancellationRequested)
-                                    {
-                                        _log.WriteLine(ex.ToString(), LogType.Error);
-                                        
-
-                                    }
-
-                                    StopProcessing();
-                                }
-                            }
-                            if (restoreAttempts == maxRetries)
-                            {
-                                _log.WriteLine("Maximum restore attempts reached. Aborting operations.", LogType.Error);
-
-                                StopProcessing();
-                            }
+                            mu.BulkCopyEndedOn = DateTime.UtcNow;
                         }
-                        else if (item.MigrationChunks[i].IsUploaded == true)
-                        {
-                            restoredChunks++;
-                            restoredDocs += item.MigrationChunks[i].RestoredSuccessDocCount;
-                        }
-                    }
-
-                    if (restoredChunks == item.MigrationChunks.Count && !_cts.Token.IsCancellationRequested)
-                    {
-                        item.RestoreGap = Math.Max(item.ActualDocCount, item.EstimatedDocCount) - restoredDocs;
-                        item.RestorePercent = 100;
-                        item.RestoreComplete = true;
-                        if (item.DumpComplete && item.RestoreComplete)
-                        {
-                            item.BulkCopyEndedOn = DateTime.UtcNow;
-                        }
-                        _jobList?.Save(); // Persist state
+                        _jobList.Save(); // Persist state
                     }
                     else
                     {
+                        // If there are no pending chunks to restore, exit the loop instead of sleeping
+                        if (!HasPendingChunks(mu))
+                        {
+                            return;
+                        }                       
+
                         try
                         {
                             Task.Delay(10000, _cts.Token).Wait(_cts.Token);
@@ -595,75 +529,150 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
             }
-            if ((item.RestoreComplete && item.DumpComplete)|| (item.DumpComplete && _job.IsSimulatedRun))
+        }
+
+        // Returns true if there is at least one chunk that has been downloaded but not yet uploaded
+        private bool HasPendingChunks(MigrationUnit mu)
+        {
+            for (int i = 0; i < mu.MigrationChunks.Count; i++)
             {
-                try
+                if (mu.MigrationChunks[i].IsDownloaded == true && mu.MigrationChunks[i].IsUploaded != true)
                 {
-                    if (Directory.Exists(folder))
-                        Directory.Delete(folder, true);
+                    return true;
+                }
+            }
+            return false;
+        }
 
-                    // Process change streams
-                    if (_job.IsOnline && !_cts.Token.IsCancellationRequested && !_job.CSStartsAfterAllUploads)
+        private bool ShouldContinueUploadLoop(MigrationUnit mu, string folder)
+            => !mu.RestoreComplete && Directory.Exists(folder) && !_cts.Token.IsCancellationRequested && !_job.IsSimulatedRun;
+
+        // Performs a single pass over all chunks, restoring any downloaded-but-not-uploaded ones
+        private void RestoreAllPendingChunksOnce(
+            MigrationUnit mu,
+            string folder,
+            string targetConnectionString,
+            string dbName,
+            string colName,
+            out int restoredChunks,
+            out long restoredDocs)
+        {
+            restoredChunks = 0;
+            restoredDocs = 0;
+
+            for (int i = 0; i < mu.MigrationChunks.Count; i++)
+            {
+                _cts.Token.ThrowIfCancellationRequested();
+
+                if (!mu.MigrationChunks[i].IsUploaded == true && mu.MigrationChunks[i].IsDownloaded == true)
+                {
+                    double initialPercent = ((double)100 / mu.MigrationChunks.Count) * i;
+                    double contributionFactor = (double)mu.MigrationChunks[i].DumpQueryDocCount / Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+                    if (mu.MigrationChunks.Count == 1) contributionFactor = 1;
+
+                    _log.WriteLine($"{dbName}.{colName}-{i} uploader processing");
+
+                    var restoreResult = new RetryHelper()
+                        .ExecuteTask(
+                            () => RestoreChunkAsync(mu, i, folder, targetConnectionString, initialPercent, contributionFactor, dbName, colName),
+                            (ex, attemptCount, currentBackoff) => RestoreChunk_ExceptionHandler(ex, attemptCount, "Restore Executor", dbName, colName, i, currentBackoff),
+                            _log
+                        )
+                        .GetAwaiter().GetResult();
+
+                    if (restoreResult == TaskResult.Abort || restoreResult == TaskResult.FailedAfterRetries)
                     {
-                        if (_targetClient == null)
-                            _targetClient = MongoClientFactory.Create(_log,targetConnectionString);
-
-                        if (_changeStreamProcessor == null)
-                            _changeStreamProcessor = new MongoChangeStreamProcessor(_log,_sourceClient, _targetClient, _jobList,_job, _config);
-
-                        _changeStreamProcessor.AddCollectionsToProcess(item, _cts);
-                    }
-
-                    //clear curretn item from upload queue
-                    MigrationUnitsPendingUpload.Remove(key);
-               
-
-                    //check if migration units items to upload.
-                    if (MigrationUnitsPendingUpload.TryGetFirst(out var nextItem))
-                    {                        
-                        _log.WriteLine($"Processing {nextItem.Value.DatabaseName}.{nextItem.Value.CollectionName} from upload queue");
-                                                
-                        Upload(nextItem.Value, targetConnectionString,true);
+                        _log.WriteLine($"Restore operation for {dbName}.{colName}-{i} failed after multiple attempts.", LogType.Error);
+                        StopProcessing();
                         return;
                     }
 
-                    if (!_cts.Token.IsCancellationRequested)
-                    {                       
-                        var migrationJob = _jobList.MigrationJobs.Find(m => m.Id == jobId);
-                        if (!_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
-                        {
-                            _log.WriteLine($"{migrationJob.Id} Completed");
-
-                            migrationJob.IsCompleted = true;
-                            //migrationJob.CurrentlyActive = false;
-                            StopProcessing();
-                        }
-                        else if(_job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(migrationJob) && !_postUploadCSProcessing)
-                        {
-                            // If CSStartsAfterAllUploads is true and the offline job is completed, run post-upload change stream processing
-                            _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
-
-                            if (_targetClient == null)
-                                _targetClient = MongoClientFactory.Create(_log,targetConnectionString);
-
-                            if (_changeStreamProcessor == null)
-                                _changeStreamProcessor = new MongoChangeStreamProcessor(_log,_sourceClient, _targetClient, _jobList, _job, _config);
-
-
-                            var result=_changeStreamProcessor.RunCSPostProcessingAsync(_cts);
-                        }
-                       
+                    if (restoreResult == TaskResult.Success)
+                    {
+                        restoredChunks++;
+                        restoredDocs += Math.Max(mu.MigrationChunks[i].RestoredSuccessDocCount, mu.MigrationChunks[i].DocCountInTarget);
                     }
-
-                    _uploadLock.Release(); // reset the flag to allow next upload to invoke uploader
-
                 }
-                catch
+                else if (mu.MigrationChunks[i].IsUploaded == true)
                 {
-                    // Do nothing
+                    restoredChunks++;
+                    restoredDocs += mu.MigrationChunks[i].RestoredSuccessDocCount;
                 }
+            }
+        }
 
-                
+        // Finalization after restore completes or simulated run concludes
+        private void FinalizeUpload(MigrationUnit mu, string key, string folder, string targetConnectionString, string jobId)
+        {
+            // Best-effort cleanup of local dump folder
+            try
+            {
+                if (Directory.Exists(folder))
+                    Directory.Delete(folder, true);
+            }
+            catch { }
+
+            // Start change stream immediately per-mu if configured
+            AddCollectionToChangeStreamQueue(mu, targetConnectionString);
+
+            // Remove from upload queue
+            MigrationUnitsPendingUpload.Remove(key);
+
+            // Process next pending upload if any
+            if (MigrationUnitsPendingUpload.TryGetFirst(out var nextItem))
+            {
+                _log.WriteLine($"Processing {nextItem.Value.DatabaseName}.{nextItem.Value.CollectionName} from upload queue");
+                Upload(nextItem.Value, targetConnectionString, true);
+                return;
+            }
+
+            // Handle offline completion and post-upload CS logic
+            if (!_cts.Token.IsCancellationRequested)
+            {
+                var migrationJob = _jobList.MigrationJobs?.Find(m => m.Id == jobId);
+                if (migrationJob != null)
+                {
+                    if (!_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
+                    {
+                        _log.WriteLine($"{migrationJob.Id} Completed");
+                        migrationJob.IsCompleted = true;
+                        StopProcessing();
+                    }
+                    else
+                    {
+                        RunChangeStreamProcessorForAllCollections(targetConnectionString);
+                    }
+                }
+            }
+        }
+
+        private void AddCollectionToChangeStreamQueue(MigrationUnit mu, string targetConnectionString)
+        {
+            if (_job.IsOnline && !_cts.Token.IsCancellationRequested && !_job.CSStartsAfterAllUploads && !_job.IsSimulatedRun)
+            {
+                if (_targetClient == null)
+                    _targetClient = MongoClientFactory.Create(_log, targetConnectionString);
+
+                if (_changeStreamProcessor == null)
+                    _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient!, _jobList, _job, _config);
+
+                _changeStreamProcessor.AddCollectionsToProcess(mu, _cts);
+            }
+        }
+
+        private void RunChangeStreamProcessorForAllCollections(string targetConnectionString)
+        {
+            if (_job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(_job) && !_postUploadCSProcessing && !_job.IsSimulatedRun)
+            {
+                _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
+
+                if (_targetClient == null)
+                    _targetClient = MongoClientFactory.Create(_log, targetConnectionString);
+
+                if (_changeStreamProcessor == null)
+                    _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient!, _jobList, _job, _config);
+
+                var _ = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
             }
         }
     }

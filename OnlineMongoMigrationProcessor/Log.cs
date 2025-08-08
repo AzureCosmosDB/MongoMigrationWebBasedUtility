@@ -19,7 +19,7 @@ namespace OnlineMongoMigrationProcessor
 
     public class Log
     {
-        private LogBucket _logBucket;
+        private LogBucket _logBucket = new LogBucket();
         private List<LogObject>? _verboseMessages = new List<LogObject>();
         private string _currentId = string.Empty;
 
@@ -42,9 +42,9 @@ namespace OnlineMongoMigrationProcessor
 
                 if (_verboseMessages.Count == 5)
                 {
-                    _verboseMessages.RemoveAt(0); // Remove the oldest item
+                    _verboseMessages.RemoveAt(0); // Remove the oldest mu
                 }
-                _verboseMessages.Add(new LogObject(LogType, message)); // Add the new item
+                _verboseMessages.Add(new LogObject(LogType, message)); // Add the new mu
             }
         }
 
@@ -131,7 +131,7 @@ namespace OnlineMongoMigrationProcessor
                     // Add new log
                     _logBucket.Logs.Add(logObj);
 
-                    // If more than 300 logs, remove the 21st item (index 20), keep it small
+                    // If more than 300 logs, remove the 21st mu (index 20), keep it small
                     if (_logBucket.Logs.Count > 300 && _logBucket.Logs.Count > 20)
                     {
                         _logBucket.Logs.RemoveAt(20);
@@ -252,7 +252,7 @@ namespace OnlineMongoMigrationProcessor
                 return _logBucket;
             }
 
-            return null;
+            return new LogBucket();
         }
 
         public LogBucket ReadLogFile(string id, out string fileName)
@@ -286,8 +286,8 @@ namespace OnlineMongoMigrationProcessor
                         try
                         {
                             //old format with LogBucket
-                            LogBucket logBucket = JsonSerializer.Deserialize<LogBucket>(json, _jsonOptions);
-                            if (logBucket == null || logBucket.Logs.Count == 0)
+                            LogBucket? logBucket = JsonSerializer.Deserialize<LogBucket>(json, _jsonOptions);
+                            if (logBucket == null || logBucket.Logs == null || logBucket.Logs.Count == 0)
                             {
                                 return new LogBucket(); // empty log
                             }

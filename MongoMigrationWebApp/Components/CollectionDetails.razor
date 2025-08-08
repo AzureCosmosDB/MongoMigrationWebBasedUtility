@@ -45,10 +45,10 @@
 @code
 {
     [Parameter]
-    public MigrationUnit MigrationUnit { get; set; }
+    public MigrationUnit? MigrationUnit { get; set; }
 
     [Parameter]
-    public MigrationJob MigrationJob { get; set; }
+    public MigrationJob? MigrationJob { get; set; }
 
 
     [Parameter]
@@ -58,7 +58,7 @@
 
     protected override void OnInitialized()
     {
-        if (MigrationUnit == null)
+    if (MigrationUnit == null)
             return;
 
         // Add properties to display
@@ -84,9 +84,9 @@
         Properties.Add("Source Document Count Before Copying", MigrationUnit.ActualDocCount.ToString() ?? "N/A");
 
 
-        long totalSkipped = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.SkippedAsDuplicateCount);
-        long totalInserted = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.RestoredSuccessDocCount) - totalSkipped;
-        long totalFailed = MigrationUnit.MigrationChunks.Sum(MigrationChunk => MigrationChunk.RestoredFailedDocCount);
+    long totalSkipped = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.SkippedAsDuplicateCount) ?? 0;
+    long totalInserted = (MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredSuccessDocCount) ?? 0) - totalSkipped;
+    long totalFailed = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredFailedDocCount) ?? 0;
 
         Properties.Add("Source Document Count While Processing ", MigrationUnit.SourceCountDuringCopy.ToString() ?? "N/A");
         Properties.Add("Processed Total", (totalInserted + totalSkipped + totalFailed).ToString() ?? "N/A");
@@ -96,7 +96,7 @@
         Properties.Add("*********** Indexes Created", MigrationUnit.IndexesMigrated.ToString() ?? "N/A");
 
 
-        if (MigrationJob.IsOnline)
+    if (MigrationJob != null && MigrationJob.IsOnline)
         {
             Properties.Add("Change Stream (CS) Started On", MigrationUnit.ChangeStreamStartedOn.ToString() ?? "N/A");
             Properties.Add("CS Start Resume Token", MigrationUnit.OriginalResumeToken ?? "N/A");

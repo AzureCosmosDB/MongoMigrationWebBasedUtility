@@ -29,7 +29,7 @@ namespace OnlineMongoMigrationProcessor
         {
             // Deep clone using JSON serialization
             var json = JsonConvert.SerializeObject(this);
-            return JsonConvert.DeserializeObject<MigrationSettings>(json);
+            return JsonConvert.DeserializeObject<MigrationSettings>(json) ?? new MigrationSettings();
         }
    
         public void Load()

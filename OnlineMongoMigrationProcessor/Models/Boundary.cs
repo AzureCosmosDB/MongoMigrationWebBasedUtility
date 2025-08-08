@@ -7,6 +7,6 @@ namespace OnlineMongoMigrationProcessor
     {
         public BsonValue? StartId { get; set; }
         public BsonValue? EndId { get; set; }
-        public List<Boundary> SegmentBoundaries { get; set; }
+    public List<Boundary> SegmentBoundaries { get; set; } = new();
     }
 }

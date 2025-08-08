@@ -67,27 +67,30 @@ namespace OnlineMongoMigrationProcessor.Processors
                 _changeStreamProcessor.ExecutionCancelled = true;
         }
 
-        private CopyProcessContext InitializeCopyProcessContext(MigrationUnit item, string sourceConnectionString, string targetConnectionString)
+        private ProcessorContext SetProcessorContext(MigrationUnit mu, string sourceConnectionString, string targetConnectionString)
         {
-            var context = new CopyProcessContext
+            var databaseName = mu.DatabaseName;
+            var collectionName = mu.CollectionName;
+            var database = _sourceClient.GetDatabase(databaseName);
+            var collection = database.GetCollection<BsonDocument>(collectionName);
+
+            var context = new ProcessorContext
             {
-                Item = item,
+                Item = mu,
                 SourceConnectionString = sourceConnectionString,
                 TargetConnectionString = targetConnectionString,
-                JobId = _job.Id,
-                DatabaseName = item.DatabaseName,
-                CollectionName = item.CollectionName,
-                MaxRetries = 10
+                JobId = _job?.Id ?? string.Empty,
+                DatabaseName = databaseName,
+                CollectionName = collectionName,
+                //MaxRetries = 10,
+                Database = database,
+                Collection = collection
             };
-
-            context.Database = _sourceClient.GetDatabase(context.DatabaseName);
-            context.Collection = context.Database.GetCollection<BsonDocument>(context.CollectionName);
-            context.MigrationJobStartTime = DateTime.Now;
 
             return context;
         }
 
-        private bool CheckChangeStreamAlreadyProcessingAsync(CopyProcessContext ctx)
+        private bool CheckChangeStreamAlreadyProcessingAsync(ProcessorContext ctx)
         {
             if (_postUploadCSProcessing)
                 return true; // Skip processing if post-upload CS processing is already in progress
@@ -109,7 +112,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             return false;
         }
 
-        private async Task<TaskResult> ProcessChunksAsync(MigrationUnit item, CopyProcessContext ctx)
+        private async Task<TaskResult> ProcessChunksAsync(MigrationUnit mu, ProcessorContext ctx)
         {
             
             // Setup target client and collection
@@ -124,7 +127,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             }
 
             // Process partitions in batches
-            while (item.MigrationChunks.Any(s => s.IsUploaded == false) && !_cts.Token.IsCancellationRequested)
+            while (mu.MigrationChunks.Any(s => s.IsUploaded == false) && !_cts.Token.IsCancellationRequested)
             {
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
@@ -132,7 +135,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                     return TaskResult.Abort;
                 }
 
-                var chunksToProcess = item.MigrationChunks
+                var chunksToProcess = mu.MigrationChunks
                     .Where(s => s.IsUploaded == false)
                     .Take(MaxConcurrentPartitions)
                     .ToList();
@@ -153,7 +156,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                     {
                         try
                         {
-                            await ProcessChunksInBatchesAsync(chunk, item, ctx.Collection, targetCollection, combinedCts.Token, _job.IsSimulatedRun);
+                            await ProcessChunksInBatchesAsync(chunk, mu, ctx.Collection, targetCollection, combinedCts.Token, _job.IsSimulatedRun);
                         }
                         finally
                         {
@@ -173,22 +176,22 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                 _cts.Token.ThrowIfCancellationRequested();
 
-                var completedCount = item.MigrationChunks.Count(s => s.IsUploaded == true);
-                var totalProcessed = item.MigrationChunks.Sum(s => (long)s.DocCountInTarget);
+                var completedCount = mu.MigrationChunks.Count(s => s.IsUploaded == true);
+                var totalProcessed = mu.MigrationChunks.Sum(s => (long)s.DocCountInTarget);
 
-                _log.WriteLine($"Batch completed. RU partitions completed: {completedCount}/{item.MigrationChunks.Count}, " +
+                _log.WriteLine($"Batch completed. RU partitions completed: {completedCount}/{mu.MigrationChunks.Count}, " +
                                 $"Total documents processed: {totalProcessed}");
 
                 // Update progress
-                var progressPercent = Math.Min(100, (double)totalProcessed/ Math.Max(item.EstimatedDocCount,item.ActualDocCount) * 100);
-                item.DumpPercent = progressPercent;
-                item.RestorePercent = progressPercent;
+                var progressPercent = Math.Min(100, (double)totalProcessed/ Math.Max(mu.EstimatedDocCount,mu.ActualDocCount) * 100);
+                mu.DumpPercent = progressPercent;
+                mu.RestorePercent = progressPercent;
 
                 //if (progressPercent == 100)
                 //{
-                //    item.DumpComplete = true;
-                //    item.RestoreComplete = true;
-                //    item.BulkCopyEndedOn = DateTime.UtcNow;
+                //    mu.DumpComplete = true;
+                //    mu.RestoreComplete = true;
+                //    mu.BulkCopyEndedOn = DateTime.UtcNow;
                 //    batchCts.Dispose();
                 //    combinedCts.Dispose();
                 //    combinedCts = null;
@@ -204,11 +207,11 @@ namespace OnlineMongoMigrationProcessor.Processors
         /// <summary>
         /// Process one partition's historical changes for a batch duration
         /// </summary>
-        private async Task ProcessChunksInBatchesAsync(MigrationChunk chunk,MigrationUnit mu, IMongoCollection<BsonDocument> sourceCollection,
+        private Task ProcessChunksInBatchesAsync(MigrationChunk chunk,MigrationUnit mu, IMongoCollection<BsonDocument> sourceCollection,
             IMongoCollection<BsonDocument> targetCollection, CancellationToken token, bool isSimulated)
         {
-            if ((bool)chunk.IsUploaded)
-                return;
+            if (chunk.IsUploaded == true)
+                return Task.CompletedTask;
                  
             try
             {
@@ -281,13 +284,13 @@ namespace OnlineMongoMigrationProcessor.Processors
                         {
                             chunk.IsUploaded = true;
                             _log.WriteLine($"[{chunk.Id}] Partition processing completed.");
-                            return;
+                            return Task.CompletedTask;
                         }
 
                         // Check for cancellation
                         if (token.IsCancellationRequested)
                         {
-                            return;
+                            return Task.CompletedTask;
                         }
                     }
                 }
@@ -297,6 +300,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 _log.WriteLine($"Error processing partition {chunk.Id}: {ex}", LogType.Error);
                 //throw;
             }
+            return Task.CompletedTask;
         }             
 
         /// <summary>
@@ -337,9 +341,9 @@ namespace OnlineMongoMigrationProcessor.Processors
         }
 
 
-        private async Task PostCopyChangeStreamProcessor(CopyProcessContext ctx, MigrationUnit item)
+    private Task PostCopyChangeStreamProcessor(ProcessorContext ctx, MigrationUnit mu)
         {
-            if (item.RestoreComplete && item.DumpComplete && !_cts.Token.IsCancellationRequested)
+            if (mu.RestoreComplete && mu.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
                 try
                 {
@@ -351,7 +355,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                         if (_changeStreamProcessor == null)
                             _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
 
-                        _changeStreamProcessor.AddCollectionsToProcess(item, _cts);
+                        _changeStreamProcessor.AddCollectionsToProcess(mu, _cts);
                     }
 
                     if (!_cts.Token.IsCancellationRequested)
@@ -382,16 +386,17 @@ namespace OnlineMongoMigrationProcessor.Processors
                     // Do nothing
                 }
             }
+            return Task.CompletedTask;
         }
 
-        public async Task StartProcessAsync(MigrationUnit item, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
             ProcessRunning = true;
 
             if (_job != null)
                 _job.IsStarted = true;
 
-            var ctx = InitializeCopyProcessContext(item, sourceConnectionString, targetConnectionString);
+            var ctx = SetProcessorContext(mu, sourceConnectionString, targetConnectionString);
 
             // Check if post-upload change stream processing is already in progress
             if (CheckChangeStreamAlreadyProcessingAsync(ctx))
@@ -399,15 +404,15 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             _log.WriteLine($"RU Copy Processor started for {ctx.DatabaseName}.{ctx.CollectionName}");
 
-            if (!item.DumpComplete && !_cts.Token.IsCancellationRequested)
+            if (!mu.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
-                if (!item.BulkCopyStartedOn.HasValue || item.BulkCopyStartedOn == DateTime.MinValue)
-                    item.BulkCopyStartedOn = DateTime.UtcNow;
+                if (!mu.BulkCopyStartedOn.HasValue || mu.BulkCopyStartedOn == DateTime.MinValue)
+                    mu.BulkCopyStartedOn = DateTime.UtcNow;
 
 
                 // Process using RU-optimized partition approach
                 TaskResult result = await new RetryHelper().ExecuteTask(
-                    () => ProcessChunksAsync(item, ctx),
+                    () => ProcessChunksAsync(mu, ctx),
                     (ex, attemptCount, currentBackoff) => RUProcess_ExceptionHandler(
                         ex, attemptCount,
                         "RU Chunk processor", ctx.DatabaseName, ctx.CollectionName, "all", currentBackoff
@@ -415,7 +420,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                     _log
                 );
 
-                if (result == TaskResult.Abort || result == TaskResult.Failed)
+                if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries)
                 {
                     _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} failed after multiple attempts.", LogType.Error);
                     StopProcessing();
@@ -423,7 +428,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 }                
             }
 
-            await PostCopyChangeStreamProcessor(ctx, item);
+            await PostCopyChangeStreamProcessor(ctx, mu);
         }
     }
 }

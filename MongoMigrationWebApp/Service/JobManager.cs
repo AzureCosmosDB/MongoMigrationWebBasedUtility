@@ -88,16 +88,18 @@ namespace MongoMigrationWebApp.Service
             else
             {
                 errorMessage = string.Empty;
-                return _jobList.MigrationJobs;
+                return _jobList.MigrationJobs ?? new List<MigrationJob>();
             }
-            if ((isSucess || force) && _jobList.MigrationJobs == null)
+            // Ensure we always return a non-null list
+            if (_jobList.MigrationJobs == null)
             {
                 _jobList.MigrationJobs = new List<MigrationJob>();
-                SaveJobs(out errorMessage);
-                return _jobList.MigrationJobs;
+                if (isSucess || force)
+                {
+                    SaveJobs(out errorMessage);
+                }
             }
-
-            return null;
+            return _jobList.MigrationJobs;
         }
 
         public void ClearJobFiles(string jobId)
@@ -177,12 +179,13 @@ namespace MongoMigrationWebApp.Service
             return Task.CompletedTask;
         }
 
-        public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, OnlineMongoMigrationProcessor.Models.JobType jobType,bool trackChangeStreams)
+        public Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, OnlineMongoMigrationProcessor.Models.JobType jobType,bool trackChangeStreams)
         {
 
             MigrationWorker = new MigrationWorker(_jobList);
-
-            MigrationWorker?.StartMigrationAsync(job, sourceConnectionString, targetConnectionString, namespacesToMigrate, jobType, trackChangeStreams);
+            // Fire-and-forget: UI should not block on long-running migration
+            _ = MigrationWorker?.StartMigrationAsync(job, sourceConnectionString, targetConnectionString, namespacesToMigrate, jobType, trackChangeStreams);
+            return Task.CompletedTask;
         }
 
 

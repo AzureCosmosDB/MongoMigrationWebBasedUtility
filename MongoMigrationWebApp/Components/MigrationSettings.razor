@@ -11,47 +11,47 @@
             <div class="modal-body">
                 <div class="mb-3">
                     <label for="mongo-url" class="form-label">Mongo tools download URL</label>
-                    <input type="text" id="mongo-url" class="form-control" @bind="_configurationBackup.MongoToolsDownloadUrl" />
+                    <input type="text" id="mongo-url" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).MongoToolsDownloadUrl" />
                 </div>
                 <div class="mb-3">
                     <label for="has-uuid" class="form-label">
-                        <input type="checkbox" id="has-uuid" @bind="_configurationBackup.ReadBinary" />
+                        <input type="checkbox" id="has-uuid" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ReadBinary" />
                         Binary format utilized for the _id
                     </label>
                 </div>
                 <div class="mb-3">
                     <label for="chunk-size" class="form-label">Chunk size (in MB) for mongodump</label>
-                    <input type="number" id="chunk-size" class="form-control" @bind="_configurationBackup.ChunkSizeInMb" />
+                    <input type="number" id="chunk-size" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ChunkSizeInMb" />
                 </div>
 
                 <div class="mb-3">
                     <label for="mongo-copy-page-size" class="form-label">Mongo driver page size</label>
-                    <input type="number" id="mongo-copy-page-size" class="form-control" @bind="_configurationBackup.MongoCopyPageSize" />
+                    <input type="number" id="mongo-copy-page-size" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).MongoCopyPageSize" />
                 </div>
 
                 <div class="mb-3">
                     <label for="max-docs-per-batch" class="form-label">Max documents per change stream batch</label>
-                    <input type="number" id="max-docs-per-batch" class="form-control" @bind="_configurationBackup.ChangeStreamMaxDocsInBatch" />
+                    <input type="number" id="max-docs-per-batch" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ChangeStreamMaxDocsInBatch" />
                 </div>
 
                 <div class="mb-3">
                     <label for="csbatchdurationmax" class="form-label">Max duration (in seconds) for change stream batch</label>
-                    <input type="number" id="csbatchdurationmax" class="form-control" @bind="_configurationBackup.ChangeStreamBatchDuration" />
+                    <input type="number" id="csbatchdurationmax" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ChangeStreamBatchDuration" />
                 </div>
 
                 <div class="mb-3">
                     <label for="csbatchdurationmin" class="form-label">Min duration (in seconds) for change stream batch</label>
-                    <input type="number" id="csbatchdurationmin" class="form-control" @bind="_configurationBackup.ChangeStreamBatchDurationMin" />
+                    <input type="number" id="csbatchdurationmin" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ChangeStreamBatchDurationMin" />
                 </div>
 
                 <div class="mb-3">
                     <label for="cs-colls-inbatch" class="form-label">Max collections per change stream batch</label>
-                    <input type="number" id="cs-colls-inbatch" class="form-control" @bind="_configurationBackup.ChangeStreamMaxCollsInBatch" />
+                    <input type="number" id="cs-colls-inbatch" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ChangeStreamMaxCollsInBatch" />
                 </div>
 
                 <div class="mb-3">
                     <label for="cs-compareSampleSize" class="form-label">Sample size for hash comparison</label>
-                    <input type="number" id="cs-compareSampleSize" class="form-control" @bind="_configurationBackup.CompareSampleSize" />
+                    <input type="number" id="cs-compareSampleSize" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).CompareSampleSize" />
                 </div>
 
 
@@ -87,20 +87,20 @@
     public OnlineMongoMigrationProcessor.MigrationSettings? _configuration { get; set; }
 
     [Parameter]
-    public EventCallback<OnlineMongoMigrationProcessor.MigrationSettings> On_configurationSaved { get; set; }
+    public EventCallback<OnlineMongoMigrationProcessor.MigrationSettings?> On_configurationSaved { get; set; }
 
     private string errorMessage = string.Empty;
 
     private void ClearPem()
     {
-        _configurationBackup.CACertContentsForSourceServer = string.Empty;
+        (_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).CACertContentsForSourceServer = string.Empty;
     }
 
     private async Task OnPemFileUpload(InputFileChangeEventArgs e)
     {
-        var file = e.File;
-        using var reader = new StreamReader(file.OpenReadStream(maxAllowedSize: 1024 * 1024));
-        _configurationBackup.CACertContentsForSourceServer = await reader.ReadToEndAsync();
+    var file = e.File;
+    using var reader = new StreamReader(file.OpenReadStream(maxAllowedSize: 1024 * 1024));
+    (_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).CACertContentsForSourceServer = await reader.ReadToEndAsync();
     }
 
 
@@ -108,70 +108,68 @@
 
     protected override void OnInitialized()
     {
-        if (_configuration != null)
-        {
-            _configurationBackup = (OnlineMongoMigrationProcessor.MigrationSettings)_configuration.Clone();
-        }
+        _configurationBackup = (OnlineMongoMigrationProcessor.MigrationSettings?)(_configuration?.Clone()) ?? new OnlineMongoMigrationProcessor.MigrationSettings();
     }
 
 
     private void HandleSubmit()
     {
-        if (_configurationBackup.CompareSampleSize < 5 || _configurationBackup.CompareSampleSize > 2000)
+    if ((_configurationBackup?.CompareSampleSize ?? 0) < 5 || (_configurationBackup?.CompareSampleSize ?? 0) > 2000)
         {
             errorMessage = "Sample size for hash comparison should be between 5 and 2000.";
             return;
         }
 
-        if (_configurationBackup.ChangeStreamBatchDurationMin < 10 || _configurationBackup.ChangeStreamBatchDurationMin > 600)
+    if ((_configurationBackup?.ChangeStreamBatchDurationMin ?? 0) < 10 || (_configurationBackup?.ChangeStreamBatchDurationMin ?? 0) > 600)
         {
             errorMessage = "Minimum batch duration should be between 10 and 600 seconds.";
             return;
         }
 
-        if (_configurationBackup.ChangeStreamBatchDuration < 20 || _configurationBackup.ChangeStreamBatchDuration > 3600)
+    if ((_configurationBackup?.ChangeStreamBatchDuration ?? 0) < 20 || (_configurationBackup?.ChangeStreamBatchDuration ?? 0) > 3600)
         {
             errorMessage = "Maximum batch duration should be between 20 and 3600 seconds.";
             return;
         }
 
-        if (_configurationBackup.ChangeStreamBatchDurationMin >= _configurationBackup.ChangeStreamBatchDuration)
+    if ((_configurationBackup?.ChangeStreamBatchDurationMin ?? 0) >= (_configurationBackup?.ChangeStreamBatchDuration ?? 0))
         {
             errorMessage = "Minimum batch duration should be less than maximum batch duration.";
             return;
         }
 
-        if (_configurationBackup.ChangeStreamMaxCollsInBatch < 1 || _configurationBackup.ChangeStreamMaxCollsInBatch > 30)
+    if ((_configurationBackup?.ChangeStreamMaxCollsInBatch ?? 0) < 1 || (_configurationBackup?.ChangeStreamMaxCollsInBatch ?? 0) > 30)
         {
             errorMessage = "Maximum collections per batch should be between 1 and 30.";
             return;
         }
-        if (_configurationBackup.MongoCopyPageSize < 50 || _configurationBackup.MongoCopyPageSize > 40000)
+    if ((_configurationBackup?.MongoCopyPageSize ?? 0) < 50 || (_configurationBackup?.MongoCopyPageSize ?? 0) > 40000)
         {
             errorMessage = "Page size should be between 50 and 40000.";
             return;
         }
 
-        if (_configurationBackup.ChangeStreamMaxDocsInBatch < 100 || _configurationBackup.ChangeStreamMaxDocsInBatch > 10000)
+    if ((_configurationBackup?.ChangeStreamMaxDocsInBatch ?? 0) < 100 || (_configurationBackup?.ChangeStreamMaxDocsInBatch ?? 0) > 10000)
         {
             errorMessage = "Maximum documents per batch should be between 100 and 10000.";
             return;
         }
 
-        if (_configurationBackup.ChunkSizeInMb < 2 || _configurationBackup.ChunkSizeInMb > 5120)
+    if ((_configurationBackup?.ChunkSizeInMb ?? 0) < 2 || (_configurationBackup?.ChunkSizeInMb ?? 0) > 5120)
         {
             errorMessage = "Chunk size (in MB) should be between 2 and 5120.";
             return;
         }
 
-        if (!Regex.Match(_configurationBackup.MongoToolsDownloadUrl, @"^https://.*\.zip$").Success)
+    if (!Regex.Match(_configurationBackup?.MongoToolsDownloadUrl ?? string.Empty, @"^https://.*\.zip$").Success)
         {
             errorMessage = "URL must start with 'https://' and end with '.zip'.";
             return;
         }
 
 
-        _configuration = (OnlineMongoMigrationProcessor.MigrationSettings)_configurationBackup.Clone();
+    _configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings();
+    _configuration = (OnlineMongoMigrationProcessor.MigrationSettings)_configurationBackup.Clone();
 
         if (On_configurationSaved.HasDelegate)
         {

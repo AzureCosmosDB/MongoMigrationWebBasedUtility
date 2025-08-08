@@ -4,6 +4,6 @@ namespace OnlineMongoMigrationProcessor
 {
     public class ChunkBoundaries
     {
-        public List<Boundary> Boundaries { get; set; }
+        public List<Boundary> Boundaries { get; set; } = new();
     }
 }

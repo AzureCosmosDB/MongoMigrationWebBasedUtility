@@ -74,7 +74,6 @@ namespace OnlineMongoMigrationProcessor
             }
             else
             {
-
                 return true;
             }
               
@@ -216,7 +215,7 @@ namespace OnlineMongoMigrationProcessor
 
                 return updatedConnectionString;
             }
-            catch (Exception ex)
+            catch (Exception)
             {                
                 return connectionString; // Return the original connection string in case of error
             }
@@ -235,9 +234,9 @@ namespace OnlineMongoMigrationProcessor
             // Use a HashSet to ensure no duplicates
             HashSet<string> validItems = new HashSet<string>();
 
-            foreach (string item in items)
+            foreach (string mu in items)
             {
-                string trimmedItem = item.Trim(); // Remove any extra whitespace
+                string trimmedItem = mu.Trim(); // Remove any extra whitespace
                 if (Regex.IsMatch(trimmedItem, pattern))
                 {
                     //Console.WriteLine($"'{trimmedItem}' matches the pattern.");

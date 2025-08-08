@@ -23,7 +23,7 @@
                 </button>
                 <ul class="dropdown-menu" aria-labelledby="resumeJobDropdown">
                     <li><a class="dropdown-item" @onclick="ResumeJobWithNewConnectionString">With Updated Connection Strings</a></li>
-                    @if (!string.IsNullOrEmpty(MigrationJob.SourceConnectionString) && !string.IsNullOrEmpty(MigrationJob.TargetConnectionString))
+                    @if (MigrationJob != null && !string.IsNullOrEmpty(MigrationJob.SourceConnectionString) && !string.IsNullOrEmpty(MigrationJob.TargetConnectionString))
                     {
                         <li><a class="dropdown-item" @onclick="ResumeJobWithExistingConnectionString">With Existing Connection Strings</a></li>
                     }
@@ -35,7 +35,7 @@
         {
             <button class="btn btn-primary mx-2" title="Pause Job" @onclick="PauseJob">Pause Job</button>
 
-            @if (MigrationJob.IsOnline && MigrationJob.SyncBackEnabled && !MigrationJob.ProcessingSyncBack)
+            @if (MigrationJob != null && MigrationJob.IsOnline && MigrationJob.SyncBackEnabled && !MigrationJob.ProcessingSyncBack)
             {
                 <button class="btn btn-warning dropdown-toggle" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" data-bs-toggle="dropdown" aria-expanded="false">Cut Over</button>
 
@@ -45,11 +45,11 @@
 
                 </ul>
             }
-            else if (MigrationJob.IsOnline && MigrationJob.SyncBackEnabled && MigrationJob.ProcessingSyncBack)
+            else if (MigrationJob != null && MigrationJob.IsOnline && MigrationJob.SyncBackEnabled && MigrationJob.ProcessingSyncBack)
             {
                 <button class="btn btn-warning" title="Complete Job" @onclick="CompleteJob">Complete Job</button>
             }
-            else if (MigrationJob.IsOnline && !MigrationJob.SyncBackEnabled)
+            else if (MigrationJob != null && MigrationJob.IsOnline && !MigrationJob.SyncBackEnabled)
             {
                 <button class="btn btn-warning" title="Perform Cut Over" disabled="@(!CheckCutoverReadiness())" @onclick="CompleteJob">Cut Over</button>
             }
@@ -88,7 +88,7 @@
 
 @if (_resetChangeStreamDialogOpen && MigrationJob != null)
 {
-    <ResetChangeStream MigrationUnits="@MigrationJob.MigrationUnits.Where(mu => mu.SourceStatus == CollectionStatus.OK).ToList()" OnCollectionsUpdated="@OnCSReset" />
+    <ResetChangeStream MigrationUnits="@((MigrationJob?.MigrationUnits ?? new List<MigrationUnit>()).Where(mu => mu.SourceStatus == CollectionStatus.OK).ToList())" OnCollectionsUpdated="@OnCSReset" />
 }
 @if (_collectionDetailsDialogOpen && _selectedMigrationUnit != null)
 {
@@ -162,14 +162,14 @@
 </table>
 <div class="d-flex align-items-center mb-3">
     <button class="btn btn-primary mx-2" title="You can add or remove collections from this job. Be sure to pause the job before doing so." @onclick="ManageCollections">Update Collections</button>
-    @if (MigrationJob.IsOnline)
+    @if (MigrationJob != null && MigrationJob.IsOnline)
     {
         <button class="btn btn-warning mx-2" title="Reset the change stream checkpoint to start from the beginning. This may add extra load to the migration process and could delay other collections. Ensure the job is paused before continuing." @onclick="ResetChangeStream">
-            @(MigrationJob.MigrationUnits.Any(MigrationUnit => MigrationUnit.ResetChangeStream) ? "✓ Reset Change Stream" : "☐ Reset Change Stream")
+            @(((MigrationJob?.MigrationUnits ?? new List<MigrationUnit>()).Any(MigrationUnit => MigrationUnit.ResetChangeStream)) ? "✓ Reset Change Stream" : "☐ Reset Change Stream")
         </button>
 
-        <button class="btn btn-warning mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison">
-            @(MigrationJob.RunComparison ? "✓ Run Hash Check" : "☐ Run Hash Check")
+    <button class="btn btn-warning mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison">
+            @((MigrationJob?.RunComparison ?? false) ? "✓ Run Hash Check" : "☐ Run Hash Check")
         </button>
     }
     
@@ -278,7 +278,7 @@ else if (@_showLogBackupFile)
     public MigrationJob? MigrationJob { get; set; }
 
     private LogBucket? LogBucket { get; set; }
-    private List<LogObject> VerboseMessages { get; set; }
+    private List<LogObject> VerboseMessages { get; set; } = new();
 
     private string _errorMessage = string.Empty;
     private bool _migrationDetailsPopUpOpen;
@@ -339,11 +339,12 @@ else if (@_showLogBackupFile)
 
     private List<MigrationJob> GetMigrations()
     {
-        return JobManager.GetMigrations(out string errorMessage);
+        var list = JobManager.GetMigrations(out string errorMessage);
         if (!string.IsNullOrEmpty(errorMessage))
         {
             _errorMessage = errorMessage;
         }
+        return list ?? new List<MigrationJob>();
     }
 
     private async Task DownloadLogBackupFile()
@@ -474,11 +475,11 @@ else if (@_showLogBackupFile)
     private bool CheckCutoverReadiness()
     {
         if (MigrationJob?.MigrationUnits == null) return false;
-        foreach (var item in MigrationJob.MigrationUnits)
+        foreach (var mu in MigrationJob.MigrationUnits)
         {
-            if (item.SourceStatus != CollectionStatus.NotFound)
+            if (mu.SourceStatus != CollectionStatus.NotFound)
             {
-                if (item.DumpPercent != 100 || item.RestorePercent != 100)
+                if (mu.DumpPercent != 100 || mu.RestorePercent != 100)
                     return false;
             }
         }
@@ -646,7 +647,7 @@ else if (@_showLogBackupFile)
 
     private bool IsJobRunning()
     {
-        return JobManager.IsProcessRunning(JobId);
+        return JobManager.IsProcessRunning(JobId ?? string.Empty);
     }
 
     private void InitSyncBackJob()

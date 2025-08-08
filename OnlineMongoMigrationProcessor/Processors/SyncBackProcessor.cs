@@ -1,5 +1,6 @@
 ﻿using MongoDB.Driver;
 using OnlineMongoMigrationProcessor.Helpers;
+using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,12 +14,10 @@ namespace OnlineMongoMigrationProcessor.Processors
     {
         public bool ProcessRunning { get; set; }
         private MongoChangeStreamProcessor? _syncBackToSource;
-        private JobList? _jobList;
-        private MigrationJob? _job;
-        private bool _executionCancelled = false;
-
-        private MigrationSettings? _config;
-        private CancellationTokenSource _cts;
+        private readonly JobList _jobList;
+        private readonly MigrationJob _job;
+        private readonly MigrationSettings _config;
+        private CancellationTokenSource? _cts;
         private Log _log;
 
         public SyncBackProcessor(Log log, JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config, string toolsLaunchFolder)
@@ -30,16 +29,12 @@ namespace OnlineMongoMigrationProcessor.Processors
         }
 
         public void StopProcessing(bool updateStatus = true)
-        {           
-
-            if (_job != null)
-                _job.IsStarted = false;
-            _jobList?.Save();
+        {
+            _job.IsStarted = false;
+            _jobList.Save();
 
             if(updateStatus) 
                 ProcessRunning = false;
-
-            _executionCancelled = true;
             _cts?.Cancel();
             if (_syncBackToSource != null)
                 _syncBackToSource.ExecutionCancelled = true;
@@ -47,82 +42,86 @@ namespace OnlineMongoMigrationProcessor.Processors
             _syncBackToSource = null;   
         }
 
-        public async Task StartProcessAsync(MigrationUnit item, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        // Exception handler for RetryHelper
+        private Task<TaskResult> SyncBack_ExceptionHandler(Exception ex, int attemptCount, int currentBackoff)
+        {
+            if (ex is OperationCanceledException)
+            {
+                _log.WriteLine($"SyncBack operation was cancelled");
+                return Task.FromResult(TaskResult.Abort);
+            }
+            else if (ex is MongoExecutionTimeoutException)
+            {
+                _log.WriteLine($"SyncBack attempt {attemptCount} failed due to timeout. Details:{ex}", LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+            else
+            {
+                _log.WriteLine(ex.ToString(), LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
+            }
+        }
+
+        private Task<TaskResult> SyncBackAttemptAsync()
+        {
+            if (_cts == null)
+            {
+                _log.WriteLine("Cancellation token source not initialized for SyncBack.", LogType.Error);
+                return Task.FromResult(TaskResult.Abort);
+            }
+
+            _cts.Token.ThrowIfCancellationRequested();
+
+            _log.WriteLine($"Sync back to source starting.");
+
+            var units = _job.MigrationUnits;
+            if (units != null)
+            {
+                foreach (MigrationUnit unit in units)
+                {
+                    if (!unit.SyncBackChangeStreamStartedOn.HasValue)
+                    {
+                        unit.SyncBackChangeStreamStartedOn = DateTime.UtcNow;
+                    }
+                }
+            }
+
+            var _ = _syncBackToSource!.RunCSPostProcessingAsync(_cts);
+            return Task.FromResult(TaskResult.Success);
+        }
+
+        public async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
             ProcessRunning = true;
 
-            if (_job != null)
-                _job.IsStarted = true;
+            _job.IsStarted = true;
 
-            int maxRetries = 10;
-            int attempts = 0;
-            TimeSpan backoff = TimeSpan.FromSeconds(2);
-
-            var sourceClient = MongoClientFactory.Create(_log, sourceConnectionString, false, _config.CACertContentsForSourceServer);
+            if (string.IsNullOrWhiteSpace(sourceConnectionString)) throw new ArgumentNullException(nameof(sourceConnectionString));
+            if (string.IsNullOrWhiteSpace(targetConnectionString)) throw new ArgumentNullException(nameof(targetConnectionString));
+            var sourceClient = MongoClientFactory.Create(_log, sourceConnectionString, false);
             var targetClient = MongoClientFactory.Create(_log, targetConnectionString);
 
             _syncBackToSource = null;
-            _syncBackToSource = new MongoChangeStreamProcessor(_log, sourceClient, targetClient, _jobList, _job,_config,true);
+            _syncBackToSource = new MongoChangeStreamProcessor(_log, sourceClient, targetClient, _jobList, _job, _config, true);
 
             _cts=new CancellationTokenSource();
 
-            bool continueProcessing = true;
+            // Use RetryHelper instead of manual retry loop
+            var resultStatus = await new RetryHelper().ExecuteTask(
+                () => SyncBackAttemptAsync(),
+                (ex, attemptCount, currentBackoff) => SyncBack_ExceptionHandler(ex, attemptCount, currentBackoff),
+                _log
+            );
 
-            
-            while (attempts < maxRetries && !_executionCancelled && continueProcessing)
+            if (resultStatus == TaskResult.Abort || resultStatus == TaskResult.FailedAfterRetries)
             {
-                attempts++;
-                try
-                {
-                    _log.WriteLine($"Sync back to source starting.");
-
-
-                    foreach(MigrationUnit unit in _job.MigrationUnits)
-                    {
-                        if (!unit.SyncBackChangeStreamStartedOn.HasValue)
-                        {
-                            unit.SyncBackChangeStreamStartedOn = DateTime.UtcNow;
-						}
-					}
-
-					var result = _syncBackToSource.RunCSPostProcessingAsync(_cts);
-
-                    //
-                    continueProcessing = false;
-                }
-                catch (MongoExecutionTimeoutException ex)
-                {
-                    _log.WriteLine($"Attempt {attempts} failed due to timeout: {ex.ToString()}. Details:{ex.ToString()}", LogType.Error);
-
-                    _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                    Thread.Sleep(backoff);
-                    
-
-                    continueProcessing = true;
-                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-                }
-                catch (Exception ex)
-                {
-                    _log.WriteLine($"Attempt {attempts} failed: {ex.ToString()}. Details:{ex.ToString()}", LogType.Error);
-
-                    _log.WriteLine($"Retrying in {backoff.TotalSeconds} seconds...", LogType.Error);
-                    Thread.Sleep(backoff);
-                    
-
-                    continueProcessing = true;
-                    backoff = TimeSpan.FromTicks(backoff.Ticks * 2);
-
-                }
-            }
-            if (attempts == maxRetries)
-            {
-                _log.WriteLine("Maximum retry attempts reached. Aborting operation.", LogType.Error);
-                
-                continueProcessing = false;
+                _log.WriteLine("SyncBack failed after multiple attempts. Aborting operation.", LogType.Error);
                 StopProcessing();
-
-                _syncBackToSource.ExecutionCancelled = true;
-                _syncBackToSource = null;
+                if (_syncBackToSource != null)
+                {
+                    _syncBackToSource.ExecutionCancelled = true;
+                    _syncBackToSource = null;
+                }
             }
         }
     }

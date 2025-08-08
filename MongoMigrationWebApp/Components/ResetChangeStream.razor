@@ -17,7 +17,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                        @foreach (var mu in MigrationUnits)
+                        @foreach (var mu in (MigrationUnits ?? Enumerable.Empty<MigrationUnit>()))
                         {
                             <tr>
                                 <td>@mu.DatabaseName.@mu.CollectionName</td>
@@ -63,7 +63,7 @@
 
     private void OnCollectionToggleChanged(ChangeEventArgs e, MigrationUnit mu)
     {
-        bool isChecked = (bool)e.Value;
+        bool isChecked = e.Value is bool b && b;
         if (!isChecked)
         {
             updatedMigrationUnits.Remove(mu);

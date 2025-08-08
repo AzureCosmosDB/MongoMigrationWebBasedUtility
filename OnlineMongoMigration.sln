@@ -7,6 +7,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OnlineMongoMigrationProcess
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MongoMigrationWebApp", "MongoMigrationWebApp\MongoMigrationWebApp.csproj", "{06626647-38E7-4847-85C6-32E268042BDD}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnlineMongoMigrationProcessor.Tests", "tests\OnlineMongoMigrationProcessor.Tests\OnlineMongoMigrationProcessor.Tests.csproj", "{F7F8A7B1-5F50-4E64-B4E6-1D7A3F2F8D99}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{06626647-38E7-4847-85C6-32E268042BDD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{06626647-38E7-4847-85C6-32E268042BDD}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{06626647-38E7-4847-85C6-32E268042BDD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F7F8A7B1-5F50-4E64-B4E6-1D7A3F2F8D99}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F7F8A7B1-5F50-4E64-B4E6-1D7A3F2F8D99}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F7F8A7B1-5F50-4E64-B4E6-1D7A3F2F8D99}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F7F8A7B1-5F50-4E64-B4E6-1D7A3F2F8D99}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -20,7 +20,7 @@ namespace OnlineMongoMigrationProcessor
 {
     internal static class MongoHelper
     {
-        public static long GetActualDocumentCount(IMongoCollection<BsonDocument> collection, MigrationUnit item)
+        public static long GetActualDocumentCount(IMongoCollection<BsonDocument> collection, MigrationUnit mu)
         {
             return collection.CountDocuments(Builders<BsonDocument>.Filter.Empty);
         }
@@ -196,7 +196,7 @@ namespace OnlineMongoMigrationProcessor
 				log.WriteLine($"Error checking for change streams: {ex.ToString()}", LogType.Error);
                 
                 //return (IsCSEnabled: false, Version: version);
-                throw ex;
+                throw;
             }
             finally
             {
@@ -207,15 +207,13 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        public async static Task SetChangeStreamResumeTokenAsync(Log log,MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit)
+    public static Task SetChangeStreamResumeTokenAsync(Log log,MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit)
         {
             int retryCount = 0;
             bool isSucessful = false;
 
             while (!isSucessful && retryCount<10)
             {
-                ChangeStreamOperationType? changeType = null;
-                BsonValue? documentId = null;
                 try
                 {
 
@@ -231,15 +229,17 @@ namespace OnlineMongoMigrationProcessor
                     {
                         if (!string.IsNullOrEmpty(unit.OriginalResumeToken))
                         {
-                            log.WriteLine($"Resetting change stream resume token for {unit.DatabaseName}.{unit.CollectionName} to {unit.ChangeStreamStartedOn?.ToUniversalTime()} (UTC)");
+                            var startedOnUtc = unit.ChangeStreamStartedOn.HasValue ? unit.ChangeStreamStartedOn.Value.ToUniversalTime() : DateTime.UtcNow;
+                            log.WriteLine($"Resetting change stream resume token for {unit.DatabaseName}.{unit.CollectionName} to {startedOnUtc} (UTC)");
                             options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter = BsonDocument.Parse(unit.OriginalResumeToken) };
 
                         }
                         else
                         {
                             //try to go 15 min back in time, temporary fix for backward compatibility
-                            log.WriteLine($"Resetting change stream start time token for {unit.DatabaseName}.{unit.CollectionName} to {unit.ChangeStreamStartedOn?.AddMinutes(-15).ToUniversalTime()} (UTC)");
-                            var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp((DateTime)unit.ChangeStreamStartedOn);
+                            var start = (unit.ChangeStreamStartedOn ?? DateTime.UtcNow).AddMinutes(-15).ToUniversalTime();
+                            log.WriteLine($"Resetting change stream start time token for {unit.DatabaseName}.{unit.CollectionName} to {start} (UTC)");
+                            var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(start);
                             options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };
                         }
 
@@ -250,7 +250,7 @@ namespace OnlineMongoMigrationProcessor
                         {
                             log.WriteLine($"Change stream resume token for {unit.DatabaseName}.{unit.CollectionName} already set");
 
-                            return;
+                            return Task.CompletedTask;
                         }
 
                         options = new ChangeStreamOptions
@@ -288,6 +288,7 @@ namespace OnlineMongoMigrationProcessor
 
                 }
             }
+            return Task.CompletedTask;
         }
 
         private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job ,MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS)
@@ -330,12 +331,9 @@ namespace OnlineMongoMigrationProcessor
                                 unit.CursorUtcTimestamp = change.WallTime.Value.ToUniversalTime();
                             }
 
-                            var changeType = change.OperationType;
-                            var documentId = change.DocumentKey["_id"];
+                            unit.ResumeTokenOperation = (ChangeStreamOperationType)change.OperationType;
 
-                            unit.ResumeTokenOperation = (ChangeStreamOperationType)changeType;
-
-                            string json = documentId.ToJson(); // save as string
+                            string json = change.DocumentKey["_id"].ToJson(); // save as string
                             // Deserialize the BsonValue to ensure it is stored correctly
                             unit.ResumeDocumentId = BsonSerializer.Deserialize<BsonValue>(json); ;
                             
@@ -406,7 +404,7 @@ namespace OnlineMongoMigrationProcessor
 
                             // If you have document key or op, you can extract here
 
-                            return; // Exit on first oplog item detected
+                            return; // Exit on first oplog mu detected
                         }
                     }
 

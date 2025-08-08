@@ -15,8 +15,8 @@ namespace OnlineMongoMigrationProcessor.Partitioner
     public class RUPartitioner
     {
 
-        Log _log;
-        IMongoCollection<BsonDocument> _sourceCollection;
+    Log _log = new Log();
+    IMongoCollection<BsonDocument> _sourceCollection = null!;
         /// <summary>
         /// Process partitions using RU-optimized approach
         /// </summary>
@@ -38,7 +38,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 if (!startTokens.Any() || !stopTokens.Any())
                 {
                     _log.WriteLine($"No RU partition tokens found for {_sourceCollection.CollectionNamespace}", LogType.Error);
-                    return null;
+                    return new List<MigrationChunk>();
                 }
 
                 List<MigrationChunk> chunks = new List<MigrationChunk>();
@@ -58,7 +58,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             catch (Exception ex)
             {
                 _log.WriteLine($"Error processing RU partitions: {ex}", LogType.Error);
-                return null;
+                return new List<MigrationChunk>();
             }
         }
 

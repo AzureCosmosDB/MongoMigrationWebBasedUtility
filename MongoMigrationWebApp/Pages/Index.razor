@@ -35,7 +35,6 @@
         <table class="table">
             <thead>
                 <tr>
-                    <th> &nbsp;&nbsp;&nbsp;&nbsp;</th>
                     <th>Name</th>
                     <th>Migration Tool</th>
                     <th>Started On (UTC)</th>
@@ -50,7 +49,7 @@
                 {
                     <tr>
                         <td>
-                            @if (JobManager.IsProcessRunning(migration.Id))
+                            @if (JobManager.IsProcessRunning(migration.Id ?? string.Empty))
                             {
                                 <i class="bi bi-star-fill text-warning"></i>
                             }
@@ -120,7 +119,6 @@
     private MigrationJob? _selectedMigrationJob;
     private List<MigrationJob>? migrationJobs;
     private bool _loadingComplete;
-    private bool _jobLoadError;
 
     private string GetToolName(OnlineMongoMigrationProcessor.Models.JobType jobType)
     {
@@ -171,6 +169,7 @@
 
     private async Task RestoreBackup()
     {
+        await Task.Yield();
         var backupDate = JobManager.GetJobBackupDate();
 
         if (backupDate == DateTime.MinValue)
@@ -227,7 +226,7 @@
                 _messageDialogOpen = true;
             }
         }
-        catch (Exception ex)
+    catch (Exception)
         {
             _message = "Failed to restore backup.";
             _messageDialogOpen = true;
@@ -253,7 +252,6 @@
             {
                 _message = "Unable to load job details at the moment. Please wait a while, and if the issue continues, you can recover the jobs from the backup.";
                 _messageDialogOpen = true;            
-                _jobLoadError = true;
             }
             return new List<MigrationJob>();
         }
@@ -267,7 +265,7 @@
         var migrationJob = GetMigrations().Find(m => m.Id == id);
         _selectedMigrationJob = migrationJob;
         //if (!_selectedMigrationJob.CurrentlyActive || !JobManager.IsProcessRunning(id
-        if (!JobManager.IsProcessRunning(id))
+        if (!JobManager.IsProcessRunning(id ?? string.Empty))
         {
             _message = "Are you sure you want to delete " + _selectedMigrationJob.Name + " ?";
             _yesNoDialogOpen = true;
@@ -291,7 +289,7 @@
             _yesNoDialogOpen = false;
 
             //if (result.IsConfirmed && (!_selectedMigrationJob.CurrentlyActive || !JobManager.IsProcessRunning(_selectedMigrationJob.Id)))
-            if (result.IsConfirmed && (!JobManager.IsProcessRunning(_selectedMigrationJob.Id)))
+            if (result.IsConfirmed && (!JobManager.IsProcessRunning(_selectedMigrationJob?.Id ?? string.Empty)))
             {
 
                 if (_selectedMigrationJob != null)

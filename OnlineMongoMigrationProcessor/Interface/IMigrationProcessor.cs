@@ -9,7 +9,7 @@ namespace OnlineMongoMigrationProcessor
 
         // Methods
         void StopProcessing(bool updateStatus=true);
-        Task StartProcessAsync(MigrationUnit item, string sourceConnectionString, string targetConnectionString, string idField = "_id");
+        Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id");
         bool ProcessRunning { get; set; }
 
     }

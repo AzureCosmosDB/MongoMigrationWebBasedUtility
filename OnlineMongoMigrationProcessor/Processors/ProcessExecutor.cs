@@ -8,7 +8,7 @@ using System.Xml.Linq;
 #pragma warning disable CS8600
 namespace OnlineMongoMigrationProcessor
 {
-    internal class ProcessExecutor : IProcessExecutor
+    internal class ProcessExecutor
     {
         private static bool _migrationCancelled = false;
         private Log _log;
@@ -24,7 +24,7 @@ namespace OnlineMongoMigrationProcessor
 		/// <param name="exePath">The full path to the executable file.</param>
 		/// <param name="arguments">The arguments to pass to the executable.</param>
 		/// <returns>True if the process completed successfully, otherwise false.</returns>
-		public bool Execute(JobList jobList, MigrationUnit item, MigrationChunk chunk, int chunkIndex, double basePercent, double contribFactor, long targetCount, string exePath, string arguments)
+		public bool Execute(JobList jobList, MigrationUnit mu, MigrationChunk chunk, int chunkIndex, double basePercent, double contribFactor, long targetCount, string exePath, string arguments)
         {
             int pid;
             string processType = string.Empty;
@@ -84,7 +84,7 @@ namespace OnlineMongoMigrationProcessor
                         if (!string.IsNullOrEmpty(args.Data))
                         {
                             errorBuffer.AppendLine(args.Data);
-                            ProcessErrorData(args.Data, processType, item, chunk, chunkIndex, basePercent, contribFactor, targetCount, jobList);
+                            ProcessConsoleOutput(args.Data, processType, mu, chunk, chunkIndex, basePercent, contribFactor, targetCount, jobList);
                         }
                     };
 
@@ -132,7 +132,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private void ProcessErrorData(string data, string processType, MigrationUnit item, MigrationChunk chunk,int chunkIndex, double basePercent, double contribFactor, long targetCount, JobList jobList)
+        private void ProcessConsoleOutput(string data, string processType, MigrationUnit mu, MigrationChunk chunk,int chunkIndex, double basePercent, double contribFactor, long targetCount, JobList jobList)
         {
             string percentValue = ExtractPercentage(data);
             string docsProcessed = ExtractDocCount(data);
@@ -150,18 +150,18 @@ namespace OnlineMongoMigrationProcessor
 
             if (percent > 0 && targetCount>0)
             {
-                _log.AddVerboseMessage($"{processType} for {item.DatabaseName}.{item.CollectionName} Chunk[{chunkIndex}] : {percent}%");
+                _log.AddVerboseMessage($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {percent}%");
                 if (processType == "MongoRestore")
                 {
-                    item.RestorePercent = Math.Min(100,basePercent + (percent * contribFactor));
-                    if (item.RestorePercent == 100)
-                        item.RestoreComplete = true;
+                    mu.RestorePercent = Math.Min(100,basePercent + (percent * contribFactor));
+                    if (mu.RestorePercent == 100)
+                        mu.RestoreComplete = true;
                 }
                 else
                 {
-                    item.DumpPercent = Math.Min(100, basePercent + (percent * contribFactor));
-                    if (item.DumpPercent == 100)
-                        item.DumpComplete = true;
+                    mu.DumpPercent = Math.Min(100, basePercent + (percent * contribFactor));
+                    if (mu.DumpPercent == 100)
+                        mu.DumpComplete = true;
                 }
                 jobList.Save();
             }

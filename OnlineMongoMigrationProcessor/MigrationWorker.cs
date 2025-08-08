@@ -40,7 +40,6 @@ namespace OnlineMongoMigrationProcessor
         private IMigrationProcessor _migrationProcessor;
         public MigrationSettings? _config;
         
-        private ComparisonHelper? comparisonHelper;
         private CancellationTokenSource _compare_cts;
 
         public MigrationWorker(JobList jobList)
@@ -180,24 +179,27 @@ namespace OnlineMongoMigrationProcessor
         }
 
         // Custom exception handler delegate with logic to control retry flow
-        private async Task<TaskResult> Default_ExceptionHandler(Exception ex, int attemptCount, string processName, int currentBackoff)
+        private Task<TaskResult> Default_ExceptionHandler(Exception ex, int attemptCount, string processName, int currentBackoff)
         {
-
             _log.WriteLine($"{processName} attempt failed. Retrying in {currentBackoff} seconds...");
-            return TaskResult.Retry;
+            return Task.FromResult(TaskResult.Retry);
         }
 
         // Custom exception handler delegate with logic to control retry flow
-        private async Task<TaskResult> MigrateCollections_ExceptionHandler(Exception ex, int attemptCount, string processName, int currentBackoff)
+        private Task<TaskResult> MigrateCollections_ExceptionHandler(Exception ex, int attemptCount, string processName, int currentBackoff)
         {
-
-            if (ex is MongoExecutionTimeoutException)
+            if(ex is OperationCanceledException)
+            {
+                _log.WriteLine($"{processName} operation was cancelled.");
+                return Task.FromResult(TaskResult.Canceled);
+			}
+			if (ex is MongoExecutionTimeoutException)
             {
                 _log.WriteLine($"{processName} attempt {attemptCount} failed due to timeout: {ex.ToString()}. Details:{ex.ToString()}", LogType.Error);
             }
 
-            _log.WriteLine($"Retrying in {currentBackoff} seconds...", LogType.Error);
-            return TaskResult.Retry;
+            _log.WriteLine($"Retrying in {currentBackoff} seconds...", LogType.Error);            
+            return Task.FromResult(TaskResult.Retry);
         }
 
         private async Task<TaskResult> PreparePartitions()
@@ -344,7 +346,7 @@ namespace OnlineMongoMigrationProcessor
         {
             string[] collectionsInput = namespacesToMigrate
                 .Split(',')
-                .Select(item => item.Trim())
+                .Select(mu => mu.Trim())
                 .ToArray();
 
             if (_job.MigrationUnits.Count == 0)
@@ -401,9 +403,18 @@ namespace OnlineMongoMigrationProcessor
             }
             PopulateJobCollections(namespacesToMigrate);
 
+			if (_job.JobType==JobType.DumpAndRestore)
+			{
+				_toolsLaunchFolder = await Helper.EnsureMongoToolsAvailableAsync(_log, _toolsDestinationFolder, _config);
+				if (string.IsNullOrEmpty(_toolsLaunchFolder))
+				{
+					StopMigration();
+					return;
+				}
+			}
 
 
-            TaskResult result = await new RetryHelper().ExecuteTask(
+			TaskResult result = await new RetryHelper().ExecuteTask(
                 () => PrepareForMigration(),
                 (ex, attemptCount, currentBackoff) => Default_ExceptionHandler(
                     ex, attemptCount,
@@ -412,7 +423,7 @@ namespace OnlineMongoMigrationProcessor
                 _log
             );
 
-            if (result == TaskResult.Abort || result == TaskResult.Failed || _migrationCancelled)
+            if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries || _migrationCancelled)
             {
                 StopMigration();
                 return;
@@ -429,7 +440,7 @@ namespace OnlineMongoMigrationProcessor
                 _log
             );
 
-            if (result == TaskResult.Abort || result == TaskResult.Failed || _migrationCancelled)
+            if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries || _migrationCancelled)
             {
                 StopMigration();
                 return;
@@ -453,12 +464,12 @@ namespace OnlineMongoMigrationProcessor
                 () => MigrateJobCollections(),
                 (ex, attemptCount, currentBackoff) => MigrateCollections_ExceptionHandler(
                     ex, attemptCount,
-                    "Initiate migration", currentBackoff
+                    "Migrate collections", currentBackoff
                 ),
                 _log
             );
 
-            if (result == TaskResult.Abort || result == TaskResult.Failed || _migrationCancelled)
+            if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries || _migrationCancelled)
             {
                 StopMigration();
                 return;
