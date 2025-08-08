@@ -8,7 +8,7 @@ using System.Xml.Linq;
 #pragma warning disable CS8600
 namespace OnlineMongoMigrationProcessor
 {
-    internal class ProcessExecutor
+    internal class ProcessExecutor : IProcessExecutor
     {
         private static bool _migrationCancelled = false;
         private Log _log;
