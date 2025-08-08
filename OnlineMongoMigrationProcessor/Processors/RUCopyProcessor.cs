@@ -11,11 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
-#pragma warning disable CS8602
-#pragma warning disable CS8604
-#pragma warning disable CS8600
-#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
-#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+// Nullability and fire-and-forget warnings addressed in code; no pragmas required.
 
 namespace OnlineMongoMigrationProcessor.Processors
 {
@@ -25,11 +21,11 @@ namespace OnlineMongoMigrationProcessor.Processors
     /// </summary>
     internal class RUCopyProcessor : IMigrationProcessor
     {
-        private JobList? _jobList;
-        private MigrationJob? _job;
-        private MongoClient? _sourceClient;
+        private JobList _jobList;
+        private MigrationJob _job;
+        private MongoClient _sourceClient;
         private MongoClient? _targetClient;
-        private MigrationSettings? _config;
+        private MigrationSettings _config;
         private CancellationTokenSource _cts;
         private MongoChangeStreamProcessor? _changeStreamProcessor;
         private bool _postUploadCSProcessing = false;
@@ -102,10 +98,13 @@ namespace OnlineMongoMigrationProcessor.Processors
                 if (_targetClient == null && !_job.IsSimulatedRun)
                     _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-                if (_changeStreamProcessor == null)
-                    _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
+                    if (_changeStreamProcessor == null && _targetClient != null)
+                        _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient!, _jobList, _job, _config);
 
-                var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                if (_changeStreamProcessor != null)
+                {
+                    var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                }
                 return true;
             }
 
@@ -122,7 +121,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             IMongoCollection<BsonDocument>? targetCollection = null;
             if (!_job.IsSimulatedRun)
             {
-                var targetDatabase = _targetClient.GetDatabase(ctx.DatabaseName);
+                var targetDatabase = _targetClient!.GetDatabase(ctx.DatabaseName);
                 targetCollection = targetDatabase.GetCollection<BsonDocument>(ctx.CollectionName);
             }
 
@@ -156,7 +155,10 @@ namespace OnlineMongoMigrationProcessor.Processors
                     {
                         try
                         {
-                            await ProcessChunksInBatchesAsync(chunk, mu, ctx.Collection, targetCollection, combinedCts.Token, _job.IsSimulatedRun);
+                            if (targetCollection != null)
+                            {
+                                await ProcessChunksInBatchesAsync(chunk, mu, ctx.Collection, targetCollection, combinedCts.Token, _job.IsSimulatedRun);
+                            }
                         }
                         finally
                         {
@@ -352,32 +354,35 @@ namespace OnlineMongoMigrationProcessor.Processors
                         if (_targetClient == null && !_job.IsSimulatedRun)
                             _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-                        if (_changeStreamProcessor == null)
-                            _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
+                        if (_changeStreamProcessor == null && _targetClient != null)
+                            _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient!, _jobList, _job, _config);
 
-                        _changeStreamProcessor.AddCollectionsToProcess(mu, _cts);
+                        _changeStreamProcessor?.AddCollectionsToProcess(mu, _cts);
                     }
 
                     if (!_cts.Token.IsCancellationRequested)
                     {
-                        var migrationJob = _jobList.MigrationJobs.Find(m => m.Id == ctx.JobId);
-                        if (!_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
+                        var migrationJob = _jobList.MigrationJobs?.Find(m => m.Id == ctx.JobId);
+                        if (migrationJob != null && !_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
                         {
                             _log.WriteLine($"{migrationJob.Id} completed.");
                             migrationJob.IsCompleted = true;
                             StopProcessing(true);
                         }
-                        else if (_job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(migrationJob) && !_postUploadCSProcessing)
+                        else if (migrationJob != null && _job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(migrationJob) && !_postUploadCSProcessing)
                         {
                             _postUploadCSProcessing = true;
 
                             if (_targetClient == null && !_job.IsSimulatedRun)
                                 _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-                            if (_changeStreamProcessor == null)
-                                _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
+                            if (_changeStreamProcessor == null && _targetClient != null)
+                                _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient!, _jobList, _job, _config);
 
-                            var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                            if (_changeStreamProcessor != null)
+                            {
+                                var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                            }
                         }
                     }
                 }

@@ -9,23 +9,20 @@ using System.Threading.Tasks;
 using System.Xml.Linq;
 using static System.Reflection.Metadata.BlobBuilder;
 
-#pragma warning disable CS8602
-#pragma warning disable CS8604
-#pragma warning disable CS8600
-#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
-#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+// Nullability: fields are initialized via constructor; using careful null checks where needed.
+// Fire-and-forget tasks are assigned to discards to avoid CS4014.
 
 namespace OnlineMongoMigrationProcessor
 {
     internal class CopyProcessor : IMigrationProcessor
     {
-        private JobList? _jobList;
-        private MigrationJob? _job;
-        private MongoClient? _sourceClient;
+        private JobList _jobList;
+        private MigrationJob _job;
+        private MongoClient _sourceClient;
         private MongoClient? _targetClient;
-        private MigrationSettings? _config;
+        private MigrationSettings _config;
         private CancellationTokenSource _cts;
-        private MongoChangeStreamProcessor _changeStreamProcessor;
+        private MongoChangeStreamProcessor? _changeStreamProcessor;
         private bool _postUploadCSProcessing = false;
         private Log _log;
 
@@ -93,10 +90,13 @@ namespace OnlineMongoMigrationProcessor
                 if (_targetClient == null && !_job.IsSimulatedRun)
                     _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-                if (_changeStreamProcessor == null)
+                if (_changeStreamProcessor == null && _targetClient != null)
                     _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
 
-                var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                if (_changeStreamProcessor != null)
+                {
+                    var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                }
                 return true;
             }
 
@@ -136,7 +136,9 @@ namespace OnlineMongoMigrationProcessor
 
             if (mu.MigrationChunks.Count > 1)
             {
-                var bounds = SamplePartitioner.GetChunkBounds(mu.MigrationChunks[chunkIndex].Gte, mu.MigrationChunks[chunkIndex].Lt, mu.MigrationChunks[chunkIndex].DataType);
+                var gteStr = mu.MigrationChunks[chunkIndex].Gte ?? string.Empty;
+                var ltStr = mu.MigrationChunks[chunkIndex].Lt ?? string.Empty;
+                var bounds = SamplePartitioner.GetChunkBounds(gteStr, ltStr, mu.MigrationChunks[chunkIndex].DataType);
                 var gte = bounds.gte;
                 var lt = bounds.lt;
 
@@ -166,7 +168,7 @@ namespace OnlineMongoMigrationProcessor
                 _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
             var documentCopier = new MongoDocumentCopier();
-            documentCopier.Initialize(_log, _targetClient, ctx.Collection, ctx.DatabaseName, ctx.CollectionName, _config.MongoCopyPageSize);
+            documentCopier.Initialize(_log, _targetClient!, ctx.Collection, ctx.DatabaseName, ctx.CollectionName, _config.MongoCopyPageSize);
             var result = await documentCopier.CopyDocumentsAsync(_jobList, mu, chunkIndex, initialPercent, contributionFactor, docCount, filter, _cts.Token, _job.IsSimulatedRun);
 
             if (result == TaskResult.Success)
@@ -203,23 +205,23 @@ namespace OnlineMongoMigrationProcessor
                         if (_targetClient == null && !_job.IsSimulatedRun)
                             _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-                        if (_changeStreamProcessor == null)
+                        if (_changeStreamProcessor == null && _targetClient != null)
                             _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
 
-                        _changeStreamProcessor.AddCollectionsToProcess(mu, _cts);
+                        _changeStreamProcessor?.AddCollectionsToProcess(mu, _cts);
                     }
 
                     if (!_cts.Token.IsCancellationRequested)
                     {
-                        var migrationJob = _jobList.MigrationJobs.Find(m => m.Id == ctx.JobId);
-                        if (!_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
+                        var migrationJob = _jobList.MigrationJobs?.Find(m => m.Id == ctx.JobId);
+                        if (migrationJob != null && !_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
                         {
                             _log.WriteLine($"{migrationJob.Id} completed.");
 
                             migrationJob.IsCompleted = true;
                             StopProcessing(true);
                         }
-                        else if (_job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(migrationJob) && !_postUploadCSProcessing)
+                        else if (migrationJob != null && _job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(migrationJob) && !_postUploadCSProcessing)
                         {
                             // If CSStartsAfterAllUploads is true and the offline job is completed, run post-upload change stream processing
                             _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
@@ -227,10 +229,13 @@ namespace OnlineMongoMigrationProcessor
                             if (_targetClient == null && !_job.IsSimulatedRun)
                                 _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-                            if (_changeStreamProcessor == null)
+                            if (_changeStreamProcessor == null && _targetClient != null)
                                 _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
 
-                            var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                            if (_changeStreamProcessor != null)
+                            {
+                                var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                            }
                         }
                     }
                 }
@@ -259,7 +264,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 mu.EstimatedDocCount = ctx.Collection.EstimatedDocumentCount();
 
-                Task.Run(() =>
+                _ = Task.Run(() =>
                 {
                     long count = MongoHelper.GetActualDocumentCount(ctx.Collection, mu);
                     mu.ActualDocCount = count;
@@ -297,7 +302,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-                mu.SourceCountDuringCopy = mu.MigrationChunks.Sum(chunk => chunk.Segments.Sum(mu => mu.QueryDocCount));
+                mu.SourceCountDuringCopy = mu.MigrationChunks.Sum(chunk => (long)(chunk.Segments?.Sum(seg => seg.QueryDocCount) ?? 0));
                 mu.DumpGap = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount) - mu.SourceCountDuringCopy;
                 mu.RestoreGap = mu.SourceCountDuringCopy - mu.MigrationChunks.Sum(chunk => chunk.DumpResultDocCount) ;
                 

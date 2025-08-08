@@ -10,7 +10,6 @@ using System.Threading;
 
 namespace OnlineMongoMigrationProcessor
 {
-#pragma warning disable CS8602      
 
     public class LogBucket
     {
@@ -19,8 +18,8 @@ namespace OnlineMongoMigrationProcessor
 
     public class Log
     {
-        private LogBucket _logBucket = new LogBucket();
-        private List<LogObject>? _verboseMessages = new List<LogObject>();
+    private LogBucket _logBucket = new LogBucket();
+    private List<LogObject> _verboseMessages = new List<LogObject>();
         private string _currentId = string.Empty;
 
         //private static readonly object _syncLock = new();
@@ -35,11 +34,6 @@ namespace OnlineMongoMigrationProcessor
         {
             lock (_verboseLock)
             {
-                if (_verboseMessages == null)
-                {
-                    return;
-                }
-
                 if (_verboseMessages.Count == 5)
                 {
                     _verboseMessages.RemoveAt(0); // Remove the oldest mu
@@ -55,7 +49,7 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                if (_verboseMessages == null || _verboseMessages.Count == 0)
+                if (_verboseMessages.Count == 0)
                 {
                     return new List<LogObject>();
                 }
@@ -129,6 +123,7 @@ namespace OnlineMongoMigrationProcessor
                     var logObj = new LogObject(LogType, message);
 
                     // Add new log
+                    _logBucket.Logs ??= new List<LogObject>();
                     _logBucket.Logs.Add(logObj);
 
                     // If more than 300 logs, remove the 21st mu (index 20), keep it small

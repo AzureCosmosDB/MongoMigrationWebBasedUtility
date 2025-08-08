@@ -10,7 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using OnlineMongoMigrationProcessor.Models;
 
-#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+// CS4014: Use explicit discards for intentional fire-and-forget tasks.
 
 namespace OnlineMongoMigrationProcessor
 {
@@ -157,7 +157,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     _log.WriteLine($"{dbName}.{colName} added to upload queue");
                     MigrationUnitsPendingUpload.AddOrUpdate($"{mu.DatabaseName}.{mu.CollectionName}", mu);
-                    Task.Run(() => Upload(mu, targetConnectionString), _cts.Token);
+                    _ = Task.Run(() => Upload(mu, targetConnectionString), _cts.Token);
 
                     _log.WriteLine($"Disk space is running low, with only {freeSpaceGB}GB available. Pending jobList are using {pendingUploadsGB}GB of space. Free up disk space by deleting unwanted jobList. Alternatively, you can scale up tp Premium App Service plan, which will reset the WebApp. New downloads will resume in 5 minutes...", LogType.Error);
 
@@ -443,7 +443,7 @@ namespace OnlineMongoMigrationProcessor
                 _log.WriteLine($"{dbName}.{colName} added to upload queue");
 
                 MigrationUnitsPendingUpload.AddOrUpdate($"{mu.DatabaseName}.{mu.CollectionName}", mu);
-                Task.Run(() => Upload(mu, ctx.TargetConnectionString), _cts.Token);
+                _ = Task.Run(() => Upload(mu, ctx.TargetConnectionString), _cts.Token);
             }
         }
         

@@ -4,17 +4,12 @@ using MongoDB.Driver;
 using MongoDB.Driver.GeoJsonObjectModel.Serializers;
 using OnlineMongoMigrationProcessor.Helpers;
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Reflection.Metadata;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
 
-#pragma warning disable CS8602 // Dereference of a possibly null reference.
-#pragma warning disable CS8625
-#pragma warning disable CS8600
+// Nullability handled explicitly; removed pragmas.
 
 namespace OnlineMongoMigrationProcessor
 {
@@ -111,7 +106,7 @@ namespace OnlineMongoMigrationProcessor
             string version = string.Empty;
             string collectionName = string.Empty;
             string databaseName = string.Empty;
-            MongoClient client = null;
+            MongoClient? client = null;
             try
             {
                 //// Connect to the MongoDB server
@@ -150,7 +145,7 @@ namespace OnlineMongoMigrationProcessor
                     {
                         FullDocument = ChangeStreamFullDocumentOption.UpdateLookup
                     };
-                    var cursor = await collection.WatchAsync(options);
+                    using var cursor = await collection.WatchAsync(options);
 
                     return (IsCSEnabled: true, Version: "");
                 }
@@ -200,7 +195,7 @@ namespace OnlineMongoMigrationProcessor
             }
             finally
             {
-                if (createCollection)
+                if (createCollection && client != null)
                 {
                     await client.DropDatabaseAsync(databaseName); //drop the dummy database created to test CS
                 }
@@ -222,7 +217,8 @@ namespace OnlineMongoMigrationProcessor
                     var database = client.GetDatabase(unit.DatabaseName);
                     var collection = database.GetCollection<BsonDocument>(unit.CollectionName);
 
-                    ChangeStreamOptions options = null;
+                    // Initialize with safe defaults; will be overridden below
+                    var options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup };
   
 
                     if (resetCS)
@@ -263,7 +259,7 @@ namespace OnlineMongoMigrationProcessor
                     //new way to get resume token
                     //On MongoDB 4.0+, the WatchChangeStreamAsync method opens a change stream and waits for changes.
                     //On MongoDB 3.6, TailOplogAsync opens a tailable cursor on the oplog, filtering on namespace and timestamp to detect new operations.
-                    if(job.SourceServerVersion.StartsWith("3") )
+                    if(!string.IsNullOrEmpty(job.SourceServerVersion) && job.SourceServerVersion.StartsWith("3") )
                         TailOplogAsync(client, unit.DatabaseName, unit.CollectionName, unit, CancellationToken.None).Wait();
                     else                       
                         WatchChangeStreamUntilChangeAsync(log, client, jobList, job, unit, collection, options, resetCS).Wait();
@@ -352,7 +348,7 @@ namespace OnlineMongoMigrationProcessor
 
         /// Manually tails the oplog.rs capped collection for MongoDB 3.6 support.
         /// </summary>
-        private static async Task TailOplogAsync(MongoClient client, string dbName, string collectionName,MigrationUnit unit, CancellationToken cancellationToken)
+    private static async Task TailOplogAsync(MongoClient client, string dbName, string collectionName,MigrationUnit unit, CancellationToken cancellationToken)
         {
             var localDb = client.GetDatabase("local");
             var oplog = localDb.GetCollection<BsonDocument>("oplog.rs");
@@ -360,17 +356,10 @@ namespace OnlineMongoMigrationProcessor
             // The namespace string for filtering is "db.collection"
             string ns = $"{dbName}.{collectionName}";
 
-            // Construct filter: ts > last timestamp or null to start from now
-            BsonTimestamp tsFilter = null;
-            if (unit.ChangeStreamStartedOn.HasValue)
-            {
-                tsFilter = ConvertToBsonTimestamp((DateTime)unit.ChangeStreamStartedOn);
-            }
-            else
-            {
-                // Use current time minus 1 second to start tailing new ops only
-                tsFilter = ConvertToBsonTimestamp(DateTime.UtcNow.AddSeconds(-1));
-            }
+            // Construct filter: ts > last timestamp or start from now
+            var tsFilter = unit.ChangeStreamStartedOn.HasValue
+                ? ConvertToBsonTimestamp(unit.ChangeStreamStartedOn.Value)
+                : ConvertToBsonTimestamp(DateTime.UtcNow.AddSeconds(-1));
 
             var filterBuilder = Builders<BsonDocument>.Filter;
             var filter = filterBuilder.Gt("ts", tsFilter) & filterBuilder.Eq("ns", ns);
