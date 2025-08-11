@@ -38,8 +38,6 @@ namespace OnlineMongoMigrationProcessor.Processors
             _cts = new CancellationTokenSource();            
         }
 
-
-
         public void StopProcessing(bool updateStatus = true)
         {
 
