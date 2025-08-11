@@ -30,205 +30,213 @@ namespace OnlineMongoMigrationProcessor
 		/// <param name="idField">The field used as the partition key.</param>
 		/// <param name="partitionCount">The number of desired partitions.</param>
 		/// <returns>A list of partition boundaries.</returns>
-		public static ChunkBoundaries CreatePartitions(Log log,bool optimizeForMongoDump,IMongoCollection<BsonDocument> collection, string idField, int chunkCount, DataType dataType, long minDocsPerChunk, out long docCountByType)
+		public static ChunkBoundaries CreatePartitions(Log log,bool optimizeForMongoDump,IMongoCollection<BsonDocument> collection, string idField, int chunkCount, DataType dataType, long minDocsPerChunk, CancellationToken cts,out long docCountByType)
         {
             int segmentCount = 1;
             int minDocsPerSegment = 10000;
-            long docsInChunk=0;
-            
+            long docsInChunk=0;           
             int sampleCount=0;
            
 
             log.AddVerboseMessage($"Counting documents before sampling data for {dataType}");
-            
 
             try
             {
-                docCountByType = GetDocumentCountByDataType(collection, idField, dataType);
-            }
-            catch (Exception ex)
-            {
-                log.WriteLine($"Exception occurred while counting documents: {ex.ToString()}", LogType.Error);
-                log.WriteLine($"Using Estimated document count");
-                
-                docCountByType = GetDocumentCountByDataType(collection, idField, dataType, true);
-            }
 
+                cts.ThrowIfCancellationRequested();
 
-            if (docCountByType == 0)
-            {
-                log.WriteLine($"No documents where {idField} is {dataType}");
-                
-                return null;
-            }
-            else if (docCountByType < minDocsPerChunk)
-            {
-                log.WriteLine($"Document count where {idField} is {dataType}:{docCountByType} is less than min chunk size.");
-                
-                sampleCount = 1;
-                chunkCount = 1;
-            }
-            else
-            {
-                log.WriteLine($"Document count where {idField} is {dataType}:{docCountByType} : {docCountByType}");
-                
-            }
-
-            if (chunkCount > MaxSamples)
-                throw new ArgumentException("Chunk count too large. Retry with larger Chunk Size.");
-
-
-            // Ensure minimum documents per chunk
-            chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
-            docsInChunk = docCountByType / chunkCount;
-
-            // Calculate segments based on documents per chunk
-            segmentCount = Math.Min(
-                Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
-                MaxSegments
-            );
-
-            // Calculate the total sample count
-            sampleCount = Math.Min(chunkCount * segmentCount, MaxSamples);
-
-            // Adjust segments per chunk based on the new sample count
-            segmentCount = Math.Max(1, sampleCount / chunkCount);
-
-            // Optimize for non-dump scenarios
-            if (!optimizeForMongoDump)
-            {
-                while (chunkCount > segmentCount && segmentCount < 20)
-                {
-                    chunkCount--;
-                    segmentCount ++;
-                }
-
-                chunkCount = sampleCount / segmentCount;
-            }
-
-            
-
-
-
-
-            if (chunkCount < 1)
-                throw new ArgumentException("Chunk count must be greater than 0.");
-
-
-            // Step 1: Build the filter pipeline based on the data type
-
-            BsonDocument matchCondition = BuildDataTypeCondition(dataType, idField);
-
-            // Step 2: Sample the data
-
-            log.WriteLine($"Sampling data where {idField} is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
-            
-
-            var pipeline = new[]
-            {
-                new BsonDocument("$match", matchCondition),  // Add the match condition for the data type
-                new BsonDocument("$sample", new BsonDocument("size", sampleCount)),
-                new BsonDocument("$project", new BsonDocument(idField, 1)) // Keep only the _id key
-            };
-
-            List<BsonValue> partitionValues = new List<BsonValue>();
-            for (int i = 0; i < 10; i++)
-            {
                 try
                 {
-                    AggregateOptions options = new AggregateOptions
-                    {
-                        MaxTime = TimeSpan.FromSeconds(3600*10)
-                    };
-                    var sampledData = collection.Aggregate<BsonDocument>(pipeline, options).ToList();
-                    partitionValues = sampledData
-                        .Select(doc => doc.GetValue(idField, BsonNull.Value))
-                        .Where(value => value != BsonNull.Value)
-                        .Distinct()
-                        .OrderBy(value => value)
-                        .ToList();
-
-                    break;
+                    docCountByType = GetDocumentCountByDataType(collection, idField, dataType);
                 }
                 catch (Exception ex)
                 {
-                    log.WriteLine($"Attempt {i} encountered error sampling data for {dataType}: {ex.ToString()}");
-                    
-                }
-            }
+                    log.WriteLine($"Exception occurred while counting documents: {ex.ToString()}", LogType.Error);
+                    log.WriteLine($"Using Estimated document count");
 
-            if(partitionValues==null || partitionValues.Count == 0)
+                    docCountByType = GetDocumentCountByDataType(collection, idField, dataType, true);
+                }
+
+
+                if (docCountByType == 0)
+                {
+                    log.WriteLine($"No documents where {idField} is {dataType}");
+
+                    return null;
+                }
+                else if (docCountByType < minDocsPerChunk)
+                {
+                    log.WriteLine($"Document count where {idField} is {dataType}:{docCountByType} is less than min chunk size.");
+
+                    sampleCount = 1;
+                    chunkCount = 1;
+                }
+                else
+                {
+                    log.WriteLine($"Document count where {idField} is {dataType}:{docCountByType} : {docCountByType}");
+
+                }
+
+                if (chunkCount > MaxSamples)
+                    throw new ArgumentException("Chunk count too large. Retry with larger Chunk Size.");
+
+
+                // Ensure minimum documents per chunk
+                chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
+                docsInChunk = docCountByType / chunkCount;
+
+                // Calculate segments based on documents per chunk
+                segmentCount = Math.Min(
+                    Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
+                    MaxSegments
+                );
+
+                // Calculate the total sample count
+                sampleCount = Math.Min(chunkCount * segmentCount, MaxSamples);
+
+                // Adjust segments per chunk based on the new sample count
+                segmentCount = Math.Max(1, sampleCount / chunkCount);
+
+                // Optimize for non-dump scenarios
+                if (!optimizeForMongoDump)
+                {
+                    while (chunkCount > segmentCount && segmentCount < 20)
+                    {
+                        chunkCount--;
+                        segmentCount++;
+                    }
+
+                    chunkCount = sampleCount / segmentCount;
+                }
+
+
+                if (chunkCount < 1)
+                    throw new ArgumentException("Chunk count must be greater than 0.");
+
+
+                // Step 1: Build the filter pipeline based on the data type
+
+                BsonDocument matchCondition = BuildDataTypeCondition(dataType, idField);
+
+                // Step 2: Sample the data
+
+                log.WriteLine($"Sampling data where {idField} is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
+
+
+                var pipeline = new[]
+                {
+                    new BsonDocument("$match", matchCondition),  // Add the match condition for the data type
+                    new BsonDocument("$sample", new BsonDocument("size", sampleCount)),
+                    new BsonDocument("$project", new BsonDocument(idField, 1)) // Keep only the _id key
+                };
+
+                List<BsonValue> partitionValues = new List<BsonValue>();
+                for (int i = 0; i < 10; i++)
+                {
+                    try
+                    {
+                        AggregateOptions options = new AggregateOptions
+                        {
+                            MaxTime = TimeSpan.FromSeconds(3600 * 10)
+                        };
+                        var sampledData = collection.Aggregate<BsonDocument>(pipeline, options).ToList();
+                        partitionValues = sampledData
+                            .Select(doc => doc.GetValue(idField, BsonNull.Value))
+                            .Where(value => value != BsonNull.Value)
+                            .Distinct()
+                            .OrderBy(value => value)
+                            .ToList();
+
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        log.WriteLine($"Attempt {i} encountered error sampling data for {dataType}: {ex.ToString()}");
+
+                    }
+                }
+
+                if (partitionValues == null || partitionValues.Count == 0)
+                {
+                    docCountByType = 0;
+                    log.WriteLine($"No data found for {dataType}");
+
+                    return null;
+                }
+                // Step 3: Calculate partition boundaries
+
+                ChunkBoundaries chunkBoundaries = new ChunkBoundaries();
+
+
+                Boundary segmentBoundary = null;
+                Boundary chunkBoundary = null;
+
+                if (dataType == DataType.Other)
+                {
+                    // If the data type is Other, we treat it as a single chunk, no lte and gte
+                    chunkBoundary = new Boundary
+                    {
+                        StartId = BsonNull.Value,
+                        EndId = BsonNull.Value,
+                        SegmentBoundaries = new List<Boundary>() // Initialize SegmentBoundaries here
+                    };
+                    chunkBoundaries.Boundaries ??= new List<Boundary>(); // Use null-coalescing assignment
+                    chunkBoundaries.Boundaries.Add(chunkBoundary);
+                }
+                else
+                {
+                    for (int i = 0; i < partitionValues.Count; i++)
+                    {
+                        var min = partitionValues[i];
+                        var max = i == partitionValues.Count - 1 ? BsonMaxKey.Value : partitionValues[i + 1];
+
+                        if (i % segmentCount == 0) // Parent boundary
+                        {
+                            chunkBoundary = new Boundary
+                            {
+                                StartId = min,
+                                EndId = max,
+                                SegmentBoundaries = new List<Boundary>() // Initialize SegmentBoundaries here
+                            };
+
+                            chunkBoundaries.Boundaries ??= new List<Boundary>(); // Use null-coalescing assignment
+                            chunkBoundaries.Boundaries.Add(chunkBoundary);
+                        }
+                        else // Child boundary
+                        {
+                            if (chunkBoundary == null)
+                            {
+                                throw new Exception("Parent boundary not found");
+                            }
+
+                            segmentBoundary = new Boundary
+                            {
+                                StartId = min,
+                                EndId = max
+                            };
+
+                            chunkBoundary.SegmentBoundaries.Add(segmentBoundary);
+                            chunkBoundary.EndId = max; // Update the EndId of the parent boundary to match the last segment.
+                        }
+                    }
+                }
+
+                log.WriteLine($"Total Chunks: {chunkBoundaries.Boundaries.Count} where {idField} is {dataType}");
+                return chunkBoundaries;
+            }
+            catch(OperationCanceledException)
             {
+                ///do nothing
                 docCountByType = 0;
-                log.WriteLine($"No data found for {dataType}");
-                
                 return null;
             }
-            // Step 3: Calculate partition boundaries
-
-            ChunkBoundaries chunkBoundaries= new ChunkBoundaries();
-
-
-            Boundary segmentBoundary = null;
-            Boundary chunkBoundary = null;
-
-            if (dataType == DataType.Other)
+            catch (Exception ex)
             {
-                // If the data type is Other, we treat it as a single chunk, no lte and gte
-                chunkBoundary = new Boundary
-                {
-                    StartId = BsonNull.Value,
-                    EndId = BsonNull.Value,
-                    SegmentBoundaries = new List<Boundary>() // Initialize SegmentBoundaries here
-                };
-                chunkBoundaries.Boundaries ??= new List<Boundary>(); // Use null-coalescing assignment
-                chunkBoundaries.Boundaries.Add(chunkBoundary);
-            }
-            else
-            {
-                for (int i = 0; i < partitionValues.Count; i++)
-                {
-                    var min = partitionValues[i];
-                    var max = i == partitionValues.Count - 1 ? BsonMaxKey.Value : partitionValues[i + 1];
-
-                    if (i % segmentCount == 0) // Parent boundary
-                    {
-                        chunkBoundary = new Boundary
-                        {
-                            StartId = min,
-                            EndId = max,
-                            SegmentBoundaries = new List<Boundary>() // Initialize SegmentBoundaries here
-                        };
-
-                        chunkBoundaries.Boundaries ??= new List<Boundary>(); // Use null-coalescing assignment
-                        chunkBoundaries.Boundaries.Add(chunkBoundary);
-                    }
-                    else // Child boundary
-                    {
-                        if (chunkBoundary == null)
-                        {
-                            throw new Exception("Parent boundary not found");
-                        }
-
-                        segmentBoundary = new Boundary
-                        {
-                            StartId = min,
-                            EndId = max
-                        };
-
-                        chunkBoundary.SegmentBoundaries.Add(segmentBoundary);
-                        chunkBoundary.EndId = max; // Update the EndId of the parent boundary to match the last segment.
-                    }
-                }
+                log.WriteLine($"Error during sampling data for {dataType}: {ex.ToString()}", LogType.Error);
+                docCountByType = 0;
+                return null;
             }
 
-
-
-            log.WriteLine($"Total Chunks: {chunkBoundaries.Boundaries.Count} where {idField} is {dataType}");
-            
-
-            return chunkBoundaries;
-            
         }
 
 

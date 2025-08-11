@@ -383,8 +383,8 @@ namespace OnlineMongoMigrationProcessor
         {
             if (!TryEnterUploadLock())
             {
-        return; // Prevent concurrent uploads
-        }
+                return; // Prevent concurrent uploads
+            }
 
             string dbName = mu.DatabaseName;
             string colName = mu.CollectionName;

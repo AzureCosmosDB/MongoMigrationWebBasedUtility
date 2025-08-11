@@ -116,6 +116,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             if (string.IsNullOrWhiteSpace(_job.SourceConnectionString))
                 return TaskResult.FailedAfterRetries;
+
             _sourceClient = MongoClientFactory.Create(_log, _job.SourceConnectionString!, false, _config.CACertContentsForSourceServer ?? string.Empty);
             _log.WriteLine("Source Client Created");
             if (_job.IsSimulatedRun)
@@ -220,7 +221,18 @@ namespace OnlineMongoMigrationProcessor.Workers
                 if (await MongoHelper.CheckCollectionExists(_sourceClient!, unit.DatabaseName, unit.CollectionName))
                 {
                     unit.SourceStatus = CollectionStatus.OK;
-                   
+
+                    var db = _sourceClient!.GetDatabase(unit.DatabaseName);
+                    var coll = db.GetCollection<BsonDocument>(unit.CollectionName);                    
+
+                    unit.EstimatedDocCount = coll.EstimatedDocumentCount();
+
+                    _ = Task.Run(() =>
+                    {
+                        long count = MongoHelper.GetActualDocumentCount(coll, unit);
+                        unit.ActualDocCount = count;
+                        _jobList?.Save();
+                    }, _cts);
 
                     DateTime currrentTime= DateTime.UtcNow;
 
@@ -241,7 +253,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                         }
                         else
                         { 
-                            chunks = await PartitionCollection(unit.DatabaseName, unit.CollectionName);
+                            chunks = await PartitionCollection(unit.DatabaseName, unit.CollectionName, _cts);
                         
                             if (chunks.Count == 0)
                             {
@@ -295,12 +307,19 @@ namespace OnlineMongoMigrationProcessor.Workers
                         unit.ChangeStreamStartedOn = currrentTime;
 
                     }
+                    return TaskResult.Success;
 
                 }
                 else
                 {
-                    unit.SourceStatus = CollectionStatus.NotFound;
-                    _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} does not exist on source or has zero records", LogType.Error);
+                    if (!_cts.IsCancellationRequested)
+                    {
+                        unit.SourceStatus = CollectionStatus.NotFound;
+                        _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} does not exist on source or has zero records", LogType.Error);
+                        return TaskResult.Success;
+                    }
+                    else
+                        return TaskResult.Canceled;
                 }
             }
 
@@ -546,77 +565,90 @@ namespace OnlineMongoMigrationProcessor.Workers
             
         }
 
-        private async Task<List<MigrationChunk>> PartitionCollection(string databaseName, string collectionName, string idField = "_id")
+        private async Task<List<MigrationChunk>> PartitionCollection(string databaseName, string collectionName, CancellationToken cts, string idField = "_id")
         {
-
-            if (_sourceClient == null || _config == null || _job == null)
-                throw new InvalidOperationException("Worker not initialized");
-
-            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName);
-
-            long documentCount = stats.DocumentCount;
-            long totalCollectionSizeBytes = stats.CollectionSizeBytes;
-
-            var database = _sourceClient!.GetDatabase(databaseName);
-            var collection = database.GetCollection<BsonDocument>(collectionName);
-
-            int totalChunks = 0;
-            long minDocsInChunk = 0;
-
-            long targetChunkSizeBytes = _config.ChunkSizeInMb * 1024 * 1024;
-            var totalChunksBySize = (int)Math.Ceiling((double)totalCollectionSizeBytes / targetChunkSizeBytes);
-
-
-            if (_job.JobType == JobType.DumpAndRestore)
+            try
             {
-                totalChunks = totalChunksBySize;
-                minDocsInChunk = documentCount / totalChunks;
-                _log.WriteLine($"{databaseName}.{collectionName} Storage Size: {totalCollectionSizeBytes}");
-            }
-            else
-            {
-                _log.WriteLine($"{databaseName}.{collectionName} Estimated Document Count: {documentCount}");
-                totalChunks = (int)Math.Min(SamplePartitioner.MaxSamples / SamplePartitioner.MaxSegments, documentCount / SamplePartitioner.MaxSamples);
-                totalChunks = Math.Max(1, totalChunks); // At least one chunk
-                totalChunks = Math.Max(totalChunks, totalChunksBySize);
-                minDocsInChunk = documentCount / totalChunks;
-            }
+                cts.ThrowIfCancellationRequested();
 
-            List<MigrationChunk> migrationChunks = new List<MigrationChunk>();
+                if (_sourceClient == null || _config == null || _job == null)
+                    throw new InvalidOperationException("Worker not initialized");
 
-            if (totalChunks > 1 || _job.JobType != JobType.DumpAndRestore)
-            {
-                _log.WriteLine($"Chunking {databaseName}.{collectionName}");                
+                var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName);
 
-                List<DataType> dataTypes = new List<DataType> { DataType.Int, DataType.Int64, DataType.String, DataType.Object, DataType.Decimal128, DataType.Date, DataType.ObjectId };
+                long documentCount = stats.DocumentCount;
+                long totalCollectionSizeBytes = stats.CollectionSizeBytes;
 
-                if (_config.ReadBinary)
+                var database = _sourceClient!.GetDatabase(databaseName);
+                var collection = database.GetCollection<BsonDocument>(collectionName);
+
+                int totalChunks = 0;
+                long minDocsInChunk = 0;
+
+                long targetChunkSizeBytes = _config.ChunkSizeInMb * 1024 * 1024;
+                var totalChunksBySize = (int)Math.Ceiling((double)totalCollectionSizeBytes / targetChunkSizeBytes);
+
+
+                if (_job.JobType == JobType.DumpAndRestore)
                 {
-                    dataTypes.Add(DataType.Binary);
+                    totalChunks = totalChunksBySize;
+                    minDocsInChunk = documentCount / totalChunks;
+                    _log.WriteLine($"{databaseName}.{collectionName} Storage Size: {totalCollectionSizeBytes}");
+                }
+                else
+                {
+                    _log.WriteLine($"{databaseName}.{collectionName} Estimated Document Count: {documentCount}");
+                    totalChunks = (int)Math.Min(SamplePartitioner.MaxSamples / SamplePartitioner.MaxSegments, documentCount / SamplePartitioner.MaxSamples);
+                    totalChunks = Math.Max(1, totalChunks); // At least one chunk
+                    totalChunks = Math.Max(totalChunks, totalChunksBySize);
+                    minDocsInChunk = documentCount / totalChunks;
                 }
 
-                foreach (var dataType in dataTypes)
+                List<MigrationChunk> migrationChunks = new List<MigrationChunk>();
+
+                if (totalChunks > 1 || _job.JobType != JobType.DumpAndRestore)
                 {
-                    long docCountByType;
-                    ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log, _job.JobType == JobType.DumpAndRestore, collection, idField, totalChunks, dataType, minDocsInChunk, out docCountByType);
+                    _log.WriteLine($"Chunking {databaseName}.{collectionName}");
 
-                    if (docCountByType == 0 || _job.JobType == JobType.DumpAndRestore) continue;
+                    List<DataType> dataTypes = new List<DataType> { DataType.Int, DataType.Int64, DataType.String, DataType.Object, DataType.Decimal128, DataType.Date, DataType.ObjectId };
 
-                    if (chunkBoundaries == null)
+                    if (_config.ReadBinary)
                     {
-                        continue;
+                        dataTypes.Add(DataType.Binary);
                     }
-                    ProcessSegmentBoundaries(chunkBoundaries);
-                    CreateSegments(chunkBoundaries, migrationChunks, dataType);
-                }
-            }
-            else
-            {
-                var chunk = new MigrationChunk(string.Empty, string.Empty, DataType.String, false, false);
-                migrationChunks.Add(chunk);
-            }
 
-            return migrationChunks;
+                    foreach (var dataType in dataTypes)
+                    {
+                        long docCountByType;
+                        ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log, _job.JobType == JobType.DumpAndRestore, collection, idField, totalChunks, dataType, minDocsInChunk, cts, out docCountByType);
+
+                        if (docCountByType == 0 || _job.JobType == JobType.DumpAndRestore) continue;
+
+                        if (chunkBoundaries == null)
+                        {
+                            continue;
+                        }
+                        ProcessSegmentBoundaries(chunkBoundaries);
+                        CreateSegments(chunkBoundaries, migrationChunks, dataType);
+                    }
+                }
+                else
+                {
+                    var chunk = new MigrationChunk(string.Empty, string.Empty, DataType.String, false, false);
+                    migrationChunks.Add(chunk);
+                }
+
+                return migrationChunks;
+            }
+            catch(OperationCanceledException)
+            {               
+                return new List<MigrationChunk>();
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error partitioning collection {databaseName}.{collectionName}: {ex.Message}", LogType.Error);
+                return new List<MigrationChunk>();
+            }
         }
 
         private void ProcessSegmentBoundaries(ChunkBoundaries chunkBoundaries)

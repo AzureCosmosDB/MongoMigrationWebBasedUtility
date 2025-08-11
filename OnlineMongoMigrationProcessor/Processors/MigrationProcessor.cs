@@ -139,6 +139,44 @@ namespace OnlineMongoMigrationProcessor.Processors
             }
         }
 
+
+        protected Task PostCopyChangeStreamProcessor(ProcessorContext ctx, MigrationUnit mu)
+        {
+            if (mu.RestoreComplete && mu.DumpComplete && !_cts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    if (_job.IsOnline && !_cts.Token.IsCancellationRequested && !_job.CSStartsAfterAllUploads)
+                    {
+                        AddCollectionToChangeStreamQueue(mu, ctx.TargetConnectionString);
+                    }
+
+                    if (!_cts.Token.IsCancellationRequested)
+                    {
+                        var migrationJob = _jobList.MigrationJobs?.Find(m => m.Id == ctx.JobId);
+                        if (migrationJob != null && !_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
+                        {
+                            _log.WriteLine($"{migrationJob.Id} completed.");
+
+                            migrationJob.IsCompleted = true;
+                            StopProcessing(true);
+                        }
+                        else if (!_postUploadCSProcessing)
+                        {
+                            // If CSStartsAfterAllUploads is true and the offline job is completed, run post-upload change stream processing
+                            RunChangeStreamProcessorForAllCollections(ctx.TargetConnectionString);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Do nothing
+                }
+            }
+            return Task.CompletedTask;
+        }
+
+
         public virtual Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         { return Task.CompletedTask; }
     }

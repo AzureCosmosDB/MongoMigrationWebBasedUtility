@@ -175,6 +175,33 @@ namespace OnlineMongoMigrationProcessor
                     collectionName = unit.CollectionName;
                 }
 
+
+                if(connectionString.Contains("mongo.cosmos.azure.com")) //for MongoDB API
+                {
+                    var database = client.GetDatabase(databaseName);
+                    var collection = database.GetCollection<BsonDocument>(collectionName);
+                    var options = new ChangeStreamOptions
+                    {
+                        FullDocument = ChangeStreamFullDocumentOption.UpdateLookup
+                    };
+                    var pipeline = new BsonDocument[]
+                    {
+                        new BsonDocument("$match", new BsonDocument("operationType",
+                            new BsonDocument("$in", new BsonArray { "insert", "update", "replace", "delete" }))),
+                        new BsonDocument("$project", new BsonDocument
+                        {
+                            { "operationType", 1 },  // ✅ include this
+                            { "_id", 1 },
+                            { "fullDocument", 1 },
+                            { "ns", 1 },
+                            { "documentKey", 1 }
+                        })
+                    };
+
+                    using var cursor = collection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options);
+                    return (IsCSEnabled: true, Version: "");
+                }
+
                 if (connectionString.Contains("mongocluster.cosmos.azure.com")) //for vcore
                 {
                     var database = client.GetDatabase(databaseName);
@@ -222,6 +249,13 @@ namespace OnlineMongoMigrationProcessor
             {
 				log.WriteLine("Change streams are not enabled on vCore.", LogType.Error);
                 
+                return (IsCSEnabled: false, Version: "");
+
+            }
+            catch (MongoCommandException ex) when (ex.Message.Contains("Match stage must include constraints on"))
+            {
+                log.WriteLine("Online migration capability is not enabled on source RU account. Please contact cdbmigrationsupport@microsoft.com", LogType.Error);
+
                 return (IsCSEnabled: false, Version: "");
 
             }
@@ -326,13 +360,36 @@ namespace OnlineMongoMigrationProcessor
             return Task.CompletedTask;
         }
 
-        private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job ,MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS)
+        private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS)
         {
+            var pipeline = new BsonDocument[]
+                {
+                    new BsonDocument("$match", new BsonDocument("operationType",
+                        new BsonDocument("$in", new BsonArray { "insert", "update", "replace","delete" }))
+                    ),
+                    new BsonDocument("$project", new BsonDocument
+                    {
+                        { "_id", 1 },
+                        { "fullDocument", 1 },
+                        { "ns", 1 },
+                        { "documentKey", 1 }
+                    })
+                };
+
             var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
-            using (var cursor = await collection.WatchAsync(options, cts.Token))
+            using var cursor = await collection.WatchAsync<ChangeStreamDocument<BsonDocument>>(pipeline, options, cts.Token);
             {
                 try
                 {
+
+                    if (await cursor.MoveNextAsync(cts.Token))
+                    {
+                        if (!resetCS && string.IsNullOrEmpty(unit.OriginalResumeToken))
+                            unit.ResumeToken = cursor.GetResumeToken().ToJson();
+                        return;
+                    }
+                    
+
                     // Iterate until cancellation or first change detected
                     while (!cts.Token.IsCancellationRequested)
                     {
@@ -344,17 +401,14 @@ namespace OnlineMongoMigrationProcessor
 
                         foreach (var change in cursor.Current)
                         {
-                            
-
                             //if  bulk load is complete, no point in continuing to watch
-                            if ((unit.RestoreComplete || job.IsSimulatedRun) && unit.DumpComplete && !unit.ResetChangeStream )
+                            if ((unit.RestoreComplete || job.IsSimulatedRun) && unit.DumpComplete && !unit.ResetChangeStream)
                                 return;
-
 
                             // Persist values
                             unit.ResumeToken = change.ResumeToken.ToJson();
 
-                            if(!resetCS && string.IsNullOrEmpty(unit.OriginalResumeToken))
+                            if (!resetCS && string.IsNullOrEmpty(unit.OriginalResumeToken))
                                 unit.OriginalResumeToken = change.ResumeToken.ToJson();
 
                             if (change.ClusterTime != null)
@@ -371,7 +425,7 @@ namespace OnlineMongoMigrationProcessor
                             string json = change.DocumentKey["_id"].ToJson(); // save as string
                             // Deserialize the BsonValue to ensure it is stored correctly
                             unit.ResumeDocumentId = BsonSerializer.Deserialize<BsonValue>(json); ;
-                            
+
                             // Exit immediately after first change detected
                             return; ;
                         }
@@ -379,7 +433,7 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (OperationCanceledException)
                 {
-                   Console.WriteLine($"Change stream watching was cancelled for {unit.DatabaseName}.{unit.CollectionName}.");
+                    Console.WriteLine($"Change stream watching was cancelled for {unit.DatabaseName}.{unit.CollectionName}.");
                     // Cancellation requested - exit quietly
                 }
             }

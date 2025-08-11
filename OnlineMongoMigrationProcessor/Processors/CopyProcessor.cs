@@ -107,42 +107,7 @@ namespace OnlineMongoMigrationProcessor
 
         }
 
-        private Task PostCopyChangeStreamProcessor(ProcessorContext ctx, MigrationUnit mu)
-        {
-            if (mu.RestoreComplete && mu.DumpComplete && !_cts.Token.IsCancellationRequested)
-            {
-                try
-                {
-                    if (_job.IsOnline && !_cts.Token.IsCancellationRequested && !_job.CSStartsAfterAllUploads)
-                    {
-                        AddCollectionToChangeStreamQueue(mu, ctx.TargetConnectionString);
-                    }
 
-                    if (!_cts.Token.IsCancellationRequested)
-                    {
-                        var migrationJob = _jobList.MigrationJobs?.Find(m => m.Id == ctx.JobId);
-                        if (migrationJob != null && !_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
-                        {
-                            _log.WriteLine($"{migrationJob.Id} completed.");
-
-                            migrationJob.IsCompleted = true;
-                            StopProcessing(true);
-                        }
-                        else if (!_postUploadCSProcessing)
-                        {
-                            // If CSStartsAfterAllUploads is true and the offline job is completed, run post-upload change stream processing
-                            _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
-                            RunChangeStreamProcessorForAllCollections(ctx.TargetConnectionString);
-                        }
-                    }
-                }
-                catch
-                {
-    // Do nothing
-}
-            }
-            return Task.CompletedTask;
-        }
 
         public override async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
@@ -159,15 +124,6 @@ namespace OnlineMongoMigrationProcessor
 
             if (!mu.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
-                mu.EstimatedDocCount = ctx.Collection.EstimatedDocumentCount();
-
-                _ = Task.Run(() =>
-                {
-                    long count = MongoHelper.GetActualDocumentCount(ctx.Collection, mu);
-                    mu.ActualDocCount = count;
-                    _jobList?.Save();
-                }, _cts.Token);
-
                 for (int i = 0; i < mu.MigrationChunks.Count; i++)
                 {
                     _cts.Token.ThrowIfCancellationRequested();

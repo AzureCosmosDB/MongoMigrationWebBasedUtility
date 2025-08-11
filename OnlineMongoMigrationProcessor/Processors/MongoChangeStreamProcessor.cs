@@ -458,9 +458,22 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                using var cursor = sourceCollection.Watch(options, cancellationToken);
+                var pipeline = new BsonDocument[]
+                {
+                    new BsonDocument("$match", new BsonDocument("operationType",
+                        new BsonDocument("$in", new BsonArray { "insert", "update", "replace", "delete" }))),
+                    new BsonDocument("$project", new BsonDocument
+                    {
+                        { "operationType", 1 }, 
+                        { "_id", 1 },
+                        { "fullDocument", 1 },
+                        { "ns", 1 },
+                        { "documentKey", 1 }
+                    })
+                };
+                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline,options, cancellationToken);
 
-        string lastProcessedToken = string.Empty;
+                string lastProcessedToken = string.Empty;
                 if (_job.SourceServerVersion.StartsWith("3"))
                 {
 
@@ -469,9 +482,10 @@ namespace OnlineMongoMigrationProcessor
                         cancellationToken.ThrowIfCancellationRequested();
                         if (ExecutionCancelled) return;
 
-            lastProcessedToken = string.Empty;
-            _resumeTokenCache.TryGetValue($"{sourceCollection!.CollectionNamespace}", out string? token1);
-            lastProcessedToken = token1 ?? string.Empty;
+                        lastProcessedToken = string.Empty;
+                        _resumeTokenCache.TryGetValue($"{sourceCollection!.CollectionNamespace}", out string? token1);
+                        lastProcessedToken = token1 ?? string.Empty;
+
                         if (lastProcessedToken == change.ResumeToken.ToJson())
                         {
                             mu.CSUpdatesInLastBatch = 0;
@@ -709,7 +723,11 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 // Output change details to the console
-                _log.AddVerboseMessage($"{_syncBackPrefix}{change.OperationType} operation detected in {collNameSpace} for _id: {change.DocumentKey["_id"]} with TS (UTC): {timeStamp}. Sequence in batch #{counter}");
+                if(timeStamp == DateTime.MinValue)
+                    _log.AddVerboseMessage($"{_syncBackPrefix}{change.OperationType} operation detected in {collNameSpace} for _id: {change.DocumentKey["_id"]}. Sequence in batch #{counter}");
+                else
+                    _log.AddVerboseMessage($"{_syncBackPrefix}{change.OperationType} operation detected in {collNameSpace} for _id: {change.DocumentKey["_id"]} with TS (UTC): {timeStamp}. Sequence in batch #{counter}");
+
                 ProcessChange(change, targetCollection, collNameSpace, changeStreamDocuments, _job.IsSimulatedRun, mu);
 
                 if (!_syncBack)

@@ -112,12 +112,21 @@
             }
             @if (MigrationJob != null && MigrationJob.IsOnline && !MigrationJob.ProcessingSyncBack)
             {
-                <th>Time Since Last Change</th>
-                <th>Last Batch – Total Changes</th>
+                @if (MigrationJob.JobType != OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
+                {
+                    <th>Time Since Last Change</th>
+                    <th>Last Batch – Total Changes</th>
+                }
+                else
+                {
+                    <th>Change Stream Last Batch – Total Changes</th>
+                }
+
             }
             @if (MigrationJob != null && MigrationJob.IsOnline && MigrationJob.ProcessingSyncBack)
             {
-                <th>Time Since Last Sync Back</th>
+
+                 <th>Time Since Last Sync Back</th>
                 <th>Last Batch – Total Changes</th>
             }
         </tr>
@@ -147,9 +156,12 @@
                     }
                     @if (MigrationJob != null && MigrationJob.IsOnline)
                     {
-                        <td>
-                            @GetChangeStreamLag(unit, MigrationJob.ProcessingSyncBack)
-                        </td>
+                        @if (MigrationJob.JobType != OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy || MigrationJob.ProcessingSyncBack)
+                        {
+                            <td>                           
+                               @GetChangeStreamLag(unit, MigrationJob.ProcessingSyncBack)                            
+                            </td>
+                        }
                         <td>
                             @unit.CSUpdatesInLastBatch
                         </td>
@@ -168,9 +180,12 @@
             @(((MigrationJob?.MigrationUnits ?? new List<MigrationUnit>()).Any(MigrationUnit => MigrationUnit.ResetChangeStream)) ? "✓ Reset Change Stream" : "☐ Reset Change Stream")
         </button>
 
-    <button class="btn btn-warning mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison">
-            @((MigrationJob?.RunComparison ?? false) ? "✓ Run Hash Check" : "☐ Run Hash Check")
-        </button>
+        @if (MigrationJob?.JobType != OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
+        {
+            <button class="btn btn-warning mx-2" title="Compare randomly selected documents from collections in the source and target accounts to identify any discrepancies or missing entries. Be sure to pause the job before doing so." @onclick="RunComparison">
+                @((MigrationJob?.RunComparison ?? false) ? "✓ Run Hash Check" : "☐ Run Hash Check")
+            </button>
+        }
     }
     
 </div>
