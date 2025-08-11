@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 #pragma warning disable CS8600
-namespace OnlineMongoMigrationProcessor
+namespace OnlineMongoMigrationProcessor.Workers
 {
     internal class ProcessExecutor
     {
@@ -145,7 +145,7 @@ namespace OnlineMongoMigrationProcessor
 
             if (!string.IsNullOrEmpty(docsProcessed) && int.TryParse(docsProcessed, out count) && count > 0)
             {
-                percent = Math.Round(((double)count / targetCount) * 100, 3);
+                percent = Math.Round((double)count / targetCount * 100, 3);
             }
 
             if (percent > 0 && targetCount>0)
@@ -153,13 +153,13 @@ namespace OnlineMongoMigrationProcessor
                 _log.AddVerboseMessage($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {percent}%");
                 if (processType == "MongoRestore")
                 {
-                    mu.RestorePercent = Math.Min(100,basePercent + (percent * contribFactor));
+                    mu.RestorePercent = Math.Min(100,basePercent + percent * contribFactor);
                     if (mu.RestorePercent == 100)
                         mu.RestoreComplete = true;
                 }
                 else
                 {
-                    mu.DumpPercent = Math.Min(100, basePercent + (percent * contribFactor));
+                    mu.DumpPercent = Math.Min(100, basePercent + percent * contribFactor);
                     if (mu.DumpPercent == 100)
                         mu.DumpComplete = true;
                 }

@@ -1,10 +1,14 @@
 ﻿using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
+using MongoDB.Driver.Core.Clusters;
 using MongoDB.Driver.GeoJsonObjectModel.Serializers;
 using OnlineMongoMigrationProcessor.Helpers;
+using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections.Generic;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -15,9 +19,44 @@ namespace OnlineMongoMigrationProcessor
 {
     internal static class MongoHelper
     {
+        // Define the new delegate type
+        public delegate void CounterDelegate<TMigration>(
+             TMigration migration,
+             CounterType type,
+             ChangeStreamOperationType? operationType = null,
+             int count = 1);
+
+
         public static long GetActualDocumentCount(IMongoCollection<BsonDocument> collection, MigrationUnit mu)
         {
             return collection.CountDocuments(Builders<BsonDocument>.Filter.Empty);
+        }
+
+        public static long ExtractLSNFromResumeToken(BsonDocument bsonDoc)
+        {
+            // Step 1: Get the Base64 string from the BSON binary field
+            string base64Str = Convert.ToBase64String(bsonDoc["_data"].AsBsonBinaryData.Bytes);
+
+            // Step 2: Base64 decode into ASCII JSON string
+            byte[] bytes = Convert.FromBase64String(base64Str);
+            string asciiJson = Encoding.ASCII.GetString(bytes);
+
+            // Step 3: Parse the decoded JSON
+            using JsonDocument jsonDoc = JsonDocument.Parse(asciiJson);
+
+            // Step 4: Extract the number string from Continuation[0].State.value
+            string? rawValue = jsonDoc.RootElement
+                .GetProperty("Continuation")[0]
+                .GetProperty("State")
+                .GetProperty("value")
+                .GetString();
+
+            // Step 5: Trim extra quotes and parse to int
+            if (rawValue == null)
+                throw new InvalidOperationException("Resume token value is missing or null.");
+
+            rawValue = rawValue.Trim('"');
+            return long.Parse(rawValue);
         }
 
         public static FilterDefinition<BsonDocument> GenerateQueryFilter(BsonValue? gte, BsonValue? lte, DataType dataType)
@@ -622,6 +661,267 @@ namespace OnlineMongoMigrationProcessor
             // BsonTimestamp requires seconds and increment (logical clock)
             // Here we're using a default increment of 0. You can adjust this if needed.
             return new BsonTimestamp((int)secondsSinceEpoch, 0);
+        }
+
+        public static async Task ProcessInsertsAsync<TMigration>(TMigration mu,
+           IMongoCollection<BsonDocument> collection,
+           List<ChangeStreamDocument<BsonDocument>> events,
+           CounterDelegate<TMigration> incrementCounter,
+           Log log,
+           string logPrefix = "Sync Back: ",
+           int batchSize = 50)
+        {
+            // Insert operations
+            foreach (var batch in events.Chunk(batchSize))
+            {
+                // Deduplicate inserts by _id to avoid duplicate key errors within the same batch
+                var deduplicatedInserts = batch
+                    .Where(e => e.FullDocument != null && e.FullDocument.Contains("_id"))
+                    .GroupBy(e => e.FullDocument["_id"].ToString())
+                    .Select(g => g.First()) // Take the first occurrence of each document
+                    .ToList();
+
+                var insertModels = deduplicatedInserts
+                    .Select(e =>
+                    {
+                        var doc = e.FullDocument;
+                        var id = doc["_id"];
+
+                        if (id.IsObjectId)
+                            doc["_id"] = id.AsObjectId;
+
+                        return new InsertOneModel<BsonDocument>(doc);
+                    })
+                    .ToList();
+
+                long insertCount = 0;
+                try
+                {
+                    if (insertModels.Any())
+                    {
+                        var result = await collection.BulkWriteAsync(insertModels, new BulkWriteOptions { IsOrdered = false });
+                        insertCount += result.InsertedCount;
+                    }
+                }
+                catch (MongoBulkWriteException<BsonDocument> ex)
+                {
+                    insertCount += ex.Result?.InsertedCount ?? 0;
+
+                    var duplicateKeyErrors = ex.WriteErrors
+                        .Where(err => err.Code == 11000)
+                        .ToList();
+
+                    incrementCounter(mu, CounterType.Skipped, ChangeStreamOperationType.Insert, (int)duplicateKeyErrors.Count);
+
+                    // Log non-duplicate key errors for inserts
+                    var otherErrors = ex.WriteErrors
+                        .Where(err => err.Code != 11000)
+                        .ToList();
+
+                    if (otherErrors.Any())
+                    {
+                        log.WriteLine($"{logPrefix} Insert BulkWriteException (non-duplicate errors) in {collection.CollectionNamespace.FullName}: {string.Join(", ", otherErrors.Select(e => e.Message))}");
+                    }
+                    else if (duplicateKeyErrors.Count > 0)
+                    {
+                        log.AddVerboseMessage($"{logPrefix} Skipped {duplicateKeyErrors.Count} duplicate key inserts in {collection.CollectionNamespace.FullName}");
+                    }
+                }
+                finally
+                {
+                    incrementCounter(mu, CounterType.Processed, ChangeStreamOperationType.Insert, (int)insertCount);
+
+                }
+            }
+        }
+
+        public static async Task ProcessUpdatesAsync<TMigration>(TMigration mu,
+            IMongoCollection<BsonDocument> collection,
+            List<ChangeStreamDocument<BsonDocument>> events,
+            CounterDelegate<TMigration> incrementCounter,
+            Log log,
+            string logPrefix = "Sync Back: ",
+            int batchSize = 50)
+        {
+            // Update operations
+            foreach (var batch in events.Chunk(batchSize))
+            {
+                // Group by _id to handle multiple updates to the same document in the batch
+                var groupedUpdates = batch
+                    .Where(e => e.FullDocument != null && e.FullDocument.Contains("_id"))
+                    .GroupBy(e => e.FullDocument["_id"].ToString())
+                    .Select(g => g.OrderByDescending(e => e.ClusterTime ?? new MongoDB.Bson.BsonTimestamp(0, 0)).First()) // Take the latest update for each document
+                    .ToList();
+
+                var updateModels = groupedUpdates
+                    .Select(e =>
+                    {
+                        var doc = e.FullDocument;
+                        var id = doc["_id"];
+
+                        if (id.IsObjectId)
+                            id = id.AsObjectId;
+
+                        var filter = Builders<BsonDocument>.Filter.Eq("_id", id);
+
+                        // Use ReplaceOneModel instead of UpdateOneModel to avoid conflicts with unique indexes
+                        return new ReplaceOneModel<BsonDocument>(filter, doc) { IsUpsert = true };
+                    })
+                    .ToList();
+
+                long updateCount = 0;
+                try
+                {
+                    if (updateModels.Any())
+                    {
+
+                        var result = await collection.BulkWriteAsync(updateModels, new BulkWriteOptions { IsOrdered = false });
+
+                        updateCount += result.ModifiedCount + result.Upserts.Count;
+                    }
+                }
+                catch (MongoBulkWriteException<BsonDocument> ex)
+                {
+                    updateCount += (ex.Result?.ModifiedCount ?? 0) + (ex.Result?.Upserts?.Count ?? 0);
+
+                    var duplicateKeyErrors = ex.WriteErrors
+                        .Where(err => err.Code == 11000)
+                        .ToList();
+
+                    incrementCounter(mu, CounterType.Skipped, ChangeStreamOperationType.Update, duplicateKeyErrors.Count);
+
+                    // Log non-duplicate key errors
+                    var otherErrors = ex.WriteErrors
+                        .Where(err => err.Code != 11000)
+                        .ToList();
+
+                    if (otherErrors.Any())
+                    {
+                        log.WriteLine($"{logPrefix} Update BulkWriteException (non-duplicate errors) in {collection.CollectionNamespace.FullName}: {string.Join(", ", otherErrors.Select(e => e.Message))}");
+                    }
+
+                    // Handle duplicate key errors by attempting individual operations
+                    if (duplicateKeyErrors.Any())
+                    {
+                        log.AddVerboseMessage($"{logPrefix} Handling {duplicateKeyErrors.Count} duplicate key errors for updates in {collection.CollectionNamespace.FullName}");
+
+                        // Process failed operations individually
+                        foreach (var error in duplicateKeyErrors)
+                        {
+                            try
+                            {
+                                // Try to find the corresponding update model and retry as update without upsert
+                                var failedModel = updateModels[error.Index];
+                                if (failedModel is ReplaceOneModel<BsonDocument> replaceModel)
+                                {
+                                    // Try update without upsert first
+                                    var updateResult = await collection.ReplaceOneAsync(replaceModel.Filter, replaceModel.Replacement, new ReplaceOptions { IsUpsert = false });
+                                    if (updateResult.ModifiedCount > 0)
+                                    {
+                                        updateCount++;
+                                    }
+                                    else
+                                    {
+                                        // Document might not exist, but we can't upsert due to unique constraint
+                                        // This is expected in some scenarios - count as skipped
+
+                                        incrementCounter(mu, CounterType.Skipped, ChangeStreamOperationType.Update, 1);
+                                    }
+                                }
+                            }
+                            catch (Exception retryEx)
+                            {
+                                log.AddVerboseMessage($"{logPrefix} Individual retry failed for update in {collection.CollectionNamespace.FullName}: {retryEx.Message}");
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+
+                    incrementCounter(mu, CounterType.Processed, ChangeStreamOperationType.Update, (int)updateCount);
+                }
+            }
+
+        }
+
+        public static async Task ProcessDeletesAsync<TMigration>(TMigration mu,
+           IMongoCollection<BsonDocument> collection,
+           List<ChangeStreamDocument<BsonDocument>> events,
+           CounterDelegate<TMigration> incrementCounter,
+           Log log,
+           string logPrefix = "Sync Back: ",
+          int batchSize = 50)
+        {
+            // Delete operations
+            foreach (var batch in events.Chunk(batchSize))
+            {
+                // Deduplicate deletes by _id within the same batch
+                var deduplicatedDeletes = batch
+                    .GroupBy(e => e.DocumentKey.GetValue("_id", null)?.ToString() ?? "")
+                    .Where(g => !string.IsNullOrEmpty(g.Key))
+                    .Select(g => g.First()) // Take the first delete for each document
+                    .ToList();
+
+                var deleteModels = deduplicatedDeletes
+                    .Select(e =>
+                    {
+                        try
+                        {
+                            if (!e.DocumentKey.Contains("_id"))
+                            {
+                                log.WriteLine($"{logPrefix} Delete event missing _id in {collection.CollectionNamespace.FullName}: {e.DocumentKey.ToJson()}");
+                                return null;
+                            }
+
+                            var id = e.DocumentKey.GetValue("_id", null);
+                            if (id == null)
+                            {
+                                log.WriteLine($"{logPrefix} _id is null in DocumentKey in {collection.CollectionNamespace.FullName}: {e.DocumentKey.ToJson()}");
+                                return null;
+                            }
+
+                            if (id.IsObjectId)
+                                id = id.AsObjectId;
+
+                            return new DeleteOneModel<BsonDocument>(Builders<BsonDocument>.Filter.Eq("_id", id));
+                        }
+                        catch (Exception dex)
+                        {
+                            log.WriteLine($"{logPrefix} Error building delete model in {collection.CollectionNamespace.FullName}: {e.DocumentKey.ToJson()}, Error: {dex.Message}");
+                            return null;
+                        }
+                    })
+                    .Where(model => model != null)
+                    .ToList();
+
+                if (deleteModels.Any())
+                {
+                    try
+                    {
+                        var result = await collection.BulkWriteAsync(deleteModels, new BulkWriteOptions { IsOrdered = false });
+
+                        incrementCounter(mu, CounterType.Processed, ChangeStreamOperationType.Delete, (int)result.DeletedCount);
+                    }
+                    catch (MongoBulkWriteException<BsonDocument> ex)
+                    {
+                        // Count successful deletes even when some fail
+                        long deletedCount = ex.Result?.DeletedCount ?? 0;
+
+                        incrementCounter(mu, CounterType.Processed, ChangeStreamOperationType.Delete, (int)deletedCount);
+
+                        // Log errors that are not "document not found" (which is expected)
+                        var significantErrors = ex.WriteErrors
+                            .Where(err => !err.Message.Contains("not found") && err.Code != 11000)
+                            .ToList();
+
+                        if (significantErrors.Any())
+                        {
+                            log.WriteLine($"{logPrefix} Bulk delete error in {collection.CollectionNamespace.FullName}: {string.Join(", ", significantErrors.Select(e => e.Message))}");
+                        }
+                    }
+                }
+            }
         }
     }
 }

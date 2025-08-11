@@ -10,9 +10,9 @@ using System.Threading;
 using System.Threading.Tasks;
 
 #pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
-namespace OnlineMongoMigrationProcessor
+namespace OnlineMongoMigrationProcessor.Workers
 {
-    public class MongoDocumentCopier
+    public class DocumentCopyWorker
     {
         private Log _log;
         private MongoClient _targetClient;
@@ -22,23 +22,7 @@ namespace OnlineMongoMigrationProcessor
         private long _successCount = 0;
         private long _failureCount = 0;
         private long _skippedCount = 0;
-
-        public void Initialize(
-            Log log,
-            MongoClient targetClient,
-            IMongoCollection<BsonDocument> sourceCollection,
-            string targetDatabase,
-            string targetCollectionName,
-            int pageSize)
-        {
-            _log = log;
-			_targetClient = targetClient;
-            _sourceCollection = sourceCollection;
-            if(_targetClient!=null) 
-                _targetCollection = _targetClient.GetDatabase(targetDatabase).GetCollection<BsonDocument>(targetCollectionName);
-
-            _pageSize =pageSize;
-        }
+              
 
         private void UpdateProgress(
             string segmentId,
@@ -63,7 +47,7 @@ namespace OnlineMongoMigrationProcessor
             {
                _log.AddVerboseMessage($"Document copy for segment [{migrationChunkIndex}.{segmentId}] Progress: {successCount} documents copied, {skippedCount} documents skipped(duplicate), {failureCount} documents failed. Chunk completion percentage: {percent}");
 
-                mu.DumpPercent = basePercent + (percent * contribFactor);
+                mu.DumpPercent = basePercent + percent * contribFactor;
                 mu.RestorePercent = mu.DumpPercent;
                 mu.DumpComplete = mu.DumpPercent == 100;
                 mu.RestoreComplete = mu.DumpComplete;
@@ -80,6 +64,22 @@ namespace OnlineMongoMigrationProcessor
             migrationChunk.RestoredFailedDocCount = failureCount;
 
             jobList.Save();
+        }
+
+        public void Initialize(
+          Log log,
+          MongoClient targetClient,
+          IMongoCollection<BsonDocument> sourceCollection,
+          string targetDatabase,
+          string targetCollectionName,
+          int pageSize)
+        {
+            _log = log;
+            _targetClient = targetClient;
+            _sourceCollection = sourceCollection;
+            if (_targetClient != null)
+                _targetCollection = _targetClient.GetDatabase(targetDatabase).GetCollection<BsonDocument>(targetCollectionName);
+            _pageSize=pageSize;
         }
 
         public async Task<TaskResult> CopyDocumentsAsync(

@@ -14,7 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 
-namespace OnlineMongoMigrationProcessor
+namespace OnlineMongoMigrationProcessor.Workers
 {
 
 
@@ -25,14 +25,15 @@ namespace OnlineMongoMigrationProcessor
         private string _toolsDestinationFolder = $"{Helper.GetWorkingFolder()}mongo-tools";
         private string _toolsLaunchFolder = string.Empty;
         private bool _migrationCancelled = false;
-    private JobList _jobList;
+        private JobList _jobList;
         private MigrationJob? _job;
         private Log _log;
         private MongoClient? _sourceClient;
-    private IMigrationProcessor? _migrationProcessor;
-    public MigrationSettings? _config;
+        private MigrationProcessor? _migrationProcessor;
+        public MigrationSettings? _config;
         
-    private CancellationTokenSource? _compare_cts;
+        private CancellationTokenSource? _compare_cts;
+        private CancellationTokenSource? _cts;
 
         public MigrationWorker(JobList jobList)
         {            
@@ -95,6 +96,7 @@ namespace OnlineMongoMigrationProcessor
         {
             try
             {
+                _cts?.Cancel();
                 _compare_cts?.Cancel();
                 _jobList.Save();
                 _migrationCancelled = true;
@@ -164,7 +166,8 @@ namespace OnlineMongoMigrationProcessor
             _migrationProcessor = new CopyProcessor(_log, _jobList, _job, _sourceClient!, _config);
                     break;
                 case JobType.DumpAndRestore:
-            _migrationProcessor = new DumpRestoreProcessor(_log, _jobList, _job, _sourceClient!, _config, _toolsLaunchFolder);
+                    _migrationProcessor = new DumpRestoreProcessor(_log, _jobList, _job, _sourceClient!, _config);
+                    _migrationProcessor.MongoToolsFolder = _toolsLaunchFolder;
                     break;
                 case JobType.RUOptimizedCopy:
             _migrationProcessor = new RUCopyProcessor(_log, _jobList, _job, _sourceClient!, _config);
@@ -203,7 +206,7 @@ namespace OnlineMongoMigrationProcessor
             return Task.FromResult(TaskResult.Retry);
         }
 
-        private async Task<TaskResult> PreparePartitions()
+        private async Task<TaskResult> PreparePartitions(CancellationToken _cts)
         {
             bool checkedCS = false;
             if (_job == null || _sourceClient == null)
@@ -234,7 +237,7 @@ namespace OnlineMongoMigrationProcessor
 
                         if (_job.JobType == JobType.RUOptimizedCopy)
                         {
-                            chunks= new RUPartitioner().CreatePartitions(_log, _sourceClient! , unit.DatabaseName, unit.CollectionName);
+                            chunks= new RUPartitioner().CreatePartitions(_log, _sourceClient! , unit.DatabaseName, unit.CollectionName,_cts);
                         }
                         else
                         { 
@@ -247,6 +250,7 @@ namespace OnlineMongoMigrationProcessor
                                 continue;
                             }
                         }
+
 
                         if (!_job.IsSimulatedRun && !_job.AppendMode)
                         {
@@ -394,7 +398,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, OnlineMongoMigrationProcessor.Models.JobType jobtype, bool trackChangeStreams)
+        public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, JobType jobtype, bool trackChangeStreams)
         {
             _job = job;
             StopMigration(); //stop any existing
@@ -457,9 +461,9 @@ namespace OnlineMongoMigrationProcessor
             }
 
 
-
+            _cts = new CancellationTokenSource();
             result = await new RetryHelper().ExecuteTask(
-                () => PreparePartitions(),
+                () => PreparePartitions(_cts.Token),
                 (ex, attemptCount, currentBackoff) => Default_ExceptionHandler(
                     ex, attemptCount,
                     "Partition step", currentBackoff
@@ -535,7 +539,7 @@ namespace OnlineMongoMigrationProcessor
 
             _migrationProcessor = null;
             var dummySourceClient = MongoClientFactory.Create(_log, sourceConnectionString);
-            _migrationProcessor = new SyncBackProcessor(_log,_jobList, _job, dummySourceClient, _config!, string.Empty);
+            _migrationProcessor = new SyncBackProcessor(_log,_jobList, _job, dummySourceClient, _config!);
             _migrationProcessor.ProcessRunning = true;
             var dummyUnit = new MigrationUnit("","", new List<MigrationChunk>());
             _migrationProcessor.StartProcessAsync(dummyUnit, sourceConnectionString, targetConnectionString).GetAwaiter().GetResult();

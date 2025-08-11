@@ -17,8 +17,8 @@ namespace OnlineMongoMigrationProcessor
         public DataType DataType { get; set; }
         public List<Segment> Segments { get; set; } = new();
         public string RUPartitionResumeToken { get; set; } = string.Empty;
-        public string RUStopDocumentKey { get; set; } = string.Empty;
-        public string RUResumeStopToken { get; set; } = string.Empty;
+        public long RUStopLSN { get; set; }
+        public string RUStopToken { get; set; } = string.Empty;
         public string Id { get; set; } = string.Empty;
 
         public MigrationChunk() { } 
@@ -32,11 +32,11 @@ namespace OnlineMongoMigrationProcessor
             DataType = dataType;
         }
 
-        public MigrationChunk(string id, string partitonKey_RU, string stopResumeToken_RU)
+        public MigrationChunk(string id, string partitonKey_RU, string stopToken_RU)
         {
             Id = id;            
             RUPartitionResumeToken = partitonKey_RU;
-            RUResumeStopToken = stopResumeToken_RU;
+            RUStopToken = stopToken_RU;
             IsUploaded = false;
             IsDownloaded = false;
         }

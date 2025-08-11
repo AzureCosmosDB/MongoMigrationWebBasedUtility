@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace OnlineMongoMigrationProcessor.Models
 {
-    internal class ProcessorContext
+    public class ProcessorContext
     {
         public required MigrationUnit Item { get; set; }
         public required string SourceConnectionString { get; set; }
@@ -17,8 +17,7 @@ namespace OnlineMongoMigrationProcessor.Models
         public required string DatabaseName { get; set; }
         public required string CollectionName { get; set; }
         public required IMongoDatabase Database { get; set; }
-        public required IMongoCollection<BsonDocument> Collection { get; set; }
+        public required IMongoCollection<MongoDB.Bson.BsonDocument> Collection { get; set; }
         public long DownloadCount { get; set; }
-
     }
 }

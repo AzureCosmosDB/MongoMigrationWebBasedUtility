@@ -2,110 +2,23 @@
 using MongoDB.Driver;
 using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Models;
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Xml.Linq;
-using static System.Reflection.Metadata.BlobBuilder;
+using OnlineMongoMigrationProcessor.Processors;
+using OnlineMongoMigrationProcessor.Workers;
 
-// Nullability: fields are initialized via constructor; using careful null checks where needed.
-// Fire-and-forget tasks are assigned to discards to avoid CS4014.
 
 namespace OnlineMongoMigrationProcessor
 {
-    internal class CopyProcessor : IMigrationProcessor
+    internal class CopyProcessor: MigrationProcessor
     {
-        private JobList _jobList;
-        private MigrationJob _job;
-        private MongoClient _sourceClient;
-        private MongoClient? _targetClient;
-        private MigrationSettings _config;
-        private CancellationTokenSource _cts;
-        private MongoChangeStreamProcessor? _changeStreamProcessor;
-        private bool _postUploadCSProcessing = false;
-        private Log _log;
 
-		public bool ProcessRunning { get; set; }
-
-
-        public CopyProcessor(Log log,JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config)
+        public CopyProcessor(Log log, JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config)
+            : base(log, jobList, job, sourceClient, config)
         {
-            _log = log;
-            _jobList = jobList;
-            _job = job;
-            _sourceClient = sourceClient;
-            _config = config;
-            _cts = new CancellationTokenSource();
+            // Constructor body can be empty or contain initialization logic if needed
         }
-
-        public void StopProcessing(bool updateStatus = true)
-        {
-
-            if (_job != null)
-                _job.IsStarted = false;
-
-            _jobList?.Save();
-
-            if(updateStatus)
-                ProcessRunning = false; 
-
-            _cts?.Cancel();
-
-            if (_changeStreamProcessor != null)
-                _changeStreamProcessor.ExecutionCancelled = true;
-        }
-
-        private ProcessorContext SetProcessorContext(MigrationUnit mu, string sourceConnectionString, string targetConnectionString)
-        {
-            var databaseName = mu.DatabaseName;
-            var collectionName = mu.CollectionName;
-            var database = _sourceClient.GetDatabase(databaseName);
-            var collection = database.GetCollection<BsonDocument>(collectionName);
-
-            var context = new ProcessorContext
-            {
-                Item = mu,
-                SourceConnectionString = sourceConnectionString,
-                TargetConnectionString = targetConnectionString,
-                JobId = _job?.Id ?? string.Empty,
-                DatabaseName = databaseName,
-                CollectionName = collectionName,
-                Database = database,
-                Collection = collection,
-            };
-
-            return context;
-        }
-
-        private bool CheckChangeStreamAlreadyProcessingAsync(ProcessorContext ctx)
-        {
-            if (_postUploadCSProcessing)
-                return true; // Skip processing if post-upload CS processing is already in progress
-
-            if (_job.IsOnline && Helper.IsOfflineJobCompleted(_job) && !_postUploadCSProcessing)
-            {
-                _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
-
-                if (_targetClient == null && !_job.IsSimulatedRun)
-                    _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
-
-                if (_changeStreamProcessor == null && _targetClient != null)
-                    _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
-
-                if (_changeStreamProcessor != null)
-                {
-                    var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
-                }
-                return true;
-            }
-
-            return false;
-        }
-
 
         // Custom exception handler delegate with logic to control retry flow
-    private Task<TaskResult> CopyProcess_ExceptionHandler(Exception ex, int attemptCount, string processName, string dbName, string colName, int chunkIndex, int currentBackoff)
+        private Task<TaskResult> CopyProcess_ExceptionHandler(Exception ex, int attemptCount, string processName, string dbName, string colName, int chunkIndex, int currentBackoff)
         {
             if (ex is OperationCanceledException)
             {
@@ -167,7 +80,7 @@ namespace OnlineMongoMigrationProcessor
             if (_targetClient == null && !_job.IsSimulatedRun)
                 _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-            var documentCopier = new MongoDocumentCopier();
+            var documentCopier = new DocumentCopyWorker();
             documentCopier.Initialize(_log, _targetClient!, ctx.Collection, ctx.DatabaseName, ctx.CollectionName, _config.MongoCopyPageSize);
             var result = await documentCopier.CopyDocumentsAsync(_jobList, mu, chunkIndex, initialPercent, contributionFactor, docCount, filter, _cts.Token, _job.IsSimulatedRun);
 
@@ -191,10 +104,10 @@ namespace OnlineMongoMigrationProcessor
                 _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}-{chunkIndex} failed.", LogType.Error);
 				return TaskResult.Retry;
 			}
-            
+
         }
 
-    private Task PostCopyChangeStreamProcessor(ProcessorContext ctx, MigrationUnit mu)
+        private Task PostCopyChangeStreamProcessor(ProcessorContext ctx, MigrationUnit mu)
         {
             if (mu.RestoreComplete && mu.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
@@ -202,13 +115,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     if (_job.IsOnline && !_cts.Token.IsCancellationRequested && !_job.CSStartsAfterAllUploads)
                     {
-                        if (_targetClient == null && !_job.IsSimulatedRun)
-                            _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
-
-                        if (_changeStreamProcessor == null && _targetClient != null)
-                            _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
-
-                        _changeStreamProcessor?.AddCollectionsToProcess(mu, _cts);
+                        AddCollectionToChangeStreamQueue(mu, ctx.TargetConnectionString);
                     }
 
                     if (!_cts.Token.IsCancellationRequested)
@@ -221,33 +128,23 @@ namespace OnlineMongoMigrationProcessor
                             migrationJob.IsCompleted = true;
                             StopProcessing(true);
                         }
-                        else if (migrationJob != null && _job.IsOnline && _job.CSStartsAfterAllUploads && Helper.IsOfflineJobCompleted(migrationJob) && !_postUploadCSProcessing)
+                        else if (!_postUploadCSProcessing)
                         {
                             // If CSStartsAfterAllUploads is true and the offline job is completed, run post-upload change stream processing
                             _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
-
-                            if (_targetClient == null && !_job.IsSimulatedRun)
-                                _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
-
-                            if (_changeStreamProcessor == null && _targetClient != null)
-                                _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
-
-                            if (_changeStreamProcessor != null)
-                            {
-                                var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
-                            }
+                            RunChangeStreamProcessorForAllCollections(ctx.TargetConnectionString);
                         }
                     }
                 }
                 catch
                 {
-                    // Do nothing
-                }
+    // Do nothing
+}
             }
             return Task.CompletedTask;
         }
 
-        public async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public override async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
 
             ProcessorContext ctx;

@@ -8,7 +8,9 @@ using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
+using ZstdSharp.Unsafe;
 
 namespace OnlineMongoMigrationProcessor.Partitioner
 {
@@ -21,7 +23,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
         /// Process partitions using RU-optimized approach
         /// </summary>
         /// 
-        public List<MigrationChunk> CreatePartitions(Log log, MongoClient sourceClient, string databaseName, string collectionName)
+        public List<MigrationChunk> CreatePartitions(Log log, MongoClient sourceClient, string databaseName, string collectionName, CancellationToken _cts)
         {
             _log = log;
 
@@ -45,9 +47,11 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 foreach (var token in startTokens)
                 {
                     //for FFCF create a new resume token with the current timestamp
-                    var resumeToken = UpdateStartAtOperationTime(token, MongoHelper.ConvertToBsonTimestamp(DateTime.UtcNow)); // Set initial timestamp to 0
+                    var currentToken = UpdateStartAtOperationTime(token, MongoHelper.ConvertToBsonTimestamp(DateTime.UtcNow)); // Set initial timestamp to 0
 
-                    var chunk = new MigrationChunk(counter.ToString(), token.ToJson(), resumeToken.ToJson());
+                    var chunk = new MigrationChunk(counter.ToString(), token.ToJson(), currentToken.ToJson());
+                    chunk.RUStopLSN=GetChunksStopLSN_Async(currentToken, _sourceCollection,_cts).GetAwaiter().GetResult();
+
                     chunks.Add(chunk);
                     counter++;
                 }
@@ -96,6 +100,51 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             }
         }
 
+        private async Task<long> GetChunksStopLSN_Async(BsonDocument resumeAfterToken, IMongoCollection<BsonDocument> sourceCollection,
+            CancellationToken token)
+        {
+            try
+            {
+                var options = new ChangeStreamOptions
+                {
+                    FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
+                    ResumeAfter = resumeAfterToken
+                };
+
+                var pipeline = new BsonDocument[]
+                {
+                    new BsonDocument("$match", new BsonDocument("operationType",
+                        new BsonDocument("$in", new BsonArray { "insert", "update", "replace" }))
+                    ),
+                    new BsonDocument("$project", new BsonDocument
+                    {
+                        { "_id", 1 },
+                        { "fullDocument", 1 },
+                        { "ns", 1 },
+                        { "documentKey", 1 }
+                    })
+                };
+
+                // Create the change stream cursor
+                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options);
+
+                await Task.Run(() => cursor.MoveNext(token), token);
+
+                var resumetoken = cursor.GetResumeToken();
+                if (resumetoken == null)
+                {
+                    return 0;
+                }
+                return MongoHelper.ExtractLSNFromResumeToken(resumetoken);
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error getting stop LSN for partition: {ex}", LogType.Error);
+            }
+            return 0;
+        }
+
+       
 
         public static BsonDocument UpdateStartAtOperationTime(BsonDocument originalDoc, BsonTimestamp newTimestamp)
         {
