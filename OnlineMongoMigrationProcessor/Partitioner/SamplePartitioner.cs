@@ -61,13 +61,11 @@ namespace OnlineMongoMigrationProcessor
                 if (docCountByType == 0)
                 {
                     log.WriteLine($"No documents where {idField} is {dataType}");
-
                     return null;
                 }
                 else if (docCountByType < minDocsPerChunk)
                 {
                     log.WriteLine($"Document count where {idField} is {dataType}:{docCountByType} is less than min chunk size.");
-
                     sampleCount = 1;
                     chunkCount = 1;
                 }

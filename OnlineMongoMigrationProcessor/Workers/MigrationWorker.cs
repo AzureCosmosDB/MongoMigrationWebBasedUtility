@@ -622,13 +622,13 @@ namespace OnlineMongoMigrationProcessor.Workers
                         long docCountByType;
                         ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log, _job.JobType == JobType.DumpAndRestore, collection, idField, totalChunks, dataType, minDocsInChunk, cts, out docCountByType);
 
-                        if (docCountByType == 0 || _job.JobType == JobType.DumpAndRestore) continue;
+                        if (docCountByType == 0  || chunkBoundaries == null) continue;
 
-                        if (chunkBoundaries == null)
-                        {
-                            continue;
-                        }
-                        ProcessSegmentBoundaries(chunkBoundaries);
+                        //if (chunkBoundaries == null)
+                        //{
+                        //    CreateDummyChunk(chunkBoundaries);
+                        //}
+                        
                         CreateSegments(chunkBoundaries, migrationChunks, dataType);
                     }
                 }
@@ -651,7 +651,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
         }
 
-        private void ProcessSegmentBoundaries(ChunkBoundaries chunkBoundaries)
+        private void CreateDummyChunk(ChunkBoundaries chunkBoundaries)
         {           
             var min = BsonNull.Value;
             var max = BsonNull.Value;
@@ -688,12 +688,12 @@ namespace OnlineMongoMigrationProcessor.Workers
                     chunk.Segments.Add(new Segment { Gte = startId, Lt = endId, IsProcessed = false, Id = "1" });
                 }
 
-        if (_job!.JobType == JobType.MongoDriver && boundary.SegmentBoundaries != null && boundary.SegmentBoundaries.Count > 0)
+                if (_job!.JobType == JobType.MongoDriver && boundary.SegmentBoundaries != null && boundary.SegmentBoundaries.Count > 0)
                 {
                     for (int j = 0; j < boundary.SegmentBoundaries.Count; j++)
                     {
                         var segment = boundary.SegmentBoundaries[j];
-            var (segmentStartId, segmentEndId) = GetStartEnd(false, segment, boundary.SegmentBoundaries.Count, j, chunk.Lt ?? string.Empty, chunk.Gte ?? string.Empty);
+                        var (segmentStartId, segmentEndId) = GetStartEnd(false, segment, boundary.SegmentBoundaries.Count, j, chunk.Lt ?? string.Empty, chunk.Gte ?? string.Empty);
 
                         chunk.Segments ??= new List<Segment>();
                         chunk.Segments.Add(new Segment { Gte = segmentStartId, Lt = segmentEndId, IsProcessed = false, Id = (j + 1).ToString() });
