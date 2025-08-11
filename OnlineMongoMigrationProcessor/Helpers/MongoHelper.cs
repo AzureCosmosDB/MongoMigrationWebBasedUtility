@@ -609,6 +609,7 @@ namespace OnlineMongoMigrationProcessor
                 DataType.Decimal128 => filterBuilder.Lt(fieldName, value.AsDecimal128),
                 DataType.Date => filterBuilder.Lt(fieldName, ((BsonDateTime)value).ToUniversalTime()),
                 DataType.Object => filterBuilder.Lt(fieldName, value.AsBsonDocument),
+                DataType.BinData => filterBuilder.Lt(fieldName, value.AsBsonDocument),
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
             };
         }
@@ -628,7 +629,7 @@ namespace OnlineMongoMigrationProcessor
                 DataType.Decimal128 => filterBuilder.Gte(fieldName, value.AsDecimal128),
                 DataType.Date => filterBuilder.Gte(fieldName, ((BsonDateTime)value).ToUniversalTime()),
                 DataType.Object => filterBuilder.Gte(fieldName, value.AsBsonDocument),
-                DataType.Binary => filterBuilder.Gte(fieldName, value.AsBsonDocument),
+                DataType.BinData => filterBuilder.Gte(fieldName, value.AsBsonDocument),
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
             };
         }
@@ -644,7 +645,7 @@ namespace OnlineMongoMigrationProcessor
                 DataType.Decimal128 => "decimal",
                 DataType.Date => "date",
                 DataType.Object => "object",
-                DataType.Binary => "binData",
+                DataType.BinData => "binData",
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
             };
         }
@@ -696,7 +697,7 @@ namespace OnlineMongoMigrationProcessor
                 DataType.Decimal128 => $"{{\\\"$numberDecimal\\\":\\\"{value.AsDecimal128}\\\"}}",
                 DataType.Date => $"{{\\\"$date\\\":\\\"{((BsonDateTime)value).ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}\\\"}}",
                 DataType.Object => value.AsBsonDocument.ToString(),
-                DataType.Binary => $"{{\\\"$binary\\\":{{\\\"base64\\\":\\\"{Convert.ToBase64String(value.AsBsonBinaryData.Bytes)}\\\",\\\"subType\\\":\\\"{value.AsBsonBinaryData.SubType:x2}\\\"}}}}",
+                DataType.BinData => $"{{\\\"$binary\\\":{{\\\"base64\\\":\\\"{Convert.ToBase64String(value.AsBsonBinaryData.Bytes)}\\\",\\\"subType\\\":\\\"{value.AsBsonBinaryData.SubType:x2}\\\"}}}}",
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
             };
         }

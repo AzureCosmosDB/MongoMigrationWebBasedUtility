@@ -19,7 +19,7 @@ namespace OnlineMongoMigrationProcessor
     internal class DumpRestoreProcessor : MigrationProcessor
     {
 
-        private string _toolsLaunchFolder = string.Empty;
+        //private string _toolsLaunchFolder = string.Empty;
         private string _mongoDumpOutputFolder = $"{Helper.GetWorkingFolder()}mongodump";
         private ProcessExecutor? _processExecutor=null;
         private static readonly SemaphoreSlim _uploadLock = new(1, 1);
@@ -31,14 +31,6 @@ namespace OnlineMongoMigrationProcessor
         {
             // Constructor body can be empty or contain initialization logic if needed
             _processExecutor = new ProcessExecutor(_log);
-        }
-
-        public new string MongoToolsFolder
-        {
-            get => _toolsLaunchFolder;
-            set
-            {   _toolsLaunchFolder = value;
-            }
         }
 
         // Custom exception handler delegate with logic to control retry flow (parity with CopyProcessor)
@@ -124,7 +116,7 @@ namespace OnlineMongoMigrationProcessor
                 if(_processExecutor== null)
                     _processExecutor = new ProcessExecutor(_log);
 
-                var task = Task.Run(() => _processExecutor.Execute(_jobList, mu, mu.MigrationChunks[chunkIndex], chunkIndex, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongodump.exe", args), _cts.Token);
+                var task = Task.Run(() => _processExecutor.Execute(_jobList, mu, mu.MigrationChunks[chunkIndex], chunkIndex, initialPercent, contributionFactor, docCount, $"{MongoToolsFolder}\\mongodump.exe", args), _cts.Token);
                 task.Wait(_cts.Token);
                 bool result = task.Result;
 
@@ -202,7 +194,7 @@ namespace OnlineMongoMigrationProcessor
                 if(_processExecutor == null)
                     _processExecutor = new ProcessExecutor(_log);
 
-                var task = Task.Run(() => _processExecutor.Execute(_jobList, mu, mu.MigrationChunks[chunkIndex], chunkIndex, initialPercent, contributionFactor, docCount, $"{_toolsLaunchFolder}\\mongorestore.exe", args), _cts.Token);
+                var task = Task.Run(() => _processExecutor.Execute(_jobList, mu, mu.MigrationChunks[chunkIndex], chunkIndex, initialPercent, contributionFactor, docCount, $"{MongoToolsFolder}\\mongorestore.exe", args), _cts.Token);
                 task.Wait(_cts.Token);
                 bool result = task.Result;
                 

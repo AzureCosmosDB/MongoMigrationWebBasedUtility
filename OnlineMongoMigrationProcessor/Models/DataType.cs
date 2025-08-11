@@ -7,9 +7,10 @@ namespace OnlineMongoMigrationProcessor
         Int64,
         Decimal128,
         Date,
-        Binary,
+        BinData,
         String,
         Object,
+        UUID_Standard,
         Other
     }
 }

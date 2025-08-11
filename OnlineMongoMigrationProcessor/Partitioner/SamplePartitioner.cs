@@ -282,7 +282,7 @@ namespace OnlineMongoMigrationProcessor
                 case DataType.Date:
                     matchCondition = new BsonDocument(idField, new BsonDocument("$type", 9)); // 9 is BSON type for Date
                     break;
-                case DataType.Binary:
+                case DataType.BinData:
                     matchCondition = new BsonDocument(idField, new BsonDocument("$type", 5)); // 5 is BSON type for Binary
                     break;
                 case DataType.Object:
@@ -353,7 +353,7 @@ namespace OnlineMongoMigrationProcessor
                     lt ??= new BsonDateTime(DateTime.Parse(ltString));
                     break;
 
-                case DataType.Binary:
+                case DataType.BinData:
                 case DataType.Other:
                     // For these, we treat it as a special case with no specific bounds
                     gte ??= BsonNull.Value;

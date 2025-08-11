@@ -23,22 +23,22 @@ namespace OnlineMongoMigrationProcessor
             if (ex is OperationCanceledException)
             {
                 _log.WriteLine($"Document copy operation was cancelled for {dbName}.{colName}-{chunkIndex}");
-        return Task.FromResult(TaskResult.Abort);
+                return Task.FromResult(TaskResult.Abort);
             }
             else if (ex is MongoExecutionTimeoutException)
             {
-                _log.WriteLine($" {processName} attempt {attemptCount} failed due to timeout.Details:{ex.ToString()}", LogType.Error);
-        return Task.FromResult(TaskResult.Retry);
+                _log.WriteLine($" {processName} attempt {attemptCount} failed due to timeout. Details:{ex.ToString()}", LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
             }
             else if (ex.Message== "Copy Document Failed")
             {
                 _log.WriteLine($"{processName} attempt for {dbName}.{colName}-{chunkIndex} failed. Retrying in {currentBackoff} seconds...");
-        return Task.FromResult(TaskResult.Retry);
+                return Task.FromResult(TaskResult.Retry);
             }
             else
             {
-                _log.WriteLine(ex.ToString(), LogType.Error);
-        return Task.FromResult(TaskResult.Retry);
+                _log.WriteLine($"{processName} attempt for {dbName}.{colName}-{chunkIndex} failed. Details:{ex.ToString()}. Retrying in {currentBackoff} seconds...", LogType.Error);
+                return Task.FromResult(TaskResult.Retry);
             }
         }
 

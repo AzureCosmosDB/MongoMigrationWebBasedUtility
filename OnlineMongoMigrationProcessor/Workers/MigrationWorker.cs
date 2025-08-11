@@ -614,7 +614,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                     if (_config.ReadBinary)
                     {
-                        dataTypes.Add(DataType.Binary);
+                        dataTypes.Add(DataType.BinData);
                     }
 
                     foreach (var dataType in dataTypes)
