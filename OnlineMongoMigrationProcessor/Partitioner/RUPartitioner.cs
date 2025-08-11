@@ -32,10 +32,8 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             {
                 // Get partition tokens
                 var startTokens = GetRUPartitionTokens(new BsonTimestamp(0, 0));
-                var stopTokens = GetRUPartitionTokens(MongoHelper.ConvertToBsonTimestamp(DateTime.UtcNow));
-                //
 
-                if (!startTokens.Any() || !stopTokens.Any())
+                if (!startTokens.Any())
                 {
                     _log.WriteLine($"No RU partition tokens found for {_sourceCollection.CollectionNamespace}", LogType.Error);
                     return new List<MigrationChunk>();
@@ -46,10 +44,10 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 int counter = 0;
                 foreach (var token in startTokens)
                 {
-                    var stopToken = GetCurrentResumeTokenAsync(stopTokens[counter], _sourceCollection);
-                    //var partitionId = token.ToJson();
+                    //for FFCF create a new resume token with the current timestamp
+                    var resumeToken = UpdateStartAtOperationTime(token, MongoHelper.ConvertToBsonTimestamp(DateTime.UtcNow)); // Set initial timestamp to 0
 
-                    var chunk = new MigrationChunk(counter.ToString(), token.ToJson(), stopToken.ToJson());
+                    var chunk = new MigrationChunk(counter.ToString(), token.ToJson(), resumeToken.ToJson());
                     chunks.Add(chunk);
                     counter++;
                 }
@@ -98,62 +96,23 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             }
         }
 
-        /// <summary>
-        /// Get the current resume token for a partition (StopFeedItem)
-        /// </summary>
-        private BsonDocument GetCurrentResumeTokenAsync(
-            BsonDocument partitionToken,
-            IMongoCollection<BsonDocument> collection)
+
+        public static BsonDocument UpdateStartAtOperationTime(BsonDocument originalDoc, BsonTimestamp newTimestamp)
         {
-            var pipeline = new BsonDocument[]
+            if (originalDoc == null) throw new ArgumentNullException(nameof(originalDoc));
+
+            // deep clone so original is not mutated
+            var doc = originalDoc.DeepClone().AsBsonDocument;
+           
+            var field = doc["_startAtOperationTime"];
+                        
+            if (field.IsBsonTimestamp)
             {
-                new BsonDocument("$match", new BsonDocument("operationType",
-                    new BsonDocument("$in", new BsonArray { "insert", "update", "replace" })
-                )),
-                new BsonDocument("$project", new BsonDocument
-                {
-                    { "_id", 1 },
-                    { "fullDocument", 1 },
-                    { "ns", 1 },
-                    { "documentKey", 1 }
-                })
-            };
+                // Replace the whole field (it was a BsonTimestamp) with the new one
+                doc["_startAtOperationTime"] = newTimestamp;
+            }           
 
-            var options = new ChangeStreamOptions
-            {
-                FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
-                ResumeAfter = partitionToken
-            };
-
-            //using var cursor = collection.Watch<BsonDocument>(pipeline, options);
-            using var cursor = collection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options);
-
-            cursor.MoveNext();
-
-            return cursor.GetResumeToken();
-
-            /*
-            while (cursor.MoveNext())
-            {
-
-                foreach (var change in cursor.Current)
-                {
-                    var resumeToken = change.ResumeToken;
-                    var document = change.FullDocument;
-                    var namespaceInfo = change.CollectionNamespace; // optional
-
-                    // TODO: Process the document
-                    Console.WriteLine(change.ResumeToken.ToJson());
-                    Console.WriteLine(change.DocumentKey.ToJson());
-
-                    return change.DocumentKey;
-                    //cursor.MoveNext();
-
-                    //return cursor.GetResumeToken();
-                }
-            }
-            return null;
-            */
+            return doc;
         }
     }
 }

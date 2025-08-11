@@ -91,25 +91,25 @@ namespace OnlineMongoMigrationProcessor
             
         }
 
-        private bool CheckChangeStreamAlreadyProcessingAsync(string targetConnectionString)
+      
+        private bool CheckChangeStreamAlreadyProcessingAsync(ProcessorContext ctx)
         {
             if (_postUploadCSProcessing)
-                return true; // Skip if post-upload CS processing is already in progress
+                return true; // Skip processing if post-upload CS processing is already in progress
 
             if (_job.IsOnline && Helper.IsOfflineJobCompleted(_job) && !_postUploadCSProcessing)
             {
                 _postUploadCSProcessing = true; // Set flag to indicate post-upload CS processing is in progress
 
                 if (_targetClient == null && !_job.IsSimulatedRun)
-                    _targetClient = MongoClientFactory.Create(_log, targetConnectionString);
+                    _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
-                // Only start change stream processor if not a simulated run
-                if (!_job.IsSimulatedRun)
+                if (_changeStreamProcessor == null && _targetClient != null)
+                    _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient, _jobList, _job, _config);
+
+                if (_changeStreamProcessor != null)
                 {
-                    if (_changeStreamProcessor == null)
-                        _changeStreamProcessor = new MongoChangeStreamProcessor(_log, _sourceClient, _targetClient!, _jobList, _job, _config);
-
-                    var _ = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
+                    var result = _changeStreamProcessor.RunCSPostProcessingAsync(_cts);
                 }
                 return true;
             }
@@ -374,7 +374,7 @@ namespace OnlineMongoMigrationProcessor
             }
 
             // when resuming a job, check if post-upload change stream processing is already in progress
-            if (CheckChangeStreamAlreadyProcessingAsync(ctx.TargetConnectionString))
+            if (CheckChangeStreamAlreadyProcessingAsync(ctx))
                 return;
 
             // starting the regular dump and restore process

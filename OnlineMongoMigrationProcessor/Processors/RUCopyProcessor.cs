@@ -6,6 +6,7 @@ using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,9 +33,9 @@ namespace OnlineMongoMigrationProcessor.Processors
         private Log _log;
 
         // RU-specific configuration
-        private const int MaxConcurrentPartitions = 2;
+        private const int MaxConcurrentPartitions = 1;
+        private static readonly TimeSpan BatchDuration = TimeSpan.FromSeconds(60);
 
-       
         public bool ProcessRunning { get; set; }
 
         public RUCopyProcessor(Log log, JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config)
@@ -139,8 +140,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                     .Take(MaxConcurrentPartitions)
                     .ToList();
 
-                var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-                var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, batchCts.Token);
+                var batchCts = new CancellationTokenSource(BatchDuration);
 
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
@@ -157,7 +157,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                         {
                             if (targetCollection != null)
                             {
-                                await ProcessChunksInBatchesAsync(chunk, mu, ctx.Collection, targetCollection, combinedCts.Token, _job.IsSimulatedRun);
+                                await ProcessChunksInBatchesAsync(chunk, mu, ctx.Collection, targetCollection, batchCts.Token, _cts.Token, _job.IsSimulatedRun);
                             }
                         }
                         finally
@@ -210,23 +210,121 @@ namespace OnlineMongoMigrationProcessor.Processors
         /// Process one partition's historical changes for a batch duration
         /// </summary>
         private Task ProcessChunksInBatchesAsync(MigrationChunk chunk,MigrationUnit mu, IMongoCollection<BsonDocument> sourceCollection,
-            IMongoCollection<BsonDocument> targetCollection, CancellationToken token, bool isSimulated)
+            IMongoCollection<BsonDocument> targetCollection, CancellationToken timeoutCts, CancellationToken manualToken, bool isSimulated)
         {
             if (chunk.IsUploaded == true)
                 return Task.CompletedTask;
-                 
+
+
+            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts, manualToken);
+
+            int counter = 0;
+
             try
             {
+                // async call to get stop document for this partition
+                if (!string.IsNullOrEmpty(chunk.RUStopDocumentKey) || chunk.RUStopDocumentKey == string.Empty)
+                    Task.Run(() => GetChunksStopDocumentAsync(chunk, mu, sourceCollection, linkedCts.Token), linkedCts.Token);
+
                 var options = new ChangeStreamOptions
                 {
                     FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
-                    ResumeAfter = BsonDocument.Parse(chunk.RUPartitionResumeToken) 
+                    ResumeAfter = BsonDocument.Parse(chunk.RUResumeStopToken) 
                 };
 
                 var pipeline = new BsonDocument[]
                 {
                     new BsonDocument("$match", new BsonDocument("operationType",
-                        new BsonDocument("$in", new BsonArray { "insert", "update", "replace" })
+                        new BsonDocument("$in", new BsonArray { "insert","update","replace"})
+                    )),
+                    new BsonDocument("$project", new BsonDocument
+                    {
+                        { "_id", 1 },
+                        { "fullDocument", 1 },
+                        { "ns", 1 },
+                        { "documentKey", 1 }
+                    })
+                };
+
+                // Create the change stream cursor
+                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options);
+                
+                while (cursor.MoveNext(linkedCts.Token))
+                {
+                    timeoutCts.ThrowIfCancellationRequested();
+
+                    foreach (var change in cursor.Current)
+                    {
+                        var resumeToken = change.ResumeToken;
+                        var document = change.FullDocument;
+                        var namespaceInfo = change.CollectionNamespace; // optional
+
+                        // TODO: Process the document
+                        Console.WriteLine(" ******************" );
+                        Console.WriteLine(chunk.RUStopDocumentKey.ToJson());
+                        Console.WriteLine(change.DocumentKey.ToJson());                                                                      
+
+                        // Process the change document
+                        //await ProcessChangeDocumentAsync(change, targetCollection, state, isSimulated, token);                                                
+                       
+                        // If current resume token == StopFeedItem, this partition's history is complete
+                        if (EqualsDocumentKey(change.DocumentKey, chunk.RUStopDocumentKey))
+                        {
+                            chunk.IsUploaded = true;
+                            _log.WriteLine($"Chunk [{chunk.Id}] offline copy completed.");
+                            return Task.CompletedTask;
+                        }
+
+                        // Save the latest token
+                        chunk.RUPartitionResumeToken = change.ResumeToken.ToJson();
+                        chunk.DocCountInTarget++;
+
+                        counter++;
+                        // Check for cancellation
+                        if (linkedCts.IsCancellationRequested)
+                        {
+                            return Task.CompletedTask;
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !manualToken.IsCancellationRequested)
+            {
+                //if full batch duration was spent and then operation was cancelled without any change we can assume that partition processing is complete
+                if (counter==0)
+                {
+                    chunk.IsUploaded = true;
+                    _log.WriteLine($"Chunk [{chunk.Id}] offline copy completed.");
+                    return Task.CompletedTask;
+                }
+            }
+
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error processing chunk {chunk.Id}: {ex}", LogType.Error);
+                //throw;
+            }
+            return Task.CompletedTask;
+        }
+
+
+        private Task GetChunksStopDocumentAsync(MigrationChunk chunk, MigrationUnit mu, IMongoCollection<BsonDocument> sourceCollection,
+             CancellationToken token)
+        {
+            if (!string.IsNullOrEmpty(chunk.RUResumeStopToken) || chunk.IsUploaded == true)
+                return Task.CompletedTask;
+
+            try            {
+                var options = new ChangeStreamOptions
+                {
+                    FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
+                    ResumeAfter = BsonDocument.Parse(chunk.RUPartitionResumeToken)
+                };
+
+                var pipeline = new BsonDocument[]
+                {
+                    new BsonDocument("$match", new BsonDocument("operationType",
+                        new BsonDocument("$in", new BsonArray { "insert", "update", "replace","delete" })
                     )),
                     new BsonDocument("$project", new BsonDocument
                     {
@@ -246,69 +344,34 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                     foreach (var change in cursor.Current)
                     {
-                        var resumeToken = change.ResumeToken;
-                        var document = change.FullDocument;
-                        var namespaceInfo = change.CollectionNamespace; // optional
 
-                        // TODO: Process the document
-                        Console.WriteLine(" ******************" );
-                        Console.WriteLine(change.ResumeToken.ToJson());
-                        Console.WriteLine(chunk.RUStopToken.ToJson());
+                        Console.WriteLine(" ###########################");
                         Console.WriteLine(change.DocumentKey.ToJson());
+                        Console.WriteLine(" ###########################");
 
-                                                
+                        chunk.RUPartitionResumeToken = change.DocumentKey.ToJson();
+                        return Task.CompletedTask;
+                    }
 
-                        // Process the change document
-                        //await ProcessChangeDocumentAsync(change, targetCollection, state, isSimulated, token);
-
-
-                        // Save the latest token
-                        chunk.RUPartitionResumeToken = change.ResumeToken.ToJson();
-                        chunk.DocCountInTarget++;
-                        //switch (change.OperationType)
-                        //{
-                        //    case ChangeStreamOperationType.Insert:
-                        //        chunk.DocCountInTarget++;
-                        //        break;
-                        //    case ChangeStreamOperationType.Update:
-                        //    case ChangeStreamOperationType.Replace:
-                        //        //not interested to track updates in incremental feed.
-                        //        break;
-                        //    case ChangeStreamOperationType.Delete:
-                        //        //deletes are not part of incremental feed.
-                        //        break;
-                        //    default:
-                        //        break;
-                        //}
-
-                        // If current resume token == StopFeedItem, this partition's history is complete
-                        if (EqualsResumeToken(change.ResumeToken, chunk.RUStopToken))
-                        {
-                            chunk.IsUploaded = true;
-                            _log.WriteLine($"[{chunk.Id}] Partition processing completed.");
-                            return Task.CompletedTask;
-                        }
-
-                        // Check for cancellation
-                        if (token.IsCancellationRequested)
-                        {
-                            return Task.CompletedTask;
-                        }
+                    // Check for cancellation
+                    if (token.IsCancellationRequested)
+                    {
+                        return Task.CompletedTask;
                     }
                 }
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error processing partition {chunk.Id}: {ex}", LogType.Error);
+                _log.WriteLine($"Error getting stop document for  partition {chunk.Id}: {ex}", LogType.Error);
                 //throw;
             }
             return Task.CompletedTask;
-        }             
+        }
 
         /// <summary>
         /// Compare two resume tokens for equality
         /// </summary>
-        private static bool EqualsResumeToken(BsonDocument? a, string b)
+        private static bool EqualsDocumentKey(BsonDocument? a, string b)
         {
             if (a == null || b == null)
                 return false;
