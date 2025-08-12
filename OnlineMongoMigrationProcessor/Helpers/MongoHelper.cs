@@ -32,8 +32,38 @@ namespace OnlineMongoMigrationProcessor
             return collection.CountDocuments(Builders<BsonDocument>.Filter.Empty);
         }
 
-        public static long ExtractLSNFromResumeToken(BsonDocument bsonDoc)
+        //public static long ExtractLSNFromResumeToken(BsonDocument bsonDoc)
+        //{
+        //    // Step 1: Get the Base64 string from the BSON binary field
+        //    string base64Str = Convert.ToBase64String(bsonDoc["_data"].AsBsonBinaryData.Bytes);
+
+        //    // Step 2: Base64 decode into ASCII JSON string
+        //    byte[] bytes = Convert.FromBase64String(base64Str);
+        //    string asciiJson = Encoding.ASCII.GetString(bytes);
+
+        //    // Step 3: Parse the decoded JSON
+        //    using JsonDocument jsonDoc = JsonDocument.Parse(asciiJson);
+
+        //    // Step 4: Extract the number string from Continuation[0].State.value
+        //    string? rawValue = jsonDoc.RootElement
+        //        .GetProperty("Continuation")[0]
+        //        .GetProperty("State")
+        //        .GetProperty("value")
+        //        .GetString();
+
+        //    // Step 5: Trim extra quotes and parse to int
+        //    if (rawValue == null)
+        //        throw new InvalidOperationException("Resume token value is missing or null.");
+
+        //    rawValue = rawValue.Trim('"');
+        //    return long.Parse(rawValue);
+
+        //}
+        public static (long Lsn, string Rid, string Min, string Max) ExtractValuesFromResumeToken(BsonDocument bsonDoc)
         {
+            if (bsonDoc == null || !bsonDoc.Contains("_data"))
+                throw new ArgumentException("Invalid BSON document or missing _data field", nameof(bsonDoc));
+
             // Step 1: Get the Base64 string from the BSON binary field
             string base64Str = Convert.ToBase64String(bsonDoc["_data"].AsBsonBinaryData.Bytes);
 
@@ -43,22 +73,40 @@ namespace OnlineMongoMigrationProcessor
 
             // Step 3: Parse the decoded JSON
             using JsonDocument jsonDoc = JsonDocument.Parse(asciiJson);
+            var root = jsonDoc.RootElement;
 
-            // Step 4: Extract the number string from Continuation[0].State.value
-            string? rawValue = jsonDoc.RootElement
+            // Step 4: Extract LSN
+            string? rawValue = root
                 .GetProperty("Continuation")[0]
                 .GetProperty("State")
                 .GetProperty("value")
                 .GetString();
 
-            // Step 5: Trim extra quotes and parse to int
             if (rawValue == null)
-                throw new InvalidOperationException("Resume token value is missing or null.");
+                throw new InvalidOperationException("Resume token LSN value is missing or null.");
 
             rawValue = rawValue.Trim('"');
-            return long.Parse(rawValue);
-        }
+            long lsn = long.Parse(rawValue);
 
+            // Step 5: Extract Rid, Min, and Max
+            string rid = root.GetProperty("Rid").GetString() ?? string.Empty;
+
+            string min = root
+                .GetProperty("Continuation")[0]
+                .GetProperty("FeedRange")
+                .GetProperty("value")
+                .GetProperty("min")
+                .GetString() ?? string.Empty;
+
+            string max = root
+                .GetProperty("Continuation")[0]
+                .GetProperty("FeedRange")
+                .GetProperty("value")
+                .GetProperty("max")
+                .GetString() ?? string.Empty;
+
+            return (lsn, rid, min, max);
+        }
         public static FilterDefinition<BsonDocument> GenerateQueryFilter(BsonValue? gte, BsonValue? lte, DataType dataType)
         {
             var filterBuilder = Builders<BsonDocument>.Filter;
@@ -390,7 +438,10 @@ namespace OnlineMongoMigrationProcessor
                         if (await cursor.MoveNextAsync(cts.Token))
                         {
                             if (!resetCS && string.IsNullOrEmpty(unit.OriginalResumeToken))
+                            {
                                 unit.ResumeToken = cursor.GetResumeToken().ToJson();
+                                unit.OriginalResumeToken = unit.ResumeToken;
+                            }
                             return;
                         }
                     }

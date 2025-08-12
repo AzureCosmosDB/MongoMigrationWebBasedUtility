@@ -3,11 +3,13 @@ using MongoDB.Driver;
 using Newtonsoft.Json.Linq;
 using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Models;
+using OnlineMongoMigrationProcessor.Partitioner;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using static OnlineMongoMigrationProcessor.MongoHelper;
@@ -129,6 +131,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             
             if(mu.MigrationChunks.All(s => s.IsUploaded == true))
             {
+
                 mu.DumpComplete = true;
                 mu.RestoreComplete = true;
                 mu.BulkCopyEndedOn = DateTime.UtcNow;
@@ -224,8 +227,11 @@ namespace OnlineMongoMigrationProcessor.Processors
                     if (resumeToken == null)
                         continue;
 
-                    if (batchCounter % 1000 == 0)
+                    // persits every 1000 docs
+                    int lockCount = 0;
+                    if (lockCount < (int)(batchCounter / 1000))
                     {
+                        lockCount = (int)(batchCounter / 1000);
                         lock (_processingLock)
                         {
                             // Save the latest resume token to the chunk
@@ -236,9 +242,10 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                     try
                     {
-
-                        currentLSN = MongoHelper.ExtractLSNFromResumeToken(resumeToken);
-
+                        // Extract the LSN from the resume token using ExtractValuesFromResumeToken helper method
+                        var (lsn, rid, min, max) = MongoHelper.ExtractValuesFromResumeToken(resumeToken);
+                        currentLSN = lsn;
+                       
                         if (currentLSN >= chunk.RUStopLSN)
                         {
                             chunk.IsUploaded = true;
@@ -339,6 +346,11 @@ namespace OnlineMongoMigrationProcessor.Processors
                 _log.WriteLine($"{processName} attempt for {dbName}.{colName} partition {partitionId} failed. Retrying in {currentBackoff} seconds...");
                 return Task.FromResult(TaskResult.Retry);
             }
+            else if (ex.Message.Contains("New partitions found during copy process"))
+            {
+                _log.WriteLine(ex.Message,LogType.Error);
+                return Task.FromResult(TaskResult.Abort);
+            }
             else
             {
                 _log.WriteLine($"{processName} error: {ex}", LogType.Error);
@@ -392,7 +404,74 @@ namespace OnlineMongoMigrationProcessor.Processors
                 }
             }
 
+            //check if any partiton split ocuured during the copy process
+            TaskResult vresult = await new RetryHelper().ExecuteTask(
+                () => CheckForPartitionSplitsAsync(mu),
+                (ex, attemptCount, currentBackoff) => RUProcess_ExceptionHandler(
+                    ex, attemptCount,
+                    "Verification processor", ctx.DatabaseName, ctx.CollectionName, "all", currentBackoff
+                ),
+                _log
+            );
+
+            if (vresult == TaskResult.Abort || vresult == TaskResult.FailedAfterRetries)
+            {
+                StopProcessing();
+                return;
+            }
+
             await PostCopyChangeStreamProcessor(ctx, mu);
+        }
+
+        private async Task<TaskResult> CheckForPartitionSplitsAsync(MigrationUnit unit)
+        {
+            bool newChunksFound = false;
+            List<string> intactPartitions = new List<string>();
+            //add a dumy await to ensure the method is async    
+            await Task.Yield();
+
+            //get listof new partitions
+            var chunks = new RUPartitioner().CreatePartitions(_log, _sourceClient!, unit.DatabaseName, unit.CollectionName, _cts.Token,true);
+
+            //compare with current chunks to identify new chunks tobe added            
+            foreach (var chunk in chunks)
+            {
+                var matchingChunk = unit.MigrationChunks
+                        .FirstOrDefault(c => c.Lt == chunk.Lt && c.Gte == chunk.Gte);
+                if (matchingChunk != null)
+                {
+                    intactPartitions.Add(matchingChunk.Id); //partition is safe
+                }
+                else
+                {
+                    // Add new chunk
+                    chunk.Id = (unit.MigrationChunks.Count + 1).ToString();
+                    unit.MigrationChunks.Add(chunk);
+                    unit.ChangeStreamStartedOn = DateTime.UtcNow;
+                    newChunksFound = true;                    
+                }
+            }
+
+            //need to stop processing the parent partitions
+            var stopChunks = unit.MigrationChunks
+                .Where(c => !intactPartitions.Contains(c.Id))
+                .ToList();
+            foreach (var chunk in stopChunks)
+            {
+                chunk.IsDownloaded = true;
+                chunk.IsUploaded = true;
+            }
+
+            // stop processing if new chunks found.
+            if (newChunksFound)
+            {
+                unit.DumpComplete = false;
+                unit.RestoreComplete = false;
+                _jobList?.Save();
+                throw new Exception("New partitions found during copy process. Please pause and re-run the job to process new partitions.");
+            }
+            else
+                return TaskResult.Success;
         }
     }
 }

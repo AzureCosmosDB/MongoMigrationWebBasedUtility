@@ -20,6 +20,7 @@ namespace OnlineMongoMigrationProcessor
         public long RUStopLSN { get; set; }
         public string RUStopToken { get; set; } = string.Empty;
         public string Id { get; set; } = string.Empty;
+        
 
         public MigrationChunk() { } 
 

@@ -361,7 +361,7 @@ namespace OnlineMongoMigrationProcessor
                         }
                     }
 
-                    if (timeStamp > DateTime.MinValue && !mu.ResetChangeStream && resumeToken == null) //skip CursorUtcTimestamp if its reset 
+                    if (timeStamp > DateTime.MinValue && !mu.ResetChangeStream && resumeToken == null && !(_job.JobType==JobType.RUOptimizedCopy && !_job.ProcessingSyncBack)) //skip CursorUtcTimestamp if its reset 
                     {
                         var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(timeStamp.ToLocalTime());
                         options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };
@@ -519,7 +519,7 @@ namespace OnlineMongoMigrationProcessor
                             _resumeTokenCache.TryGetValue($"{sourceCollection!.CollectionNamespace}", out string? token2);
                             lastProcessedToken = token2 ?? string.Empty;
                             
-                            if (lastProcessedToken == change.ResumeToken.ToJson())
+                            if (lastProcessedToken == change.ResumeToken.ToJson() && _job.JobType!=JobType.RUOptimizedCopy)
                             {
                                 mu.CSUpdatesInLastBatch = 0;
                                 mu.CSNormalizedUpdatesInLastBatch = 0;

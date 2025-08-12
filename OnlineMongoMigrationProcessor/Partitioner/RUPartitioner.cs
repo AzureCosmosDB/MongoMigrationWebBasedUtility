@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.Metrics;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -23,7 +24,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
         /// Process partitions using RU-optimized approach
         /// </summary>
         /// 
-        public List<MigrationChunk> CreatePartitions(Log log, MongoClient sourceClient, string databaseName, string collectionName, CancellationToken _cts)
+        public List<MigrationChunk> CreatePartitions(Log log, MongoClient sourceClient, string databaseName, string collectionName, CancellationToken _cts, bool isVerificationMode=false)
         {
             _log = log;
 
@@ -46,18 +47,29 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 int counter = 0;
                 foreach (var token in startTokens)
                 {
-                    _log.AddVerboseMessage($"Processing RU partition token #{counter+1}");
+                    if(isVerificationMode)
+                        _log.AddVerboseMessage($"Verifying RU partition token #{counter + 1}");
+                    else
+                        _log.AddVerboseMessage($"Processing RU partition token #{counter + 1}");
 
                     //for FFCF create a new resume token with the current timestamp
                     var currentToken = UpdateStartAtOperationTime(token, MongoHelper.ConvertToBsonTimestamp(DateTime.UtcNow)); // Set initial timestamp to 0
 
                     var chunk = new MigrationChunk(counter.ToString(), token.ToJson(), currentToken.ToJson());
-                    chunk.RUStopLSN=GetChunksStopLSN_Async(currentToken, _sourceCollection,_cts).GetAwaiter().GetResult();
+                    var boundary= GetChunksStopLSN_Async(currentToken, _sourceCollection, _cts).GetAwaiter().GetResult();
+                    if (boundary != null)
+                    {
+                        chunk.RUStopLSN = boundary.LSN;
+                        chunk.Gte = boundary?.StartId?.ToString();
+                        chunk.Lt = boundary?.EndId?.ToString();
+                    }
 
                     chunks.Add(chunk);
                     counter++;
                 }
-                _log.WriteLine($"Partitioning complete.");
+                if (!isVerificationMode)
+                    _log.WriteLine($"Partitioning complete.");
+
                 return chunks;
             }
             catch (Exception ex)
@@ -103,7 +115,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             }
         }
 
-        private async Task<long> GetChunksStopLSN_Async(BsonDocument resumeAfterToken, IMongoCollection<BsonDocument> sourceCollection,
+        private async Task<Boundary?> GetChunksStopLSN_Async(BsonDocument resumeAfterToken, IMongoCollection<BsonDocument> sourceCollection,
             CancellationToken token)
         {
             try
@@ -136,15 +148,23 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 var resumetoken = cursor.GetResumeToken();
                 if (resumetoken == null)
                 {
-                    return 0;
+                    return null;
                 }
-                return MongoHelper.ExtractLSNFromResumeToken(resumetoken);
+
+                // Extract the LSN from the resume token using ExtractValuesFromResumeToken helper method
+                var(lsn, rid, min, max) = MongoHelper.ExtractValuesFromResumeToken(resumetoken);
+                var boundary = new Boundary();
+                boundary.StartId=min;
+                boundary.EndId=max;
+                boundary.LSN = lsn;
+                boundary.Rid = rid;
+                return boundary;
             }
             catch (Exception ex)
             {
                 _log.WriteLine($"Error getting stop LSN for partition: {ex}", LogType.Error);
             }
-            return 0;
+            return null;
         }
 
        

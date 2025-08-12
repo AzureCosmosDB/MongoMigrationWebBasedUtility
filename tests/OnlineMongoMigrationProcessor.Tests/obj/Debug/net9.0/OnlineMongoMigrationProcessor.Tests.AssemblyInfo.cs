@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("OnlineMongoMigrationProcessor.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+712f58294a8185020d4294aca643144ecf7ef981")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+af99800e53e908ecb3f120663ea45a35c8fff27c")]
 [assembly: System.Reflection.AssemblyProductAttribute("OnlineMongoMigrationProcessor.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("OnlineMongoMigrationProcessor.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
