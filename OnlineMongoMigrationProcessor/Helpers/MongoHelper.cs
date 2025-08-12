@@ -362,8 +362,11 @@ namespace OnlineMongoMigrationProcessor
 
         private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS)
         {
-            var pipeline = new BsonDocument[]
-                {
+            var pipeline = new BsonDocument[] { };
+            if (job.JobType == JobType.RUOptimizedCopy)
+            {
+                pipeline = new BsonDocument[]
+                    {
                     new BsonDocument("$match", new BsonDocument("operationType",
                         new BsonDocument("$in", new BsonArray { "insert", "update", "replace","delete" }))
                     ),
@@ -374,21 +377,23 @@ namespace OnlineMongoMigrationProcessor
                         { "ns", 1 },
                         { "documentKey", 1 }
                     })
-                };
+                    };
+            }
 
             var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
             using var cursor = await collection.WatchAsync<ChangeStreamDocument<BsonDocument>>(pipeline, options, cts.Token);
             {
                 try
                 {
+                    if (job.JobType == JobType.RUOptimizedCopy)                    {
 
-                    if (await cursor.MoveNextAsync(cts.Token))
-                    {
-                        if (!resetCS && string.IsNullOrEmpty(unit.OriginalResumeToken))
-                            unit.ResumeToken = cursor.GetResumeToken().ToJson();
-                        return;
+                        if (await cursor.MoveNextAsync(cts.Token))
+                        {
+                            if (!resetCS && string.IsNullOrEmpty(unit.OriginalResumeToken))
+                                unit.ResumeToken = cursor.GetResumeToken().ToJson();
+                            return;
+                        }
                     }
-                    
 
                     // Iterate until cancellation or first change detected
                     while (!cts.Token.IsCancellationRequested)
@@ -422,9 +427,9 @@ namespace OnlineMongoMigrationProcessor
 
                             unit.ResumeTokenOperation = (ChangeStreamOperationType)change.OperationType;
 
-                            string json = change.DocumentKey["_id"].ToJson(); // save as string
+                            string json = change.DocumentKey.ToJson(); // save as string
                             // Deserialize the BsonValue to ensure it is stored correctly
-                            unit.ResumeDocumentId = BsonSerializer.Deserialize<BsonValue>(json); ;
+                            unit.ResumeDocumentId = BsonSerializer.Deserialize<BsonDocument>(json); ;
 
                             // Exit immediately after first change detected
                             return; ;
@@ -711,6 +716,22 @@ namespace OnlineMongoMigrationProcessor
             return DateTimeOffset.FromUnixTimeSeconds(secondsSinceEpoch).UtcDateTime;
         }
 
+        public static FilterDefinition<BsonDocument> BuildFilterFromDocumentKey(BsonDocument documentKey)
+        {
+            if (documentKey == null || !documentKey.Elements.Any())
+                throw new ArgumentException("documentKey cannot be null or empty", nameof(documentKey));
+
+            var builder = Builders<BsonDocument>.Filter;
+            FilterDefinition<BsonDocument> filter = builder.Empty;
+
+            foreach (var element in documentKey.Elements)
+            {
+                filter &= builder.Eq(element.Name, element.Value);
+            }
+
+            return filter;
+        }
+
         public static BsonTimestamp ConvertToBsonTimestamp(DateTime dateTime)
         {
             // Convert DateTime to Unix timestamp (seconds since Jan 1, 1970)
@@ -735,7 +756,7 @@ namespace OnlineMongoMigrationProcessor
                 // Deduplicate inserts by _id to avoid duplicate key errors within the same batch
                 var deduplicatedInserts = batch
                     .Where(e => e.FullDocument != null && e.FullDocument.Contains("_id"))
-                    .GroupBy(e => e.FullDocument["_id"].ToString())
+                    .GroupBy(e => e.DocumentKey.ToJson()) //use document key instead of _id
                     .Select(g => g.First()) // Take the first occurrence of each document
                     .ToList();
 
@@ -807,7 +828,7 @@ namespace OnlineMongoMigrationProcessor
                 // Group by _id to handle multiple updates to the same document in the batch
                 var groupedUpdates = batch
                     .Where(e => e.FullDocument != null && e.FullDocument.Contains("_id"))
-                    .GroupBy(e => e.FullDocument["_id"].ToString())
+                    .GroupBy(e => e.DocumentKey.ToJson()) //use document key instead of _id
                     .Select(g => g.OrderByDescending(e => e.ClusterTime ?? new MongoDB.Bson.BsonTimestamp(0, 0)).First()) // Take the latest update for each document
                     .ToList();
 
@@ -820,7 +841,8 @@ namespace OnlineMongoMigrationProcessor
                         if (id.IsObjectId)
                             id = id.AsObjectId;
 
-                        var filter = Builders<BsonDocument>.Filter.Eq("_id", id);
+                        var filter= MongoHelper.BuildFilterFromDocumentKey(e.DocumentKey);
+                        //var filter = Builders<BsonDocument>.Filter.Eq("_id", id);
 
                         // Use ReplaceOneModel instead of UpdateOneModel to avoid conflicts with unique indexes
                         return new ReplaceOneModel<BsonDocument>(filter, doc) { IsUpsert = true };
@@ -916,10 +938,11 @@ namespace OnlineMongoMigrationProcessor
             {
                 // Deduplicate deletes by _id within the same batch
                 var deduplicatedDeletes = batch
-                    .GroupBy(e => e.DocumentKey.GetValue("_id", null)?.ToString() ?? "")
+                    .GroupBy(e => e.DocumentKey != null ? e.DocumentKey.ToJson() : string.Empty) // safe null handling
                     .Where(g => !string.IsNullOrEmpty(g.Key))
-                    .Select(g => g.First()) // Take the first delete for each document
+                    .Select(g => g.First())
                     .ToList();
+
 
                 var deleteModels = deduplicatedDeletes
                     .Select(e =>
@@ -942,7 +965,8 @@ namespace OnlineMongoMigrationProcessor
                             if (id.IsObjectId)
                                 id = id.AsObjectId;
 
-                            return new DeleteOneModel<BsonDocument>(Builders<BsonDocument>.Filter.Eq("_id", id));
+                            var filter = MongoHelper.BuildFilterFromDocumentKey(e.DocumentKey);
+                            return new DeleteOneModel<BsonDocument>(filter);
                         }
                         catch (Exception dex)
                         {

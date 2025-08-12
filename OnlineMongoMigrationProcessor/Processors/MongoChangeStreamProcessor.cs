@@ -458,20 +458,25 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                var pipeline = new BsonDocument[]
+                var pipeline = new BsonDocument[] { };
+                 if (_job.JobType == JobType.RUOptimizedCopy)
                 {
+                    pipeline = new BsonDocument[]
+                    {
                     new BsonDocument("$match", new BsonDocument("operationType",
                         new BsonDocument("$in", new BsonArray { "insert", "update", "replace", "delete" }))),
                     new BsonDocument("$project", new BsonDocument
                     {
-                        { "operationType", 1 }, 
+                        { "operationType", 1 },
                         { "_id", 1 },
                         { "fullDocument", 1 },
                         { "ns", 1 },
                         { "documentKey", 1 }
                     })
-                };
-                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline,options, cancellationToken);
+                    };                    
+                }
+               
+                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options, cancellationToken);
 
                 string lastProcessedToken = string.Empty;
                 if (_job.SourceServerVersion.StartsWith("3"))
@@ -626,7 +631,7 @@ namespace OnlineMongoMigrationProcessor
         }
 
         // This method retrieves the event associated with the ResumeToken
-        private bool AutoReplayFirstChangeInResumeToken(BsonValue? documentId, ChangeStreamOperationType opType, IMongoCollection<BsonDocument> sourceCollection, IMongoCollection<BsonDocument> targetCollection, MigrationUnit mu)
+        private bool AutoReplayFirstChangeInResumeToken(BsonDocument? documentId, ChangeStreamOperationType opType, IMongoCollection<BsonDocument> sourceCollection, IMongoCollection<BsonDocument> targetCollection, MigrationUnit mu)
         {
             if(documentId == null || documentId.IsBsonNull)
             {
@@ -637,8 +642,8 @@ namespace OnlineMongoMigrationProcessor
             {
                 _log.WriteLine($"Auto replay for {opType} operation with _id {documentId} in {sourceCollection.CollectionNamespace}.");
             }
-            
-            var filter = Builders<BsonDocument>.Filter.Eq("_id", documentId); // Assuming _id is your resume token
+            var filter = MongoHelper.BuildFilterFromDocumentKey(documentId);
+            //var filter = Builders<BsonDocument>.Filter.Eq("_id", documentId); // Assuming _id is your resume token
             var result = sourceCollection.Find(filter).FirstOrDefault(); // Retrieve the document for the resume token
 
             try
@@ -661,7 +666,8 @@ namespace OnlineMongoMigrationProcessor
                         if (result == null || result.IsBsonNull)
                         {
                             _log.WriteLine($"Processing {opType} operation for {sourceCollection.CollectionNamespace} with _id {documentId}. No document found on source, deleting it from target.");
-                            var deleteTTLFilter = Builders<BsonDocument>.Filter.Eq("_id", documentId);
+                            var deleteTTLFilter = MongoHelper.BuildFilterFromDocumentKey(documentId);
+                            //var deleteTTLFilter = Builders<BsonDocument>.Filter.Eq("_id", documentId);
                             try
                             {
                                 targetCollection.DeleteOne(deleteTTLFilter);

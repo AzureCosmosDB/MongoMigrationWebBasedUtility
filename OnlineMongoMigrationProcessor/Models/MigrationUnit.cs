@@ -23,9 +23,9 @@ namespace OnlineMongoMigrationProcessor
         private object? _resumeDocumentIdRaw { get; set; }
 
         [JsonIgnore]
-        public BsonValue? ResumeDocumentId
+        public BsonDocument? ResumeDocumentId
         {
-            get => _resumeDocumentIdRaw != null ? BsonValue.Create(_resumeDocumentIdRaw) : null;
+            get => _resumeDocumentIdRaw != null ? BsonDocument.Create(_resumeDocumentIdRaw) : null;
             set => _resumeDocumentIdRaw = value;
         }
 

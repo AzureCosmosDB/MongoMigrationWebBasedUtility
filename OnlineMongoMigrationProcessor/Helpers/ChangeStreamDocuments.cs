@@ -16,26 +16,26 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
         public void AddInsert(ChangeStreamDocument<BsonDocument> change)
         {
-            var id = change.DocumentKey.GetValue("_id");
+            var id = change.DocumentKey.ToJson();
 
             // Remove from other lists
-            DocsToBeUpdated.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
-            DocsToBeDeleted.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
+            DocsToBeUpdated.RemoveAll(c => c.DocumentKey.ToJson() == id);
+            DocsToBeDeleted.RemoveAll(c => c.DocumentKey.ToJson() == id);
 
             // Replace if already exists
-            DocsToBeInserted.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
+            DocsToBeInserted.RemoveAll(c => c.DocumentKey.ToJson() == id);
             DocsToBeInserted.Add(change);
         }
 
         public void AddUpdate(ChangeStreamDocument<BsonDocument> change)
         {
-            var id = change.DocumentKey.GetValue("_id");
+            var id = change.DocumentKey.ToJson();
 
             // Remove from delete list
-            DocsToBeDeleted.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
+            DocsToBeDeleted.RemoveAll(c => c.DocumentKey.ToJson() == id);
 
             // Replace in update list
-            DocsToBeUpdated.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
+            DocsToBeUpdated.RemoveAll(c => c.DocumentKey.ToJson() == id);
             DocsToBeUpdated.Add(change);
 
             // Don't remove from insert — updates after insert are valid
@@ -43,14 +43,14 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
         public void AddDelete(ChangeStreamDocument<BsonDocument> change)
         {
-            var id = change.DocumentKey.GetValue("_id");
+            var id = change.DocumentKey.ToJson();
 
             // Remove from insert and update
-            DocsToBeInserted.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
-            DocsToBeUpdated.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
+            DocsToBeInserted.RemoveAll(c => c.DocumentKey.ToJson() == id);
+            DocsToBeUpdated.RemoveAll(c => c.DocumentKey.ToJson() == id);
 
             // Replace in delete list
-            DocsToBeDeleted.RemoveAll(c => c.DocumentKey.GetValue("_id") == id);
+            DocsToBeDeleted.RemoveAll(c => c.DocumentKey.ToJson() == id);
             DocsToBeDeleted.Add(change);
         }
     }

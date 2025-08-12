@@ -199,8 +199,6 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                         var document = change.FullDocument;
 
-                        Console.WriteLine(change.DocumentKey.ToJson());
-
                         changeStreamDocuments.Add(change);
 
                         // Save the latest token
@@ -219,7 +217,6 @@ namespace OnlineMongoMigrationProcessor.Processors
                             counter = 0;
                         }
                     }
-
                    
                     _log.AddVerboseMessage($"Processing RU partition {chunk.Id}, processed {batchCounter}");
                     await BulkProcessChangesAsync(chunk, targetCollection, changeStreamDocuments);
