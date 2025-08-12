@@ -147,6 +147,12 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 percent = Math.Round((double)count / targetCount * 100, 3);
             }
+            //mongorestore doesn't report on doc count sometimes. hence we need to calculate  based on targetCount percent
+            if (percent == 100 & processType == "MongoRestore")
+            {
+                chunk.RestoredSuccessDocCount = targetCount - (chunk.RestoredFailedDocCount + chunk.SkippedAsDuplicateCount);
+                jobList.Save();
+            }
 
             if (percent > 0 && targetCount>0)
             {

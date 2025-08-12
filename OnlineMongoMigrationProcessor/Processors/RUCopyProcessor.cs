@@ -25,9 +25,9 @@ namespace OnlineMongoMigrationProcessor.Processors
     {
 
         // RU-specific configuration
-        private const int MaxConcurrentPartitions = 1;
+        private const int MaxConcurrentPartitions = 20;
         private static readonly TimeSpan BatchDuration = TimeSpan.FromSeconds(60);
-        private List<ChangeStreamDocument<BsonDocument>> _changeStreamDocuments = new List<ChangeStreamDocument<BsonDocument>>();
+        private static readonly object _processingLock = new object();
 
         public RUCopyProcessor(Log log, JobList jobList, MigrationJob job, MongoClient sourceClient, MigrationSettings config)
            : base(log, jobList, job, sourceClient, config)
@@ -71,7 +71,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                     return TaskResult.Abort;
                 }
 
-                SemaphoreSlim semaphore = new SemaphoreSlim(20);
+                SemaphoreSlim semaphore = new SemaphoreSlim(MaxConcurrentPartitions);
                 List<Task<TaskResult>> tasks = new List<Task<TaskResult>>();
                 foreach (var chunk in chunksToProcess)
                 {
@@ -123,6 +123,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 var progressPercent = Math.Min(100, (double)totalProcessed/ Math.Max(mu.EstimatedDocCount,mu.ActualDocCount) * 100);
                 mu.DumpPercent = progressPercent;
                 mu.RestorePercent = progressPercent;
+                
                 _jobList?.Save();                
             } 
             
@@ -156,6 +157,8 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             int counter = 0;
 
+            _log.AddVerboseMessage("Processing RU partition: " + chunk.Id);
+
             try
             {
 
@@ -178,14 +181,14 @@ namespace OnlineMongoMigrationProcessor.Processors
                         { "ns", 1 },
                         { "documentKey", 1 }
                     })
-                };               
+                };
 
-
+                List<ChangeStreamDocument<BsonDocument>> changeStreamDocuments = new List<ChangeStreamDocument<BsonDocument>>();
                 // Create the change stream cursor
                 using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options, linkedCts.Token);
 
                 long currentLSN;
-
+                long batchCounter=0;
                 BsonDocument? resumeToken = null;
                 while (cursor.MoveNext(linkedCts.Token))
                 {
@@ -198,31 +201,45 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                         Console.WriteLine(change.DocumentKey.ToJson());
 
-                        _changeStreamDocuments.Add(change);
+                        changeStreamDocuments.Add(change);
 
                         // Save the latest token
                         resumeToken = change.ResumeToken;
-
+                        batchCounter++;
                         counter++;
                         // Check for cancellation
-                        if (linkedCts.IsCancellationRequested)
+                        if (manualToken.IsCancellationRequested)
                         {
                             return TaskResult.Canceled;
                         }
 
                         if (counter > _config.ChangeStreamMaxDocsInBatch)
                         {
-                            await BulkProcessChangesAsync(chunk, targetCollection);
+                            await BulkProcessChangesAsync(chunk, targetCollection, changeStreamDocuments);
+                            counter = 0;
                         }
                     }
 
-                    await BulkProcessChangesAsync(chunk, targetCollection);
+                   
+                    _log.AddVerboseMessage($"Processing RU partition {chunk.Id}, processed {batchCounter}");
+                    await BulkProcessChangesAsync(chunk, targetCollection, changeStreamDocuments);
 
                     if (resumeToken == null)
                         continue;
 
+                    if (batchCounter % 1000 == 0)
+                    {
+                        lock (_processingLock)
+                        {
+                            // Save the latest resume token to the chunk
+                            chunk.RUPartitionResumeToken = resumeToken.ToJson();
+                            _jobList?.Save();
+                        }
+                    }
+
                     try
                     {
+
                         currentLSN = MongoHelper.ExtractLSNFromResumeToken(resumeToken);
 
                         if (currentLSN >= chunk.RUStopLSN)
@@ -232,12 +249,22 @@ namespace OnlineMongoMigrationProcessor.Processors
                             return TaskResult.Success;
                         }
                     }
+                    catch (OperationCanceledException) when (!timeoutCts.IsCancellationRequested && manualToken.IsCancellationRequested)
+                    {
+                        return TaskResult.Canceled;
+                    }
                     catch (Exception ex)
                     {
                         _log.WriteLine($"Error processing chunk {chunk.Id}: {ex}", LogType.Error);
                         IncrementSkippedCounter(chunk);
                         continue;
-                    }
+                    }                    
+                }
+                lock (_processingLock)
+                {
+                    // Save the latest resume token to the chunk
+                    chunk.RUPartitionResumeToken = resumeToken.ToJson();
+                    _jobList?.Save();
                 }
 
             }
@@ -263,27 +290,35 @@ namespace OnlineMongoMigrationProcessor.Processors
             return TaskResult.Retry;
         }
 
-        private async Task BulkProcessChangesAsync(MigrationChunk chunk, IMongoCollection<BsonDocument> targetCollection)
+        private async Task BulkProcessChangesAsync(MigrationChunk chunk, IMongoCollection<BsonDocument> targetCollection, List<ChangeStreamDocument<BsonDocument>> changeStreamDocuments)
         {
-            if(targetCollection==null || _changeStreamDocuments.Count == 0)
+            if(targetCollection==null || changeStreamDocuments.Count == 0)
             {
                 // No changes to process
                 return;
             }
-            // Create the counter delegate implementation
-            CounterDelegate<MigrationChunk> counterDelegate = (t, counterType, operationType, count) => IncrementDocCounter(chunk, count);
-            await MongoHelper.ProcessInsertsAsync<MigrationChunk>(chunk, targetCollection, _changeStreamDocuments, counterDelegate, _log);
-            _changeStreamDocuments.Clear();
+
+            if (!_job.IsSimulatedRun)
+            {
+                // Create the counter delegate implementation
+                CounterDelegate<MigrationChunk> counterDelegate = (t, counterType, operationType, count) => IncrementDocCounter(chunk, count);
+                await MongoHelper.ProcessInsertsAsync<MigrationChunk>(chunk, targetCollection, changeStreamDocuments, counterDelegate, _log, $"Processing RU partition {chunk.Id} - ");
+            }
+            else
+                IncrementDocCounter(chunk, changeStreamDocuments.Count);
+
+            changeStreamDocuments.Clear();
         }
 
         private void IncrementSkippedCounter(MigrationChunk chunk, int incrementBy = 1)
-        {
-            chunk.SkippedAsDuplicateCount += incrementBy;
+        {            
+            chunk.SkippedAsDuplicateCount += incrementBy;            
         }
 
         private void IncrementDocCounter(MigrationChunk chunk, int incrementBy = 1)
-        {
+        {           
             chunk.DocCountInTarget += incrementBy;
+            chunk.RestoredSuccessDocCount += incrementBy;
         }
 
 
@@ -351,7 +386,13 @@ namespace OnlineMongoMigrationProcessor.Processors
                     _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} failed after multiple attempts.", LogType.Error);
                     StopProcessing();
                     return;
-                }                
+                }
+                else if (result == TaskResult.Canceled)
+                {
+                    _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} was cancelled.");
+                    StopProcessing();
+                    return;
+                }
             }
 
             await PostCopyChangeStreamProcessor(ctx, mu);

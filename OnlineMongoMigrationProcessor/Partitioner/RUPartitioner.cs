@@ -46,6 +46,8 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 int counter = 0;
                 foreach (var token in startTokens)
                 {
+                    _log.AddVerboseMessage($"Processing RU partition token #{counter+1}");
+
                     //for FFCF create a new resume token with the current timestamp
                     var currentToken = UpdateStartAtOperationTime(token, MongoHelper.ConvertToBsonTimestamp(DateTime.UtcNow)); // Set initial timestamp to 0
 
@@ -55,6 +57,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                     chunks.Add(chunk);
                     counter++;
                 }
+                _log.WriteLine($"Partitioning complete.");
                 return chunks;
             }
             catch (Exception ex)

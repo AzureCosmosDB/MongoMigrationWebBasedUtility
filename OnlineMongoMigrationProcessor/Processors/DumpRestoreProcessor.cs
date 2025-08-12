@@ -197,7 +197,9 @@ namespace OnlineMongoMigrationProcessor
                 var task = Task.Run(() => _processExecutor.Execute(_jobList, mu, mu.MigrationChunks[chunkIndex], chunkIndex, initialPercent, contributionFactor, docCount, $"{MongoToolsFolder}\\mongorestore.exe", args), _cts.Token);
                 task.Wait(_cts.Token);
                 bool result = task.Result;
+
                 
+
                 if (result)
                 {
                     bool skipFinalize = false;
@@ -223,6 +225,8 @@ namespace OnlineMongoMigrationProcessor
                             if (mu.MigrationChunks[chunkIndex].DocCountInTarget >= mu.MigrationChunks[chunkIndex].DumpQueryDocCount)
                             {
                                 _log.WriteLine($"Restore for {dbName}.{colName}-{chunkIndex} No documents missing, count in Target: {mu.MigrationChunks[chunkIndex].DocCountInTarget}");
+                                mu.MigrationChunks[chunkIndex].SkippedAsDuplicateCount = mu.MigrationChunks[chunkIndex].RestoredFailedDocCount;
+                                mu.MigrationChunks[chunkIndex].RestoredFailedDocCount = 0;
                             }
                             else
                             {
@@ -239,6 +243,9 @@ namespace OnlineMongoMigrationProcessor
                             skipFinalize = true;
                         }
                     }
+                    //mongorestore doesn't report on doc count sometimes. hence we need to calculate  based on targetCount percent
+                    mu.MigrationChunks[chunkIndex].RestoredSuccessDocCount = docCount - (mu.MigrationChunks[chunkIndex].RestoredFailedDocCount + mu.MigrationChunks[chunkIndex].SkippedAsDuplicateCount);
+                    _log.WriteLine($"{dbName}.{colName}-{chunkIndex} uploader processing completed");
 
                     if (!skipFinalize)
                     {

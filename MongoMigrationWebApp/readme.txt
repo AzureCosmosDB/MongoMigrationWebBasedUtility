@@ -1,3 +1,3 @@
-Version: 0.8.7.8
+Version: 0.9
 Instructions: https://github.com/AzureCosmosDB/MongoMigrationWebBasedUtility
 Purpose: An online and offline migration utility designed to migrate any MongoDB source to Azure Cosmos DB for Mongo vCore. It operates as an Azure Web App (or on-premises) and offers multiple methods for data migration. It can either use mongodump and mongorestore for data movement or employ the MongoDB driver to read data from the source and write it

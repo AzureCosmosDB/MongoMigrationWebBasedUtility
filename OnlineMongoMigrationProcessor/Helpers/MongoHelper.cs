@@ -728,7 +728,7 @@ namespace OnlineMongoMigrationProcessor
            Log log,
            string logPrefix = "Sync Back: ",
            int batchSize = 50)
-        {
+           {
             // Insert operations
             foreach (var batch in events.Chunk(batchSize))
             {

@@ -131,9 +131,16 @@ namespace OnlineMongoMigrationProcessor.Workers
                 }
                 else
                 {
-                    if (_job.SkipIndexes)
+                    if (_job.JobType == JobType.RUOptimizedCopy)
                     {
-                        _log.WriteLine("No indexes will be created.");
+                        _log.WriteLine("This migration job will not transfer the indexes to the target collections. Use the schema migration script at https://aka.ms/mongoruschemamigrationscript to create the indexes on the target collections.");
+                    }
+                    else
+                    {
+                        if (_job.SkipIndexes)
+                        {
+                            _log.WriteLine("No indexes will be created.");
+                        }
                     }
                 }
             }
@@ -302,8 +309,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                         }
                         
                         _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has {chunks!.Count} chunk(s)");                        
-                        unit.MigrationChunks = chunks!;
-                       
+                        unit.MigrationChunks = chunks!;                       
                         unit.ChangeStreamStartedOn = currrentTime;
 
                     }
