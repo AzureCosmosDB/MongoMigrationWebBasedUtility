@@ -10,7 +10,6 @@ namespace OnlineMongoMigrationProcessor
         BinData,
         String,
         Object,
-        UUID_Standard,
         Other
     }
 }
