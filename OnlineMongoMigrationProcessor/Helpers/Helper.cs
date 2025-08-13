@@ -244,7 +244,15 @@ namespace OnlineMongoMigrationProcessor
             //input can  be CSV or JSON format
 
             //desrialize  input into  List of CollectionInfo
-            var loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(input);
+            List<CollectionInfo>? loadedObject=null;
+            try
+            {
+                 loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(input);
+            }
+            catch
+            {
+                //do nothing
+            }
             if (loadedObject != null)
             {
                 if(jobType==JobType.RUOptimizedCopy)

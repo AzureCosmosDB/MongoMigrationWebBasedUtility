@@ -400,8 +400,20 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _log.WriteLine("No collections to migrate specified.", LogType.Error);
                 return;
             }
+
             //desrialize  input into  List of CollectionInfo
-            var loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(namespacesToMigrate);
+            List<CollectionInfo>? loadedObject = null;
+            try
+            {
+                if (!string.IsNullOrEmpty(namespacesToMigrate))
+                {
+                    loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(namespacesToMigrate)!;
+                }
+            }
+            catch
+            {
+                //do nothing
+            }
             if (loadedObject != null)
             {
                 foreach (var item in loadedObject)
