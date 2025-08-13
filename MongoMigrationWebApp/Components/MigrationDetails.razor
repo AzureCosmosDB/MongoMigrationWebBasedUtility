@@ -80,7 +80,7 @@
 
                 <div class="mb-3">
                     <label for="nameSpaces" class="form-label">Collections To Migrate</label>
-                    <textarea id="nameSpaces" disabled="@(!NewMode)" rows="4" placeholder="e.g. db1.col1,db1.col2,db2.col1,db2.col5  or CollectionInfo JSON format as described in readme)" class="form-control" @bind="namespaces"></textarea>
+                    <textarea id="nameSpaces" disabled="@(!NewMode)" rows="4" placeholder="e.g. db1.col1,db1.col2,db2.col1,db2.col5 or CollectionInfo JSON format as described in readme" class="form-control" @bind="namespaces"></textarea>
                 </div>
 
                 <div class="mb-3">
@@ -88,7 +88,18 @@
                         <input type="checkbox" id="isSimulatedRun" disabled="@(!NewMode)" @bind="isSimulatedRun" />
                         Simulation Mode (No Writes to Target)
                     </label>
-                </div>
+                </div>                             
+
+                @if(ShowWarning())
+                {
+                    <div class="alert alert-warning mt-2">
+                        <label for="overwrite" class="form-label" title="Enable simulated run where no actual writes will occur on the target database.">
+                        <input type="checkbox" id="overwrite" @bind="overwrite" />
+                            I agree to overwrite the target collections. This will remove all existing data in the target collections before migration begins.
+                        </label>
+                        Choose the <b>Append Mode</b> option if you want to keep existing data without overwriting it.
+                    </div>
+                }
 
                 @if (!string.IsNullOrEmpty(errorMessage))
                 {
@@ -99,6 +110,8 @@
                 <button type="button" class="btn btn-primary" @onclick="@HandleSubmit">Ok</button>
                 <button type="button" class="btn btn-secondary" @onclick="@Cancel">Cancel</button>
             </div>
+
+            
         </div>
     </div>
 </div>
@@ -135,16 +148,22 @@
     private string sourceConnectionString { get; set; } = string.Empty;
     private string targetConnectionString { get; set; } = string.Empty;
     private bool AllowMongoDump => Configuration.GetValue<bool>("AllowMongoDump");
-
+    private bool overwrite = false; // Flag to indicate if the target collections should be overwritten
     private void OnModeSelectionChanged(ChangeEventArgs e)
     {
     var val = e?.Value?.ToString() ?? string.Empty;
     isOnline = val == "Online";
     }
 
+    private bool ShowWarning()
+    {
+        // Show warning if the job is new, and append mode is not selected
+        return NewMode && !appendMode && !isSimulatedRun;
+    }
+
     private void OnSelectionChanged(ChangeEventArgs e)
     {
-    selectedOption = e?.Value?.ToString() ?? selectedOption;
+        selectedOption = e?.Value?.ToString() ?? selectedOption;
         jobType = selectedOption switch
         {
             "MongoDump and MongoRestore" => JobType.DumpAndRestore,
@@ -208,13 +227,19 @@
     }
     private async void HandleSubmit()
     {
+        if (ShowWarning() && !overwrite)
+        {
+            errorMessage = "Please check the overwrite option to proceed with migration.";
+            return;
+        }
 
         if (string.IsNullOrEmpty(name))
         {
             errorMessage = "Name can't be empty.";
             return;
         }
-    if (NewMode && CheckNameExists != null) // Ensure callback is provided
+
+        if (NewMode && CheckNameExists != null) // Ensure callback is provided
         {
             var nameExists = await CheckNameExists(name);
             if (nameExists)

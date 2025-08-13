@@ -31,7 +31,7 @@
 
                 <div class="mt-3">
                     <label for="nameSpaces" class="form-label">Collections To Add</label>
-                    <input id="nameSpaces" type="text" @bind="newCollection" placeholder="e.g. db1.col1,db1.col2" class="form-control" />
+                    <textarea id="nameSpaces" @bind="newCollection" rows="4" placeholder="e.g. db1.col1,db1.col2,db2.col1,db2.col5 or CollectionInfo JSON format as described in readme" class="form-control" />
                     <button class="btn btn-primary btn-sm mt-2" @onclick="AddCollection">Add</button>
                 </div>
 
