@@ -794,20 +794,63 @@ namespace OnlineMongoMigrationProcessor
             return queryString;
         }
 
-        public static bool CheckChangeStreamDocument(ChangeStreamDocument<BsonDocument> change, BsonDocument userFilter)
-        {            
-
-            // For insert/update/replace, check fullDocument
-            if (change.FullDocument == null) return false;
-
-            foreach (var element in userFilter.Elements)
+        public static bool CheckForUserFilterMatch(BsonDocument doc, BsonDocument filter)
+        {
+            foreach (var element in filter.Elements)
             {
-                if (!change.FullDocument.Contains(element.Name)) return false;
-                if (change.FullDocument[element.Name] != element.Value) return false;
+                if (element.Name == "$and")
+                {
+                    foreach (var cond in element.Value.AsBsonArray)
+                    {
+                        if (!CheckForUserFilterMatch(doc, cond.AsBsonDocument)) return false;
+                    }
+                }
+                else if (element.Name == "$or")
+                {
+                    bool any = false;
+                    foreach (var cond in element.Value.AsBsonArray)
+                    {
+                        if (CheckForUserFilterMatch(doc, cond.AsBsonDocument))
+                        {
+                            any = true;
+                            break;
+                        }
+                    }
+                    if (!any) return false;
+                }
+                else if (element.Value.IsBsonDocument)
+                {
+                    var opDoc = element.Value.AsBsonDocument;
+                    foreach (var op in opDoc.Elements)
+                    {
+                        switch (op.Name)
+                        {
+                            case "$eq":
+                                if (!doc.Contains(element.Name) || doc[element.Name] != op.Value) return false;
+                                break;
+                            case "$gte":
+                                if (!doc.Contains(element.Name) || doc[element.Name].CompareTo(op.Value) < 0) return false;
+                                break;
+                            case "$lte":
+                                if (!doc.Contains(element.Name) || doc[element.Name].CompareTo(op.Value) > 0) return false;
+                                break;
+                            case "$in":
+                                if (!doc.Contains(element.Name) || !op.Value.AsBsonArray.Contains(doc[element.Name])) return false;
+                                break;
+                            default:
+                                throw new NotSupportedException($"Operator {op.Name} is not supported yet.");
+                        }
+                    }
+                }
+                else
+                {
+                    if (!doc.Contains(element.Name) || doc[element.Name] != element.Value) return false;
+                }
             }
+
             return true;
-           
         }
+
 
         public static string GenerateQueryString(BsonDocument? userFilterDoc)
         {
