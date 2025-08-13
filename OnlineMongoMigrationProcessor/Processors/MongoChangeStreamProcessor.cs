@@ -737,7 +737,7 @@ namespace OnlineMongoMigrationProcessor
                 if (change.OperationType != ChangeStreamOperationType.Delete)
                 {
                     if (userFilterDoc.Elements.Count() > 0
-                        && !MongoHelper.CheckForUserFilterMatch(change, userFilterDoc))
+                        && !MongoHelper.CheckForUserFilterMatch(change.FullDocument, userFilterDoc))
                         return true;
                 }
 
