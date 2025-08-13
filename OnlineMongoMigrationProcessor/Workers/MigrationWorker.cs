@@ -247,8 +247,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                     if (_job.IsOnline && unit.ResetChangeStream)
                     {
                         //if  reset CS needto get the latest CS resume token synchronously
-                        _log.WriteLine($"Resetting Change Stream for {unit.DatabaseName}.{unit.CollectionName}. This can take upto 5 minutes");
-                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient, _jobList, _job, unit);
+                        _log.WriteLine($"Resetting Change Stream for {unit.DatabaseName}.{unit.CollectionName}.");
+                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient, _jobList, _job, unit,15);
                     }
 
                     if (unit.MigrationChunks == null || unit.MigrationChunks.Count == 0)
@@ -304,7 +304,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                             //run this job async to detect change stream resume token, if no chnage stream is detected, it will not be set and cancel in 5 minutes
                             _ = Task.Run(async () =>
                             {
-                                await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient!, _jobList, _job, unit);
+                                await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient!, _jobList, _job, unit,300);
                             });
 
                         }                        
@@ -392,105 +392,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             return TaskResult.Success;
         }
 
-        private void PopulateJobCollections(string namespacesToMigrate)
-        {
-
-            if(string.IsNullOrWhiteSpace(namespacesToMigrate))
-            {
-                _log.WriteLine("No collections to migrate specified.", LogType.Error);
-                return;
-            }
-
-            //desrialize  input into  List of CollectionInfo
-            List<CollectionInfo>? loadedObject = null;
-            try
-            {
-                if (!string.IsNullOrEmpty(namespacesToMigrate))
-                {
-                    loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(namespacesToMigrate)!;
-                }
-            }
-            catch
-            {
-                //do nothing
-            }
-            if (loadedObject != null)
-            {
-                foreach (var item in loadedObject)
-                {
-                    var unitsToAdd = PopulateJobCollectionsFromCSV($"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}");
-                    if (unitsToAdd.Count > 0)
-                    {
-                       
-                        foreach (var mu in unitsToAdd)
-                        {
-                            mu.UserFilter=item.Filter;
-                            AddMigrationUnit(mu);
-                        }
-                    }
-                }
-                return;
-            }
-            else
-            {
-                var unitsToAdd = PopulateJobCollectionsFromCSV(namespacesToMigrate);
-                if (unitsToAdd.Count > 0)
-                {
-                    foreach (var mu in unitsToAdd)
-                    {
-                        AddMigrationUnit(mu);
-                    }
-                    _jobList.Save();
-                }
-            }
-        }
-
-        private void AddMigrationUnit(MigrationUnit mu)
-        {
- 
-            if (_job == null)
-            {
-                return;
-            }
-            if (_job?.MigrationUnits == null)
-            {
-                _job!.MigrationUnits = new List<MigrationUnit>();
-            }
-
-            // Check if the MigrationUnit already exists
-            if (_job.MigrationUnits.Any(existingMu => existingMu.DatabaseName == mu.DatabaseName && existingMu.CollectionName == mu.CollectionName))
-            {                
-                return;
-            }
-            _job.MigrationUnits.Add(mu);
-        }   
-
-        private List<MigrationUnit> PopulateJobCollectionsFromCSV(string namespacesToMigrate)
-        {
-            List<MigrationUnit> unitsToAdd = new List<MigrationUnit>();
-            
-            string[] collectionsInput = namespacesToMigrate
-                .Split(',')
-                .Select(mu => mu.Trim())
-                .ToArray();
-         
-           
-            foreach (var fullName in collectionsInput)
-            {
-                if (_migrationCancelled) return unitsToAdd;
-
-                int firstDotIndex = fullName.IndexOf('.');
-                if (firstDotIndex <= 0 || firstDotIndex == fullName.Length - 1) continue;
-
-                string dbName = fullName.Substring(0, firstDotIndex).Trim();
-                string colName = fullName.Substring(firstDotIndex + 1).Trim();
-
-                var migrationUnit = new MigrationUnit(dbName, colName, new List<MigrationChunk>());
-                unitsToAdd.Add(migrationUnit);                   
-            }
-            
-            return unitsToAdd;
-        }
+        
 
         public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, JobType jobtype, bool trackChangeStreams)
         {
@@ -526,9 +428,19 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 _job.MigrationUnits = new List<MigrationUnit>();
             }
-            PopulateJobCollections(namespacesToMigrate);
 
-			if (_job.JobType==JobType.DumpAndRestore)
+            var unitsToAdd= Helper.PopulateJobCollections(namespacesToMigrate);
+            if (unitsToAdd.Count > 0)
+            {
+                foreach (var mu in unitsToAdd)
+                {
+                    Helper.AddMigrationUnit(mu, job);
+                }
+                _jobList.Save();
+            }
+
+
+            if (_job.JobType==JobType.DumpAndRestore)
 			{
                 _toolsLaunchFolder = await Helper.EnsureMongoToolsAvailableAsync(_log, _toolsDestinationFolder, _config!);
 				if (string.IsNullOrEmpty(_toolsLaunchFolder))

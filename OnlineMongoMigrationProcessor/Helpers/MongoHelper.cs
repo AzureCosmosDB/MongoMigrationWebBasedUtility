@@ -374,7 +374,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-    public static Task SetChangeStreamResumeTokenAsync(Log log,MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit)
+    public static Task SetChangeStreamResumeTokenAsync(Log log,MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, int seconds)
         {
             int retryCount = 0;
             bool isSucessful = false;
@@ -434,7 +434,7 @@ namespace OnlineMongoMigrationProcessor
                     if(!string.IsNullOrEmpty(job.SourceServerVersion) && job.SourceServerVersion.StartsWith("3") )
                         TailOplogAsync(client, unit.DatabaseName, unit.CollectionName, unit, CancellationToken.None).Wait();
                     else                       
-                        WatchChangeStreamUntilChangeAsync(log, client, jobList, job, unit, collection, options, resetCS).Wait();
+                        WatchChangeStreamUntilChangeAsync(log, client, jobList, job, unit, collection, options, resetCS, seconds).Wait();
                     //end of new way to get resume token
 
                     isSucessful = true;
@@ -459,7 +459,7 @@ namespace OnlineMongoMigrationProcessor
             return Task.CompletedTask;
         }
 
-        private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS)
+        private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS, int seconds)
         {
             var pipeline = new BsonDocument[] { };
             if (job.JobType == JobType.RUOptimizedCopy)
@@ -479,7 +479,7 @@ namespace OnlineMongoMigrationProcessor
                     };
             }
 
-            var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
             using var cursor = await collection.WatchAsync<ChangeStreamDocument<BsonDocument>>(pipeline, options, cts.Token);
             {
                 try
@@ -831,8 +831,14 @@ namespace OnlineMongoMigrationProcessor
                             case "$gte":
                                 if (!doc.Contains(element.Name) || doc[element.Name].CompareTo(op.Value) < 0) return false;
                                 break;
+                            case "$gt":
+                                if (!doc.Contains(element.Name) || doc[element.Name].CompareTo(op.Value) <= 0) return false;
+                                break;
                             case "$lte":
                                 if (!doc.Contains(element.Name) || doc[element.Name].CompareTo(op.Value) > 0) return false;
+                                break;
+                            case "$lt":
+                                if (!doc.Contains(element.Name) || doc[element.Name].CompareTo(op.Value) >= 0) return false;
                                 break;
                             case "$in":
                                 if (!doc.Contains(element.Name) || !op.Value.AsBsonArray.Contains(doc[element.Name])) return false;
@@ -936,7 +942,7 @@ namespace OnlineMongoMigrationProcessor
            List<ChangeStreamDocument<BsonDocument>> events,
            CounterDelegate<TMigration> incrementCounter,
            Log log,
-           string logPrefix = "Sync Back: ",
+           string logPrefix,
            int batchSize = 50)
            {
             // Insert operations
@@ -1008,7 +1014,7 @@ namespace OnlineMongoMigrationProcessor
             List<ChangeStreamDocument<BsonDocument>> events,
             CounterDelegate<TMigration> incrementCounter,
             Log log,
-            string logPrefix = "Sync Back: ",
+            string logPrefix,
             int batchSize = 50)
         {
             // Update operations
@@ -1119,8 +1125,8 @@ namespace OnlineMongoMigrationProcessor
            List<ChangeStreamDocument<BsonDocument>> events,
            CounterDelegate<TMigration> incrementCounter,
            Log log,
-           string logPrefix = "Sync Back: ",
-          int batchSize = 50)
+           string logPrefix,
+           int batchSize = 50)
         {
             // Delete operations
             foreach (var batch in events.Chunk(batchSize))

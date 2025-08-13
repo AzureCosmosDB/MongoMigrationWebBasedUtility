@@ -8,6 +8,7 @@ using System.IO.Compression;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
+using System.Xml.Linq;
 
 #pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
@@ -229,6 +230,103 @@ namespace OnlineMongoMigrationProcessor
                 return mu.ActualDocCount;
             else
                return Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+        }
+
+
+
+        public static List<MigrationUnit> PopulateJobCollections(string namespacesToMigrate)
+        {
+            List<MigrationUnit> unitsToAdd = new List<MigrationUnit>();
+            if (string.IsNullOrWhiteSpace(namespacesToMigrate))
+            {
+                return new List<MigrationUnit>();
+            }
+
+            //desrialize  input into  List of CollectionInfo
+            List<CollectionInfo>? loadedObject = null;
+            try
+            {
+                if (!string.IsNullOrEmpty(namespacesToMigrate))
+                {
+                    loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(namespacesToMigrate)!;
+                }
+            }
+            catch
+            {
+                //do nothing
+            }
+            if (loadedObject != null)
+            {
+                foreach (var item in loadedObject)
+                {
+                    var tmpList = PopulateJobCollectionsFromCSV($"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}");
+                    if (tmpList.Count > 0)
+                    {
+                        foreach (var mu in tmpList)
+                        {
+                            // Ensure no duplicates based on DatabaseName.CollectionName
+                            if (!unitsToAdd.Any(x => x.DatabaseName == mu.DatabaseName && x.CollectionName == mu.CollectionName))
+                            {
+                                mu.UserFilter = item.Filter;
+                                unitsToAdd.Add(mu);
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                unitsToAdd = PopulateJobCollectionsFromCSV(namespacesToMigrate);                
+            }
+
+           
+
+            return unitsToAdd;
+        }
+
+        public static void AddMigrationUnit(MigrationUnit mu, MigrationJob job)
+        {
+            if (job == null)
+            {
+                return;
+            }
+            if (job?.MigrationUnits == null)
+            {
+                job!.MigrationUnits = new List<MigrationUnit>();
+            }
+
+            // Check if the MigrationUnit already exists
+            if (job.MigrationUnits.Any(existingMu => existingMu.DatabaseName == mu.DatabaseName && existingMu.CollectionName == mu.CollectionName))
+            {
+                return;
+            }
+            job.MigrationUnits.Add(mu);
+        }
+
+        private static List<MigrationUnit> PopulateJobCollectionsFromCSV(string namespacesToMigrate)
+        {
+            List<MigrationUnit> unitsToAdd = new List<MigrationUnit>();
+
+            string[] collectionsInput = namespacesToMigrate
+                .Split(',')
+                .Select(mu => mu.Trim())
+                .ToArray();
+
+
+            foreach (var fullName in collectionsInput)
+            {
+
+                int firstDotIndex = fullName.IndexOf('.');
+                if (firstDotIndex <= 0 || firstDotIndex == fullName.Length - 1) continue;
+
+                string dbName = fullName.Substring(0, firstDotIndex).Trim();
+                string colName = fullName.Substring(firstDotIndex + 1).Trim();
+
+                var migrationUnit = new MigrationUnit(dbName, colName, new List<MigrationChunk>());
+                unitsToAdd.Add(migrationUnit);
+            }
+
+            return unitsToAdd;
         }
 
         public static Tuple<bool, string,string> ValidateNamespaceFormat(string input, JobType jobType)

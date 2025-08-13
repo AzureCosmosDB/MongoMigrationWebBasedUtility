@@ -97,34 +97,10 @@
                 return;
             }
 
-            // Get list of collections
-            string[] collectionsInput = retValue.Item2
-                .Split(',')
-                .Select(mu => mu.Trim())
-                .ToArray();
-
-            // Process collections one by one
-            foreach (var fullName in collectionsInput)
+            var newunits = Helper.PopulateJobCollections(newCollection);            
+            foreach (var mu in newunits)
             {
-                // string[] parts = fullName.Split('.');
-                // if (parts.Length != 2) continue;
-
-                // string dbName = parts[0].Trim();
-                // string colName = parts[1].Trim();
-
-                int firstDotIndex = fullName.IndexOf('.');
-                if (firstDotIndex <= 0 || firstDotIndex == fullName.Length - 1) continue;
-
-                string dbName = fullName.Substring(0, firstDotIndex).Trim();
-                string colName = fullName.Substring(firstDotIndex + 1).Trim();
-
-                var mu = new MigrationUnit(dbName, colName, new List<MigrationChunk>());
-
-                // Ensure no duplicates based on DatabaseName.CollectionName
-                if (!updatedMigrationUnits.Any(x => x.DatabaseName == dbName && x.CollectionName == colName))
-                {
-                    updatedMigrationUnits.Add(mu);
-                }
+                updatedMigrationUnits.Add(mu);
             }
 
             newCollection = string.Empty;

@@ -57,10 +57,22 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
                     DateTime currTime = DateTime.UtcNow;
 
-                    // Get N random documents asynchronously with cancellationToken
-                    var randomDocsCursor = await sourceCollection.Aggregate()
+
+                    var userFilterDoc = string.IsNullOrWhiteSpace(mu.UserFilter)
+                        ? new BsonDocument()
+                        : BsonDocument.Parse(mu.UserFilter);
+
+                    var agg = sourceCollection.Aggregate();
+
+                    if (userFilterDoc.ElementCount > 0)
+                    {
+                        agg = agg.Match(userFilterDoc);
+                    }
+
+                    var randomDocsCursor = await agg
                         .Sample(config.CompareSampleSize)
                         .ToCursorAsync(cancellationToken);
+
 
                     var randomDocs = await randomDocsCursor.ToListAsync(cancellationToken);
 
