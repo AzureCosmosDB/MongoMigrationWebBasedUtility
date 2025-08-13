@@ -57,7 +57,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
                 {
-                    return TaskResult.Abort;
+                    return TaskResult.Canceled;
                 }
 
                 var chunksToProcess = mu.MigrationChunks
@@ -70,7 +70,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
                 {
-                    return TaskResult.Abort;
+                    return TaskResult.Canceled;
                 }
 
                 SemaphoreSlim semaphore = new SemaphoreSlim(MaxConcurrentPartitions);
@@ -110,7 +110,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
                 {
-                    return TaskResult.Abort;
+                    return TaskResult.Canceled;
                 }
 
                 _cts.Token.ThrowIfCancellationRequested();
