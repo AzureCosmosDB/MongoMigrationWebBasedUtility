@@ -1,0 +1,17 @@
+[
+  {
+    "CollectionName": "Customers",
+    "DatabaseName": "SalesDB",
+    "Filter": "{ \"status\": \"active\"}"
+  },
+  {
+    "CollectionName": "Orders",
+    "DatabaseName": "SalesDB",
+    "Filter": "{ \"orderDate\": { \"$gte\": { \"$date\": \"2024-01-01T00:00:00Z\" } } }"
+  },
+  {
+    "CollectionName": "Products",
+    "DatabaseName": "InventoryDB",
+    "Filter": null
+  }
+]

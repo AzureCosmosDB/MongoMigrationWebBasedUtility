@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using OnlineMongoMigrationProcessor;
+using OnlineMongoMigrationProcessor.Models;
 using OnlineMongoMigrationProcessor.Workers;
 
 namespace MongoMigrationWebApp.Service

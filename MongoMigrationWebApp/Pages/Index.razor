@@ -57,7 +57,7 @@
                         <td>@migration.Name</td>
                         <td>@GetToolName(migration.JobType)</td>
                         <td>@migration.StartedOn</td>
-                        <td class="tooltip-text" title="@migration.NameSpaces">@migration.SourceEndpoint<br /> to <br /> @migration.TargetEndpoint</td>
+                        <td class="tooltip-text" title="@GetTootTip(migration)">@migration.SourceEndpoint<br /> to <br /> @migration.TargetEndpoint</td>
                         <td>@migration.IsOnline</td>
                         <td>@migration.IsCompleted</td>
                         <td>
@@ -119,6 +119,14 @@
     private MigrationJob? _selectedMigrationJob;
     private List<MigrationJob>? migrationJobs;
     private bool _loadingComplete;
+
+    private string GetTootTip(MigrationJob migrationJob)
+    {
+        return string.Join(",",
+            migrationJob?.MigrationUnits?
+                .Select(mu => $"{mu.DatabaseName}.{mu.CollectionName}") ?? Enumerable.Empty<string>());
+    }
+
 
     private string GetToolName(OnlineMongoMigrationProcessor.Models.JobType jobType)
     {

@@ -92,8 +92,9 @@ namespace OnlineMongoMigrationProcessor
 
                 _log.WriteLine($"{dbName}.{colName}-Chunk [{chunkIndex}] generating query");
 
-                string query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType);
-                docCount = MongoHelper.GetDocumentCount(collection, gte, lt, mu.MigrationChunks[chunkIndex].DataType);
+                BsonDocument? userFilterDoc = BsonDocument.Parse(mu.UserFilter ?? "{}");
+                  string query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc);
+                docCount = MongoHelper.GetDocumentCount(collection, gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc);
                 mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
                 _log.WriteLine($"{dbName}.{colName}- Chunk [{chunkIndex}] Count is  {docCount}");
                 args = $"{args} --query=\"{query}\"";
@@ -219,7 +220,7 @@ namespace OnlineMongoMigrationProcessor
                             var lt = bounds.lt;
 
                             // get count in target collection
-                            mu.MigrationChunks[chunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(targetCollection, gte, lt, mu.MigrationChunks[chunkIndex].DataType);
+                            mu.MigrationChunks[chunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(targetCollection, gte, lt, mu.MigrationChunks[chunkIndex].DataType, MongoHelper.ConvertUserFilterToBSONDocument(mu.UserFilter!));
 
                             // checking if source and target doc counts are same or more
                             if (mu.MigrationChunks[chunkIndex].DocCountInTarget >= mu.MigrationChunks[chunkIndex].DumpQueryDocCount)

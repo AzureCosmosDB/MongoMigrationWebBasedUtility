@@ -27,38 +27,15 @@ namespace OnlineMongoMigrationProcessor
              int count = 1);
 
 
-        public static long GetActualDocumentCount(IMongoCollection<BsonDocument> collection, MigrationUnit mu)
+        public static long GetActualDocumentCount(IMongoCollection<BsonDocument> collection, MigrationUnit mu )
         {
-            return collection.CountDocuments(Builders<BsonDocument>.Filter.Empty);
+            FilterDefinition<BsonDocument>? userFilter = BsonDocument.Parse(mu.UserFilter ?? "{}");
+            var filter = userFilter ?? Builders<BsonDocument>.Filter.Empty;
+            return collection.CountDocuments(filter);
         }
 
-        //public static long ExtractLSNFromResumeToken(BsonDocument bsonDoc)
-        //{
-        //    // Step 1: Get the Base64 string from the BSON binary field
-        //    string base64Str = Convert.ToBase64String(bsonDoc["_data"].AsBsonBinaryData.Bytes);
 
-        //    // Step 2: Base64 decode into ASCII JSON string
-        //    byte[] bytes = Convert.FromBase64String(base64Str);
-        //    string asciiJson = Encoding.ASCII.GetString(bytes);
 
-        //    // Step 3: Parse the decoded JSON
-        //    using JsonDocument jsonDoc = JsonDocument.Parse(asciiJson);
-
-        //    // Step 4: Extract the number string from Continuation[0].State.value
-        //    string? rawValue = jsonDoc.RootElement
-        //        .GetProperty("Continuation")[0]
-        //        .GetProperty("State")
-        //        .GetProperty("value")
-        //        .GetString();
-
-        //    // Step 5: Trim extra quotes and parse to int
-        //    if (rawValue == null)
-        //        throw new InvalidOperationException("Resume token value is missing or null.");
-
-        //    rawValue = rawValue.Trim('"');
-        //    return long.Parse(rawValue);
-
-        //}
         public static (long Lsn, string Rid, string Min, string Max) ExtractValuesFromResumeToken(BsonDocument bsonDoc)
         {
             if (bsonDoc == null || !bsonDoc.Contains("_data"))
@@ -107,58 +84,132 @@ namespace OnlineMongoMigrationProcessor
 
             return (lsn, rid, min, max);
         }
-        public static FilterDefinition<BsonDocument> GenerateQueryFilter(BsonValue? gte, BsonValue? lte, DataType dataType)
+        //public static FilterDefinition<BsonDocument> GenerateQueryFilter(BsonValue? gte, BsonValue? lte, DataType dataType)
+        //{
+        //    var filterBuilder = Builders<BsonDocument>.Filter;
+
+        //    // Initialize an empty filter
+        //    FilterDefinition<BsonDocument> filter = FilterDefinition<BsonDocument>.Empty;
+
+        //    // Create the $type filter
+        //    var typeFilter = filterBuilder.Eq("_id", new BsonDocument("$type", DataTypeToBsonType(dataType)));
+
+        //    // Add conditions based on gte and lt values
+        //    if (!(gte == null || gte.IsBsonNull) && !(lte == null || lte.IsBsonNull) && (gte is not BsonMaxKey && lte is not BsonMaxKey))
+        //    {
+        //        filter = filterBuilder.And(
+        //            typeFilter,
+        //            BuildFilterGte("_id", gte, dataType),
+        //            BuildFilterLt("_id", lte, dataType)
+        //        );
+        //    }
+        //    else if (!(gte == null || gte.IsBsonNull) && gte is not BsonMaxKey)
+        //    {
+        //        filter = filterBuilder.And(typeFilter, BuildFilterGte("_id", gte, dataType));
+        //    }
+        //    else if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
+        //    {
+        //        filter = filterBuilder.And(typeFilter, BuildFilterLt("_id", lte, dataType));
+        //    }
+        //    else
+        //    {
+        //        filter = typeFilter;
+        //    }
+        //    return filter;
+        //}
+
+        public static FilterDefinition<BsonDocument> GenerateQueryFilter(
+            BsonValue? gte,
+            BsonValue? lte,
+            DataType dataType,
+            BsonDocument userFilterDoc ) 
         {
+
+            var userFilter = new BsonDocumentFilterDefinition<BsonDocument>(userFilterDoc);
+
             var filterBuilder = Builders<BsonDocument>.Filter;
 
-            // Initialize an empty filter
-            FilterDefinition<BsonDocument> filter = FilterDefinition<BsonDocument>.Empty;
-
-            // Create the $type filter
             var typeFilter = filterBuilder.Eq("_id", new BsonDocument("$type", DataTypeToBsonType(dataType)));
 
-            // Add conditions based on gte and lt values
-            if (!(gte == null || gte.IsBsonNull) && !(lte == null || lte.IsBsonNull) && (gte is not BsonMaxKey && lte is not BsonMaxKey))
+            bool hasGte = gte != null && !gte.IsBsonNull && !(gte is BsonMaxKey);
+            bool hasLte = lte != null && !lte.IsBsonNull && !(lte is BsonMaxKey);
+
+            FilterDefinition<BsonDocument> idFilter;
+
+            if (hasGte && hasLte)
             {
-                filter = filterBuilder.And(
+                idFilter = filterBuilder.And(
                     typeFilter,
-                    BuildFilterGte("_id", gte, dataType),
-                    BuildFilterLt("_id", lte, dataType)
+                    BuildFilterGte("_id", gte!, dataType),
+                    BuildFilterLt("_id", lte!, dataType)
                 );
             }
-            else if (!(gte == null || gte.IsBsonNull) && gte is not BsonMaxKey)
+            else if (hasGte)
             {
-                filter = filterBuilder.And(typeFilter, BuildFilterGte("_id", gte, dataType));
+                idFilter = filterBuilder.And(
+                    typeFilter,
+                    BuildFilterGte("_id", gte!, dataType)
+                );
             }
-            else if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
+            else if (hasLte)
             {
-                filter = filterBuilder.And(typeFilter, BuildFilterLt("_id", lte, dataType));
+                idFilter = filterBuilder.And(
+                    typeFilter,
+                    BuildFilterLt("_id", lte!, dataType)
+                );
             }
             else
             {
-                filter = typeFilter;
+                idFilter = typeFilter;
             }
-            return filter;
+
+            if (userFilter != null)
+            {
+                // Combine userFilter with idFilter using AND
+                return filterBuilder.And(userFilter, idFilter);
+            }
+
+            return idFilter;
         }
 
-        public static long GetDocumentCount(IMongoCollection<BsonDocument> collection, BsonValue? gte, BsonValue? lte, DataType dataType)
+        public static long GetDocumentCount(IMongoCollection<BsonDocument> collection, BsonValue? gte, BsonValue? lte, DataType dataType, BsonDocument userFilterDoc)
         {
-            FilterDefinition<BsonDocument> filter = GenerateQueryFilter(gte, lte, dataType);
+            FilterDefinition<BsonDocument> filter = GenerateQueryFilter(gte, lte, dataType, userFilterDoc);
 
             // Execute the query and return the count
             return collection.CountDocuments(filter);
         }
 
-        public static long GetDocumentCount(IMongoCollection<BsonDocument> collection, FilterDefinition<BsonDocument> filter)
+        public static long GetDocumentCount(
+            IMongoCollection<BsonDocument> collection,
+            FilterDefinition<BsonDocument> filter,
+            BsonDocument userFilterDoc)
         {
+            var filterBuilder = Builders<BsonDocument>.Filter;
+
+            FilterDefinition<BsonDocument> combinedFilter;
+
+            if (userFilterDoc != null && userFilterDoc.ElementCount > 0)
+            {
+                // Convert userFilterDoc (BsonDocument) to FilterDefinition
+                var userFilter = new BsonDocumentFilterDefinition<BsonDocument>(userFilterDoc);
+
+                // Combine filters with AND
+                combinedFilter = filterBuilder.And(filter, userFilter);
+            }
+            else
+            {
+                combinedFilter = filter;
+            }
+
             var countOptions = new CountOptions
             {
                 MaxTime = TimeSpan.FromMinutes(120) // Set the timeout
             };
 
-            // Execute the query and return the count with the specified timeout
-            return collection.CountDocuments(filter, countOptions);
+            return collection.CountDocuments(combinedFilter, countOptions);
         }
+
 
         public static bool GetPendingOplogCountAsync(Log log, MongoClient client, long secondsSinceEpoch, string collectionNameNamespace)
         {
@@ -706,57 +757,87 @@ namespace OnlineMongoMigrationProcessor
             };
         }
 
-        public static string GenerateQueryString(BsonValue? gte, BsonValue? lte, DataType dataType)
-        {
-            // Initialize the query string
-            string queryString = "{ \\\"_id\\\": { ";
+        //public static string GenerateQueryString(BsonValue? gte, BsonValue? lte, DataType dataType)
+        //{
+        //    // Initialize the query string
+        //    string queryString = "{ \\\"_id\\\": { ";
 
-            // Track the conditions added to ensure correct formatting
-            var conditions = new List<string>();
+        //    // Track the conditions added to ensure correct formatting
+        //    var conditions = new List<string>();
 
-            conditions.Add($"\\\"$type\\\": \\\"{DataTypeToBsonType(dataType)}\\\"");
+        //    conditions.Add($"\\\"$type\\\": \\\"{DataTypeToBsonType(dataType)}\\\"");
 
-            // Add $gte condition if present
-            if (!(gte == null || gte.IsBsonNull) && gte is not BsonMaxKey)
+        //    // Add $gte condition if present
+        //    if (!(gte == null || gte.IsBsonNull) && gte is not BsonMaxKey)
+        //    {
+        //        conditions.Add($"\\\"$gte\\\": {BsonValueToString(gte, dataType)}");
+        //    }
+
+        //    // Add $lte condition if present
+        //    if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
+        //    {
+        //        conditions.Add($"\\\"$lt\\\": {BsonValueToString(lte, dataType)}");
+        //    }
+
+        //    // Combine the conditions with a comma
+        //    queryString += string.Join(", ", conditions);
+
+        //    // Close the query string
+        //    queryString += " } }";
+
+        //    return queryString;
+        //}
+
+        public static string GenerateQueryString(BsonValue? gte, BsonValue? lte, DataType dataType, BsonDocument userFilterDoc) 
+        {            
+
+            // Build the _id condition
+            var idCondition = new BsonDocument
             {
-                conditions.Add($"\\\"$gte\\\": {BsonValueToString(gte, dataType)}");
-            }
-
-            // Add $lte condition if present
-            if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
-            {
-                conditions.Add($"\\\"$lt\\\": {BsonValueToString(lte, dataType)}");
-            }
-
-            // Combine the conditions with a comma
-            queryString += string.Join(", ", conditions);
-
-            // Close the query string
-            queryString += " } }";
-
-            return queryString;
-        }
-
-        private static string BsonValueToString(BsonValue? value, DataType dataType)
-        {
-            if (value == null || value.IsBsonNull) return string.Empty;
-
-            if (value is BsonMaxKey)
-                return "{ \\\"$maxKey\\\": 1 }"; // Return a $maxKey representation
-
-            return dataType switch
-            {
-                DataType.ObjectId => $"{{\\\"$oid\\\":\\\"{value.AsObjectId}\\\"}}",
-                DataType.Int => value.AsInt32.ToString(),
-                DataType.Int64 => value.AsInt64.ToString(),
-                DataType.String => $"\\\"{value.AsString}\\\"",
-                DataType.Decimal128 => $"{{\\\"$numberDecimal\\\":\\\"{value.AsDecimal128}\\\"}}",
-                DataType.Date => $"{{\\\"$date\\\":\\\"{((BsonDateTime)value).ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}\\\"}}",
-                DataType.Object => value.AsBsonDocument.ToString(),
-                DataType.BinData => $"{{\\\"$binary\\\":{{\\\"base64\\\":\\\"{Convert.ToBase64String(value.AsBsonBinaryData.Bytes)}\\\",\\\"subType\\\":\\\"{value.AsBsonBinaryData.SubType:x2}\\\"}}}}",
-                _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
+                { "$type", DataTypeToBsonType(dataType) }
             };
+
+            if (!(gte == null || gte.IsBsonNull) && gte is not BsonMaxKey)
+                idCondition["$gte"] = gte;
+
+            if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
+                idCondition["$lt"] = lte;
+
+            // Merge into final filter
+            userFilterDoc["_id"] = idCondition;
+
+            return userFilterDoc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.Shell});
         }
+
+        public static BsonDocument ConvertUserFilterToBSONDocument(string userFilter)
+        {
+            // Start with user filter or an empty JSON object
+            return string.IsNullOrWhiteSpace(userFilter)
+                ? new BsonDocument()
+                : MongoDB.Bson.Serialization.BsonSerializer.Deserialize<BsonDocument>(userFilter);
+             
+        }
+
+        //private static string BsonValueToString(BsonValue? value, DataType dataType)
+        //{
+        //    if (value == null || value.IsBsonNull) return string.Empty;
+
+        //    if (value is BsonMaxKey)
+        //        return "{ \\\"$maxKey\\\": 1 }"; // Return a $maxKey representation
+
+        //    return dataType switch
+        //    {
+        //        DataType.ObjectId => $"{{\\\"$oid\\\":\\\"{value.AsObjectId}\\\"}}",
+        //        DataType.Int => value.AsInt32.ToString(),
+        //        DataType.Int64 => value.AsInt64.ToString(),
+        //        DataType.String => $"\\\"{value.AsString}\\\"",
+        //        DataType.Decimal128 => $"{{\\\"$numberDecimal\\\":\\\"{value.AsDecimal128}\\\"}}",
+        //        DataType.Date => $"{{\\\"$date\\\":\\\"{((BsonDateTime)value).ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}\\\"}}",
+        //        DataType.Object => value.AsBsonDocument.ToString(),
+        //        DataType.BinData => $"{{\\\"$binary\\\":{{\\\"base64\\\":\\\"{Convert.ToBase64String(value.AsBsonBinaryData.Bytes)}\\\",\\\"subType\\\":\\\"{value.AsBsonBinaryData.SubType:x2}\\\"}}}}",
+        //        _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
+        //    };
+        //}
 
         public static DateTime BsonTimestampToUtcDateTime(BsonTimestamp bsonTimestamp)
         {

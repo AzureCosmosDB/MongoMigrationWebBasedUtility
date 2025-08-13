@@ -1,6 +1,7 @@
 ﻿using MongoDB.Bson;
 using MongoDB.Driver;
 using OnlineMongoMigrationProcessor.Helpers;
+using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections;
 using System.Collections.Concurrent;
@@ -9,12 +10,12 @@ using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Metadata;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
 using static OnlineMongoMigrationProcessor.MongoHelper;
-using OnlineMongoMigrationProcessor.Models;
 
 
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
@@ -458,10 +459,10 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                var pipeline = new BsonDocument[] { };
-                 if (_job.JobType == JobType.RUOptimizedCopy)
+                List<BsonDocument> pipeline;
+                if (_job.JobType == JobType.RUOptimizedCopy)
                 {
-                    pipeline = new BsonDocument[]
+                    pipeline = new List<BsonDocument>()
                     {
                     new BsonDocument("$match", new BsonDocument("operationType",
                         new BsonDocument("$in", new BsonArray { "insert", "update", "replace", "delete" }))),
@@ -475,8 +476,18 @@ namespace OnlineMongoMigrationProcessor
                     })
                     };                    
                 }
-               
-                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options, cancellationToken);
+                else
+                {
+                    // Example: just a simple match or full stream
+                    pipeline = new List<BsonDocument>();
+                    if (mu.UserFilter != null && !string.IsNullOrEmpty(mu.UserFilter) &&  BsonDocument.Parse(mu.UserFilter).ElementCount > 0)
+                    {
+                        pipeline.Add(new BsonDocument("$match", BsonDocument.Parse(mu.UserFilter)));
+                    }                   
+                }
+
+                var pipelineArray = pipeline.ToArray();
+                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cancellationToken);
 
                 string lastProcessedToken = string.Empty;
                 if (_job.SourceServerVersion.StartsWith("3"))

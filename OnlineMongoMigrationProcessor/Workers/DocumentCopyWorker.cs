@@ -129,10 +129,11 @@ namespace OnlineMongoMigrationProcessor.Workers
                         var lt = bounds.lt;
 
                         // Filter by id bounds
-                        FilterDefinition<BsonDocument> idFilter = MongoHelper.GenerateQueryFilter(gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType);
+                        FilterDefinition<BsonDocument> idFilter = MongoHelper.GenerateQueryFilter(gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.ConvertUserFilterToBSONDocument(mu.UserFilter!));
 
                         // Filter by datatype
-                        BsonDocument matchCondition = SamplePartitioner.BuildDataTypeCondition(mu.MigrationChunks[migrationChunkIndex].DataType, "_id");
+                        BsonDocument? userFilter = BsonDocument.Parse(mu.UserFilter ?? "{}");
+                        BsonDocument matchCondition = SamplePartitioner.BuildDataTypeCondition(mu.MigrationChunks[migrationChunkIndex].DataType, userFilter);
 
                         // Combine the filters using $and
                         combinedFilter = Builders<BsonDocument>.Filter.And(idFilter, matchCondition);
@@ -188,8 +189,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 try
                 {
-                    mu.MigrationChunks[migrationChunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(_targetCollection, gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType);
-                    mu.MigrationChunks[migrationChunkIndex].DumpQueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType);
+                    mu.MigrationChunks[migrationChunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(_targetCollection, gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.ConvertUserFilterToBSONDocument(mu.UserFilter!));
+                    mu.MigrationChunks[migrationChunkIndex].DumpQueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.ConvertUserFilterToBSONDocument(mu.UserFilter!));
                 }
                 catch (Exception ex)
                 {
@@ -250,7 +251,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 return TaskResult.Success;
             }
            
-            segment.QueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, combinedFilter);
+            segment.QueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, combinedFilter,new BsonDocument());
             jobList.Save();
 
 

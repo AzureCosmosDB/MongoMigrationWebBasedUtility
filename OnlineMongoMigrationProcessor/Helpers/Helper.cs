@@ -1,4 +1,6 @@
-﻿using SharpCompress.Common;
+﻿using Newtonsoft.Json;
+using OnlineMongoMigrationProcessor.Models;
+using SharpCompress.Common;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -223,6 +225,35 @@ namespace OnlineMongoMigrationProcessor
 
         public static Tuple<bool, string> ValidateNamespaceFormat(string input)
         {
+            
+            if(string.IsNullOrWhiteSpace(input))
+            {
+                return new Tuple<bool, string>(false, string.Empty);
+            }
+
+            //input can  be CSV or JSON format
+
+            //desrialize  input into  List of CollectionInfo
+            var loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(input);
+            if (loadedObject != null)
+            {
+                foreach (var item in loadedObject)
+                {
+                    var validationResult = ValidateNamespaceFormatfromCSV($"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}");
+                    if (!validationResult.Item1)
+                    {
+                        return new Tuple<bool, string>(false, string.Empty);
+                    }                     
+                }
+                return new Tuple<bool, string>(true, input);
+            }
+            else
+            {
+                return ValidateNamespaceFormatfromCSV(input);
+            }
+        }
+        private static Tuple<bool, string> ValidateNamespaceFormatfromCSV(string input)
+        { 
             // Regular expression pattern to match db1.col1, db2.col2, db3.col4 format
             //string pattern = @"^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$";
             string pattern = @"^[^\/\\\.\x00\""\*\<\>\|\?\s]+\.{1}[^\/\\\x00\""\*\<\>\|\?\s]+$";

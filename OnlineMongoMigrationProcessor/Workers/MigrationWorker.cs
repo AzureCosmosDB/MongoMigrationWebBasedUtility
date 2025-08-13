@@ -1,5 +1,6 @@
 ﻿using MongoDB.Bson;
 using MongoDB.Driver;
+using Newtonsoft.Json;
 using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Models;
 using OnlineMongoMigrationProcessor.Partitioner;
@@ -388,39 +389,90 @@ namespace OnlineMongoMigrationProcessor.Workers
 
         private void PopulateJobCollections(string namespacesToMigrate)
         {
-            var job = _job;
-            if (job == null)
+
+            if(string.IsNullOrWhiteSpace(namespacesToMigrate))
+            {
+                _log.WriteLine("No collections to migrate specified.", LogType.Error);
+                return;
+            }
+            //desrialize  input into  List of CollectionInfo
+            var loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(namespacesToMigrate);
+            if (loadedObject != null)
+            {
+                foreach (var item in loadedObject)
+                {
+                    var unitsToAdd = PopulateJobCollectionsFromCSV($"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}");
+                    if (unitsToAdd.Count > 0)
+                    {
+                       
+                        foreach (var mu in unitsToAdd)
+                        {
+                            mu.UserFilter=item.Filter;
+                            AddMigrationUnit(mu);
+                        }
+                    }
+                }
+                return;
+            }
+            else
+            {
+                var unitsToAdd = PopulateJobCollectionsFromCSV(namespacesToMigrate);
+                if (unitsToAdd.Count > 0)
+                {
+                    foreach (var mu in unitsToAdd)
+                    {
+                        AddMigrationUnit(mu);
+                    }
+                    _jobList.Save();
+                }
+            }
+        }
+
+        private void AddMigrationUnit(MigrationUnit mu)
+        {
+ 
+            if (_job == null)
             {
                 return;
             }
+            if (_job?.MigrationUnits == null)
+            {
+                _job!.MigrationUnits = new List<MigrationUnit>();
+            }
+
+            // Check if the MigrationUnit already exists
+            if (_job.MigrationUnits.Any(existingMu => existingMu.DatabaseName == mu.DatabaseName && existingMu.CollectionName == mu.CollectionName))
+            {                
+                return;
+            }
+            _job.MigrationUnits.Add(mu);
+        }   
+
+        private List<MigrationUnit> PopulateJobCollectionsFromCSV(string namespacesToMigrate)
+        {
+            List<MigrationUnit> unitsToAdd = new List<MigrationUnit>();
+            
             string[] collectionsInput = namespacesToMigrate
                 .Split(',')
                 .Select(mu => mu.Trim())
                 .ToArray();
-
-            // Ensure the list is initialized before accessing it
-            if (job.MigrationUnits == null)
+         
+           
+            foreach (var fullName in collectionsInput)
             {
-                job.MigrationUnits = new List<MigrationUnit>();
+                if (_migrationCancelled) return unitsToAdd;
+
+                int firstDotIndex = fullName.IndexOf('.');
+                if (firstDotIndex <= 0 || firstDotIndex == fullName.Length - 1) continue;
+
+                string dbName = fullName.Substring(0, firstDotIndex).Trim();
+                string colName = fullName.Substring(firstDotIndex + 1).Trim();
+
+                var migrationUnit = new MigrationUnit(dbName, colName, new List<MigrationChunk>());
+                unitsToAdd.Add(migrationUnit);                   
             }
-
-            if (job.MigrationUnits.Count == 0)
-            {
-                foreach (var fullName in collectionsInput)
-                {
-                    if (_migrationCancelled) return;
-
-                    int firstDotIndex = fullName.IndexOf('.');
-                    if (firstDotIndex <= 0 || firstDotIndex == fullName.Length - 1) continue;
-
-                    string dbName = fullName.Substring(0, firstDotIndex).Trim();
-                    string colName = fullName.Substring(firstDotIndex + 1).Trim();
-
-                    var migrationUnit = new MigrationUnit(dbName, colName, new List<MigrationChunk>());
-                    job.MigrationUnits.Add(migrationUnit);
-                    _jobList.Save();
-                }
-            }
+            
+            return unitsToAdd;
         }
 
         public async Task StartMigrationAsync(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, JobType jobtype, bool trackChangeStreams)
@@ -571,7 +623,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             
         }
 
-        private async Task<List<MigrationChunk>> PartitionCollection(string databaseName, string collectionName, CancellationToken cts, string idField = "_id")
+        private async Task<List<MigrationChunk>> PartitionCollection(string databaseName, string collectionName, CancellationToken cts, string userFilter = "")
         {
             try
             {
@@ -626,7 +678,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     foreach (var dataType in dataTypes)
                     {
                         long docCountByType;
-                        ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log, _job.JobType == JobType.DumpAndRestore, collection, idField, totalChunks, dataType, minDocsInChunk, cts, out docCountByType);
+                        ChunkBoundaries chunkBoundaries = SamplePartitioner.CreatePartitions(_log, _job.JobType == JobType.DumpAndRestore, collection, userFilter, totalChunks, dataType, minDocsInChunk, cts, out docCountByType);
 
                         if (docCountByType == 0  || chunkBoundaries == null) continue;
 

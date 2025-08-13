@@ -24,9 +24,6 @@ namespace OnlineMongoMigrationProcessor
         public bool IsOnline { get; set; }
         public bool IsCancelled { get; set; }
         public bool IsStarted { get; set; }
-        //public bool CurrentlyActive { get; set; }
-        
-        // New property to replace UseMongoDump
         public JobType JobType { get; set; } = JobType.MongoDriver;
         
         // Legacy property for backward compatibility - will be removed in future versions
