@@ -307,14 +307,20 @@ namespace OnlineMongoMigrationProcessor.Workers
                                 await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient!, _jobList, _job, unit);
                             });
 
-                        }
+                        }                        
+                       
                         
-                        _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has {chunks!.Count} chunk(s)");                        
+                        if(unit.UserFilter!= null && unit.UserFilter.Any())
+                        {
+                            _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has {chunks!.Count} chunk(s) with user filter : { unit.UserFilter}");
+                        }
+                        else
+                            _log.WriteLine($"{unit.DatabaseName}.{unit.CollectionName} has {chunks!.Count} chunk(s)");
+
                         unit.MigrationChunks = chunks!;                       
                         unit.ChangeStreamStartedOn = currrentTime;
 
-                    }
-                    return TaskResult.Success;
+                    }                    
 
                 }
                 else
@@ -329,7 +335,6 @@ namespace OnlineMongoMigrationProcessor.Workers
                         return TaskResult.Canceled;
                 }
             }
-
             _jobList.Save();
             return TaskResult.Success;
         }
@@ -375,12 +380,12 @@ namespace OnlineMongoMigrationProcessor.Workers
                                 return TaskResult.Success;
                             }
                         }
-                        else
-                        {
-                            migrationUnit.SourceStatus = CollectionStatus.NotFound;
-                            _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist on source or has zero records", LogType.Error);
+                    }
+                    else
+                    {
+                        migrationUnit.SourceStatus = CollectionStatus.NotFound;
+                        _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist on source or has zero records", LogType.Error);
 
-                        }
                     }
                 }                
             }
@@ -502,7 +507,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 _log.WriteLine($"Error in reading _log. Orginal log backed up as {logfile}");
             }
-            _log.WriteLine($"{_job.Id} Started on {_job.StartedOn} (UTC)");
+            _log.WriteLine($"Job {_job.Id} Started on {_job.StartedOn} (UTC)");
 
 
             if (_job.MigrationUnits == null)

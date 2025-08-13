@@ -156,8 +156,8 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 mu.SourceCountDuringCopy = mu.MigrationChunks.Sum(chunk => (long)(chunk.Segments?.Sum(seg => seg.QueryDocCount) ?? 0));
-                mu.DumpGap = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount) - mu.SourceCountDuringCopy;
-                mu.RestoreGap = mu.SourceCountDuringCopy - mu.MigrationChunks.Sum(chunk => chunk.DumpResultDocCount) ;
+                mu.DumpGap = Helper.GetMigrationUnitDocCount(mu) - mu.SourceCountDuringCopy;
+                mu.RestoreGap = mu.SourceCountDuringCopy - mu.MigrationChunks.Sum(chunk => chunk.DumpResultDocCount);
                 
 
                 long failed= mu.MigrationChunks.Sum(chunk => chunk.RestoredFailedDocCount);

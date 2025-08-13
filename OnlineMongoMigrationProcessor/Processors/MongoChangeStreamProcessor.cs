@@ -454,6 +454,13 @@ namespace OnlineMongoMigrationProcessor
                 .Contains("mongocluster.cosmos.azure.com", StringComparison.OrdinalIgnoreCase);
 
             long counter = 0;
+            BsonDocument userFilterDoc = new BsonDocument();
+
+            if (!string.IsNullOrWhiteSpace(mu.UserFilter))
+            {
+                userFilterDoc = BsonDocument.Parse(mu.UserFilter);
+                userFilterDoc??= new BsonDocument(); // Ensure it's not null
+            }
 
             ChangeStreamDocuments changeStreamDocuments = new ChangeStreamDocuments();
 
@@ -478,18 +485,16 @@ namespace OnlineMongoMigrationProcessor
                 }
                 else
                 {
-                    // Example: just a simple match or full stream
-                    pipeline = new List<BsonDocument>();
-                    if (mu.UserFilter != null && !string.IsNullOrEmpty(mu.UserFilter) &&  BsonDocument.Parse(mu.UserFilter).ElementCount > 0)
-                    {
-                        pipeline.Add(new BsonDocument("$match", BsonDocument.Parse(mu.UserFilter)));
-                    }                   
+                    pipeline = new List<BsonDocument>();                  
+
                 }
 
                 var pipelineArray = pipeline.ToArray();
                 using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cancellationToken);
-
                 string lastProcessedToken = string.Empty;
+
+                
+
                 if (_job.SourceServerVersion.StartsWith("3"))
                 {
 
@@ -507,10 +512,11 @@ namespace OnlineMongoMigrationProcessor
                             mu.CSUpdatesInLastBatch = 0;
                             mu.CSNormalizedUpdatesInLastBatch = 0;
                             return; // Skip processing if the event has already been processed
-                        }
+                        }                        
+                       
 
-                        if (!ProcessCursor(change, cursor, targetCollection, sourceCollection.CollectionNamespace.ToString(),mu, changeStreamDocuments, ref counter))
-                            return;
+                        if (!ProcessCursor(change, cursor, targetCollection, sourceCollection.CollectionNamespace.ToString(), mu, changeStreamDocuments, ref counter, userFilterDoc))
+                            return;                       
                     }
                 }
                 else
@@ -537,7 +543,7 @@ namespace OnlineMongoMigrationProcessor
                                 return; // Skip processing if the event has already been processed
                             }
 
-                            if (!ProcessCursor(change, cursor, targetCollection, sourceCollection.CollectionNamespace.ToString(), mu, changeStreamDocuments, ref counter))
+                            if (!ProcessCursor(change, cursor, targetCollection, sourceCollection.CollectionNamespace.ToString(), mu, changeStreamDocuments, ref counter, userFilterDoc))
                                 return;
 
                         }
@@ -722,10 +728,19 @@ namespace OnlineMongoMigrationProcessor
         }
 
 
-        private bool ProcessCursor(ChangeStreamDocument<BsonDocument> change, IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor, IMongoCollection<BsonDocument> targetCollection, string collNameSpace ,MigrationUnit mu, ChangeStreamDocuments changeStreamDocuments, ref long counter)
+        private bool ProcessCursor(ChangeStreamDocument<BsonDocument> change, IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor, IMongoCollection<BsonDocument> targetCollection, string collNameSpace ,MigrationUnit mu, ChangeStreamDocuments changeStreamDocuments, ref long counter, BsonDocument userFilterDoc)
         {
             try
             {
+                //check if user filter condition is met
+
+                if (change.OperationType != ChangeStreamOperationType.Delete)
+                {
+                    if (userFilterDoc.Elements.Count() > 0
+                        && !MongoHelper.CheckChangeStreamDocument(change, userFilterDoc))
+                        return true;
+                }
+
                 counter++;
 
                 DateTime timeStamp=DateTime.MinValue;

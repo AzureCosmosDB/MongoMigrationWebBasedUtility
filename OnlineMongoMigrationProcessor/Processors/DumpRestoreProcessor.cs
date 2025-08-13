@@ -93,15 +93,22 @@ namespace OnlineMongoMigrationProcessor
                 _log.WriteLine($"{dbName}.{colName}-Chunk [{chunkIndex}] generating query");
 
                 BsonDocument? userFilterDoc = BsonDocument.Parse(mu.UserFilter ?? "{}");
-                  string query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc);
+                string query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc);
                 docCount = MongoHelper.GetDocumentCount(collection, gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc);
                 mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
                 _log.WriteLine($"{dbName}.{colName}- Chunk [{chunkIndex}] Count is  {docCount}");
                 args = $"{args} --query=\"{query}\"";
             }
+            else if (mu.MigrationChunks.Count ==1 && !string.IsNullOrEmpty(mu.UserFilter))
+            {
+                BsonDocument? userFilterDoc = BsonDocument.Parse(mu.UserFilter ?? "{}");
+                docCount = MongoHelper.GetActualDocumentCount(collection, mu);
+                string query = MongoHelper.GenerateQueryString(userFilterDoc);
+                args = $"{args} --query=\"{query}\"";
+            }
             else
             {
-                docCount = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+                docCount = Helper.GetMigrationUnitDocCount(mu);
                 mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
             }
 
@@ -188,7 +195,7 @@ namespace OnlineMongoMigrationProcessor
 
             long docCount = (mu.MigrationChunks.Count > 1)
                 ? mu.MigrationChunks[chunkIndex].DumpQueryDocCount
-                : Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+                : Helper.GetMigrationUnitDocCount(mu);
 
             try
             {
@@ -364,7 +371,8 @@ namespace OnlineMongoMigrationProcessor
                 {
                     mu.SourceCountDuringCopy = mu.MigrationChunks.Sum(chunk => chunk.DumpQueryDocCount);
                     downloadCount = mu.SourceCountDuringCopy; // recompute from chunks to avoid incremental tracking
-                    mu.DumpGap = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount) - downloadCount;
+                                         
+                    mu.DumpGap= Helper.GetMigrationUnitDocCount(mu) - downloadCount;
                     mu.DumpPercent = 100;
                     mu.DumpComplete = true;
                 }
@@ -432,7 +440,8 @@ namespace OnlineMongoMigrationProcessor
 
                     if (restoredChunks == mu.MigrationChunks.Count && !_cts.Token.IsCancellationRequested)
                     {
-                        mu.RestoreGap = Math.Max(mu.ActualDocCount, mu.EstimatedDocCount) - restoredDocs;
+
+                        mu.RestoreGap = Helper.GetMigrationUnitDocCount(mu) - restoredDocs;
                         mu.RestorePercent = 100;
                         mu.RestoreComplete = true;
                         if (mu.DumpComplete && mu.RestoreComplete)
@@ -498,7 +507,7 @@ namespace OnlineMongoMigrationProcessor
                 if (!mu.MigrationChunks[i].IsUploaded == true && mu.MigrationChunks[i].IsDownloaded == true)
                 {
                     double initialPercent = ((double)100 / mu.MigrationChunks.Count) * i;
-                    double contributionFactor = (double)mu.MigrationChunks[i].DumpQueryDocCount / Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+                    double contributionFactor = (double)mu.MigrationChunks[i].DumpQueryDocCount / Helper.GetMigrationUnitDocCount(mu);
                     if (mu.MigrationChunks.Count == 1) contributionFactor = 1;
 
                     _log.WriteLine($"{dbName}.{colName}-{i} uploader processing");
@@ -565,7 +574,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     if (!_job.IsOnline && Helper.IsOfflineJobCompleted(migrationJob))
                     {
-                        _log.WriteLine($"{migrationJob.Id} Completed");
+                        _log.WriteLine($"Job {migrationJob.Id} Completed");
                         migrationJob.IsCompleted = true;
                         StopProcessing();
                     }

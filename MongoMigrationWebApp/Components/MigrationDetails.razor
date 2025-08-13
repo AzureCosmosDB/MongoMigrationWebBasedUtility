@@ -252,10 +252,16 @@
 
         if (NewMode)
         {
-            var retValue = Helper.ValidateNamespaceFormat(namespaces);
+            var retValue = Helper.ValidateNamespaceFormat(namespaces, jobType);
+
+            if (retValue == null)
+            {
+                errorMessage = "Invalid namespace format.";
+                return;
+            }
             if (!retValue.Item1)
             {
-                errorMessage = "Namespaces Format is invalid.";
+                errorMessage = retValue.Item3;
                 return;
             }
             else

@@ -79,14 +79,22 @@
             Properties.Add("Offline Copy Duration", "N/A");
         }
 
-
-        Properties.Add("Source Document Count Initial Estimate", MigrationUnit.EstimatedDocCount.ToString() ?? "N/A");
+        if (MigrationUnit.UserFilter != null && MigrationUnit.UserFilter.Any())
+        {
+            Properties.Add("Source Document Count Initial Estimate", "N/A since filter applied");
+            Properties.Add("User Filter", MigrationUnit.UserFilter);
+        }
+        else
+        {
+            Properties.Add("Source Document Count Initial Estimate", MigrationUnit.EstimatedDocCount.ToString() ?? "N/A");
+            Properties.Add("User Filter", "N/A");
+        }
+        
         Properties.Add("Source Document Count Before Copying", MigrationUnit.ActualDocCount.ToString() ?? "N/A");
 
-
-    long totalSkipped = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.SkippedAsDuplicateCount) ?? 0;
-    long totalInserted = (MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredSuccessDocCount) ?? 0) - totalSkipped;
-    long totalFailed = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredFailedDocCount) ?? 0;
+        long totalSkipped = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.SkippedAsDuplicateCount) ?? 0;
+        long totalInserted = (MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredSuccessDocCount) ?? 0) - totalSkipped;
+        long totalFailed = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredFailedDocCount) ?? 0;
 
         Properties.Add("Source Document Count While Processing ", MigrationUnit.SourceCountDuringCopy.ToString() ?? "N/A");
         Properties.Add("Processed Total", (totalInserted + totalSkipped + totalFailed).ToString() ?? "N/A");
@@ -96,7 +104,7 @@
         Properties.Add("*********** Indexes Created", MigrationUnit.IndexesMigrated.ToString() ?? "N/A");
 
 
-    if (MigrationJob != null && MigrationJob.IsOnline)
+        if (MigrationJob != null && MigrationJob.IsOnline)
         {
             Properties.Add("Change Stream (CS) Started On", MigrationUnit.ChangeStreamStartedOn.ToString() ?? "N/A");
             Properties.Add("CS Start Resume Token", MigrationUnit.OriginalResumeToken ?? "N/A");

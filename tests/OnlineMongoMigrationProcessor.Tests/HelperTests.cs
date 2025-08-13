@@ -25,7 +25,7 @@ namespace OnlineMongoMigrationProcessor.Tests
         [InlineData("db. col", false)]
         public void ValidateNamespaceFormat_Validates(string input, bool valid)
         {
-            var (ok, cleaned) = Helper.ValidateNamespaceFormat(input);
+            var (ok, cleaned,errorMessage) = Helper.ValidateNamespaceFormat(input,JobType.DumpAndRestore);
             ok.Should().Be(valid);
             if (valid) cleaned.Should().NotBeNullOrWhiteSpace();
         }

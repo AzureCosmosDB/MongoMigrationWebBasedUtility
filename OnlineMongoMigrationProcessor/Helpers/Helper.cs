@@ -223,12 +223,22 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        public static Tuple<bool, string> ValidateNamespaceFormat(string input)
+        public static long GetMigrationUnitDocCount(MigrationUnit mu)
+        {
+            if (mu.UserFilter != null && mu.UserFilter.Any())
+                return mu.ActualDocCount;
+            else
+               return Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
+        }
+
+        public static Tuple<bool, string,string> ValidateNamespaceFormat(string input, JobType jobType)
         {
             
-            if(string.IsNullOrWhiteSpace(input))
+            string  errorMessage = string.Empty;
+            if (string.IsNullOrWhiteSpace(input))
             {
-                return new Tuple<bool, string>(false, string.Empty);
+                errorMessage="Namespaces cannot be null or empty.";
+                return new Tuple<bool, string, string>(false, string.Empty, errorMessage);
             }
 
             //input can  be CSV or JSON format
@@ -237,22 +247,32 @@ namespace OnlineMongoMigrationProcessor
             var loadedObject = JsonConvert.DeserializeObject<List<CollectionInfo>>(input);
             if (loadedObject != null)
             {
-                foreach (var item in loadedObject)
+                if(jobType==JobType.RUOptimizedCopy)
                 {
+                    if (loadedObject.Any(x => x.Filter != null))
+                    {
+                        errorMessage = "Filter is not supported in RU Optimized Copy job type.";
+                        return new Tuple<bool, string, string>(false, string.Empty, errorMessage);
+                    }                  
+                }
+
+                foreach (var item in loadedObject)
+                {                   
                     var validationResult = ValidateNamespaceFormatfromCSV($"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}");
                     if (!validationResult.Item1)
                     {
-                        return new Tuple<bool, string>(false, string.Empty);
+                        errorMessage = validationResult.Item2;
+                        return new Tuple<bool, string,string>(false, string.Empty, errorMessage);
                     }                     
                 }
-                return new Tuple<bool, string>(true, input);
+                return new Tuple<bool, string,string >(true, input, errorMessage);
             }
             else
             {
                 return ValidateNamespaceFormatfromCSV(input);
             }
         }
-        private static Tuple<bool, string> ValidateNamespaceFormatfromCSV(string input)
+        private static Tuple<bool, string, string> ValidateNamespaceFormatfromCSV(string input)
         { 
             // Regular expression pattern to match db1.col1, db2.col2, db3.col4 format
             //string pattern = @"^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$";
@@ -275,13 +295,14 @@ namespace OnlineMongoMigrationProcessor
                 }
                 else
                 {
-                    return new Tuple<bool, string>(false, string.Empty);
+                    string errorMessage = $"Invalid namespace format: '{trimmedItem}'";
+                    return new Tuple<bool, string,string>(false, string.Empty,errorMessage);
                 }
             }
 
             // Join valid items into a cleaned comma-separated list
             var cleanedNamespace = string.Join(",", validItems);
-            return new Tuple<bool, string>(true, cleanedNamespace);
+            return new Tuple<bool, string,string>(true, cleanedNamespace,string.Empty);
         }
 
         public static string RedactPii(string input)

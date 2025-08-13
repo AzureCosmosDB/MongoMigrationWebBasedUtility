@@ -56,6 +56,9 @@
 @code
 {
     [Parameter]
+    public MigrationJob? MigrationJob { get; set; }
+
+    [Parameter]
     public List<MigrationUnit>? MigrationUnits { get; set; }
 
     [Parameter]
@@ -81,10 +84,16 @@
         errorMessage = string.Empty;
         if (!string.IsNullOrWhiteSpace(newCollection))
         {
-            Tuple<bool, string> retValue = Helper.ValidateNamespaceFormat(newCollection);
+            if (MigrationJob== null)
+            {
+                errorMessage = "MigrationJob is not set.";
+                return;
+            };
+
+            Tuple<bool, string,string> retValue = Helper.ValidateNamespaceFormat(newCollection, MigrationJob.JobType);
             if (!retValue.Item1)
             {
-                errorMessage = "Invalid collection name. Please provide the collection name in the format 'database.collection'";
+                errorMessage = retValue.Item2;
                 return;
             }
 
