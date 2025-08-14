@@ -216,7 +216,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-                _log.WriteLine($"{_syncBackPrefix}Change stream processing completed.");                
+                _log.WriteLine($"{_syncBackPrefix}Change stream processing completed or paused.");                
                 //_job.CurrentlyActive = false;//causes failure do not undo
                 _jobList?.Save();
 
@@ -584,6 +584,13 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
+        private void IncrementFailureCounter(MigrationUnit mu, int incrementBy = 1)
+        {
+            if (!_syncBack)
+                mu.CSErrors = mu.CSErrors + incrementBy;
+            else
+                mu.SyncBackErrors = mu.SyncBackErrors + incrementBy;
+        }
 
         private void IncrementSkippedCounter(MigrationUnit mu, int incrementBy = 1)
         {
@@ -862,6 +869,7 @@ namespace OnlineMongoMigrationProcessor
                         updateEvents: changeStreamDocuments.DocsToBeUpdated,
                         deleteEvents: changeStreamDocuments.DocsToBeDeleted).GetAwaiter().GetResult();
                     
+                    _jobList?.Save();
                     // Clear the lists after processing
                     changeStreamDocuments.DocsToBeInserted.Clear();
                     changeStreamDocuments.DocsToBeUpdated.Clear();
@@ -908,11 +916,18 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                await MongoHelper.ProcessInsertsAsync<MigrationUnit> (mu, collection, insertEvents, counterDelegate, _log, _syncBackPrefix, batchSize);
+                var insertFailures = await MongoHelper.ProcessInsertsAsync<MigrationUnit> (mu, collection, insertEvents, counterDelegate, _log, _syncBackPrefix, batchSize);
 
-                await MongoHelper.ProcessUpdatesAsync<MigrationUnit> (mu, collection, updateEvents, counterDelegate, _log, _syncBackPrefix, batchSize);
+                var UpdateFailures = await MongoHelper.ProcessUpdatesAsync<MigrationUnit> (mu, collection, updateEvents, counterDelegate, _log, _syncBackPrefix, batchSize);
 
-                await MongoHelper.ProcessDeletesAsync<MigrationUnit> (mu, collection, deleteEvents, counterDelegate, _log, _syncBackPrefix, batchSize);
+                var deleteFailures =  await MongoHelper.ProcessDeletesAsync<MigrationUnit> (mu, collection, deleteEvents, counterDelegate, _log, _syncBackPrefix, batchSize);
+
+                var totalFailures = insertFailures + UpdateFailures + deleteFailures;
+                if (totalFailures > 0)
+                {
+                    IncrementFailureCounter(mu, totalFailures);                   
+                }
+                
             }
             catch (Exception ex)
             {

@@ -158,6 +158,7 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                             migrationJob.IsCompleted = true;
                             StopProcessing(true);
+                            _jobList.Save();
                         }
                         else if (!_postUploadCSProcessing)
                         {

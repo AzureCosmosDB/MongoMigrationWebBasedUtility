@@ -63,6 +63,7 @@ namespace OnlineMongoMigrationProcessor
         public long CSDInsertEvents { get; set; }
         public long CSDeleteEvents { get; set; }
         public long CSUpdatedEvents { get; set; }
+        public long CSErrors { get; set; }
 
         public long CSDocsInserted { get; set; }
         public long CSDocsDeleted { get; set; }
@@ -72,6 +73,7 @@ namespace OnlineMongoMigrationProcessor
         public long SyncBackInsertEvents { get; set; }
         public long SyncBackDeleteEvents { get; set; }
         public long SyncBackUpdateEvents { get; set; }
+        public long SyncBackErrors { get; set; }
 
         public long SyncBackDocsInserted { get; set; }
         public long SyncBackDocsDeleted { get; set; }

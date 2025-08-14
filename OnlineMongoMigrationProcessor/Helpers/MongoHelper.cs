@@ -927,21 +927,37 @@ namespace OnlineMongoMigrationProcessor
             return DateTimeOffset.FromUnixTimeSeconds(secondsSinceEpoch).UtcDateTime;
         }
 
+        //public static FilterDefinition<BsonDocument> BuildFilterFromDocumentKey(BsonDocument documentKey)
+        //{
+        //    if (documentKey == null || !documentKey.Elements.Any())
+        //        throw new ArgumentException("documentKey cannot be null or empty", nameof(documentKey));
+
+        //    var builder = Builders<BsonDocument>.Filter;
+        //    FilterDefinition<BsonDocument> filter = builder.Empty;
+
+        //    foreach (var element in documentKey.Elements)
+        //    {
+        //        filter &= builder.Eq(element.Name, element.Value);
+        //    }
+
+        //    return filter;
+        //}
+
         public static FilterDefinition<BsonDocument> BuildFilterFromDocumentKey(BsonDocument documentKey)
         {
-            if (documentKey == null || !documentKey.Elements.Any())
-                throw new ArgumentException("documentKey cannot be null or empty", nameof(documentKey));
-
-            var builder = Builders<BsonDocument>.Filter;
-            FilterDefinition<BsonDocument> filter = builder.Empty;
+            var filters = new List<FilterDefinition<BsonDocument>>();
 
             foreach (var element in documentKey.Elements)
             {
-                filter &= builder.Eq(element.Name, element.Value);
+                filters.Add(Builders<BsonDocument>.Filter.Eq(element.Name, element.Value));
             }
 
-            return filter;
+            return filters.Count == 1
+                ? filters[0]
+                : Builders<BsonDocument>.Filter.And(filters);
         }
+
+
 
         public static BsonTimestamp ConvertToBsonTimestamp(DateTime dateTime)
         {
@@ -953,7 +969,7 @@ namespace OnlineMongoMigrationProcessor
             return new BsonTimestamp((int)secondsSinceEpoch, 0);
         }
 
-        public static async Task ProcessInsertsAsync<TMigration>(TMigration mu,
+        public static async Task<int> ProcessInsertsAsync<TMigration>(TMigration mu,
            IMongoCollection<BsonDocument> collection,
            List<ChangeStreamDocument<BsonDocument>> events,
            CounterDelegate<TMigration> incrementCounter,
@@ -961,6 +977,7 @@ namespace OnlineMongoMigrationProcessor
            string logPrefix,
            int batchSize = 50)
            {
+            int failures = 0;
             // Insert operations
             foreach (var batch in events.Chunk(batchSize))
             {
@@ -1010,6 +1027,7 @@ namespace OnlineMongoMigrationProcessor
 
                     if (otherErrors.Any())
                     {
+                        failures += otherErrors.Count;
                         log.WriteLine($"{logPrefix} Insert BulkWriteException (non-duplicate errors) in {collection.CollectionNamespace.FullName}: {string.Join(", ", otherErrors.Select(e => e.Message))}");
                     }
                     else if (duplicateKeyErrors.Count > 0)
@@ -1023,9 +1041,10 @@ namespace OnlineMongoMigrationProcessor
 
                 }
             }
+            return failures; // Return the count of failures encountered during processing
         }
 
-        public static async Task ProcessUpdatesAsync<TMigration>(TMigration mu,
+        public static async Task<int> ProcessUpdatesAsync<TMigration>(TMigration mu,
             IMongoCollection<BsonDocument> collection,
             List<ChangeStreamDocument<BsonDocument>> events,
             CounterDelegate<TMigration> incrementCounter,
@@ -1033,6 +1052,7 @@ namespace OnlineMongoMigrationProcessor
             string logPrefix,
             int batchSize = 50)
         {
+            int failures=0;
             // Update operations
             foreach (var batch in events.Chunk(batchSize))
             {
@@ -1086,8 +1106,10 @@ namespace OnlineMongoMigrationProcessor
                         .Where(err => err.Code != 11000)
                         .ToList();
 
+                    failures += otherErrors.Count;
+
                     if (otherErrors.Any())
-                    {
+                    {                        
                         log.WriteLine($"{logPrefix} Update BulkWriteException (non-duplicate errors) in {collection.CollectionNamespace.FullName}: {string.Join(", ", otherErrors.Select(e => e.Message))}");
                     }
 
@@ -1122,6 +1144,7 @@ namespace OnlineMongoMigrationProcessor
                             }
                             catch (Exception retryEx)
                             {
+                                failures++;
                                 log.AddVerboseMessage($"{logPrefix} Individual retry failed for update in {collection.CollectionNamespace.FullName}: {retryEx.Message}");
                             }
                         }
@@ -1131,12 +1154,13 @@ namespace OnlineMongoMigrationProcessor
                 {
 
                     incrementCounter(mu, CounterType.Processed, ChangeStreamOperationType.Update, (int)updateCount);
-                }
+                }                
             }
+            return failures; // Return the count of failures encountered during processing
 
         }
 
-        public static async Task ProcessDeletesAsync<TMigration>(TMigration mu,
+        public static async Task<int> ProcessDeletesAsync<TMigration>(TMigration mu,
            IMongoCollection<BsonDocument> collection,
            List<ChangeStreamDocument<BsonDocument>> events,
            CounterDelegate<TMigration> incrementCounter,
@@ -1144,6 +1168,7 @@ namespace OnlineMongoMigrationProcessor
            string logPrefix,
            int batchSize = 50)
         {
+            int failures = 0;
             // Delete operations
             foreach (var batch in events.Chunk(batchSize))
             {
@@ -1210,11 +1235,13 @@ namespace OnlineMongoMigrationProcessor
 
                         if (significantErrors.Any())
                         {
+                            failures += significantErrors.Count;
                             log.WriteLine($"{logPrefix} Bulk delete error in {collection.CollectionNamespace.FullName}: {string.Join(", ", significantErrors.Select(e => e.Message))}");
                         }
                     }
                 }
             }
+            return failures; // Return the count of failures encountered during processing
         }
     }
 }

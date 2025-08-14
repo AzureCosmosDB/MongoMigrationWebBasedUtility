@@ -576,9 +576,9 @@ namespace OnlineMongoMigrationProcessor.Workers
             //if run comparison is set by customer.
             if (_job.RunComparison)
             {
+                _cts = new CancellationTokenSource();
                 var compareHelper = new ComparisonHelper();
-                _compare_cts = new CancellationTokenSource();
-                compareHelper.CompareRandomDocumentsAsync(_log, _jobList, _job, _config!, _compare_cts.Token).GetAwaiter().GetResult();
+                compareHelper.CompareRandomDocumentsAsync(_log, _jobList, _job, _config!, _cts.Token).GetAwaiter().GetResult();
                 compareHelper = null;
                 _job.RunComparison = false;
                 _jobList.Save();

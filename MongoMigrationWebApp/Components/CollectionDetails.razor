@@ -119,7 +119,7 @@
             Properties.Add("CS Deleted", $"{MigrationUnit.CSDocsDeleted.ToString()} (from {MigrationUnit.CSDeleteEvents.ToString()} events)");
             Properties.Add("CS Updated", $"{MigrationUnit.CSDocsUpdated.ToString()} (from {MigrationUnit.CSUpdatedEvents.ToString()} events)");
             Properties.Add("CS Duplicate Processed",$"{MigrationUnit.CSDuplicateDocsSkipped.ToString()} skipped");
-
+            Properties.Add("CS Failed (with retries)", $"{MigrationUnit.CSErrors.ToString()}");
 
 
             if (MigrationJob.SyncBackEnabled)
@@ -132,6 +132,7 @@
                 Properties.Add("SyncBack Deleted", $"{MigrationUnit.SyncBackDocsDeleted.ToString()} (from {MigrationUnit.SyncBackDeleteEvents.ToString()} events)");
                 Properties.Add("SyncBack Updated", $"{MigrationUnit.SyncBackDocsUpdated.ToString()} (from {MigrationUnit.SyncBackUpdateEvents.ToString()} events)");
                 Properties.Add("SyncBack Duplicate Processed", $"{MigrationUnit.SyncBackDuplicateDocsSkipped.ToString()} skipped");
+                Properties.Add("SyncBack Failed (with retries)", $"{MigrationUnit.SyncBackErrors.ToString()}");
             } 
 
             if (MigrationUnit.ComparedOn.HasValue && MigrationUnit.ComparedOn != DateTime.MinValue)
