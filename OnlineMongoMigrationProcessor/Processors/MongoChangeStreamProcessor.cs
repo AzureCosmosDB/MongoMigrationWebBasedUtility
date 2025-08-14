@@ -367,16 +367,16 @@ namespace OnlineMongoMigrationProcessor
                         var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(timeStamp.ToLocalTime());
                         options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };
                     }
-                    else if (!string.IsNullOrEmpty(resumeToken) && !mu.ResetChangeStream) //skip resume token if its reset
+                    else if (!string.IsNullOrEmpty(resumeToken) && !mu.ResetChangeStream) //skip resume token if its reset, both version  having resume token
                     {
                         options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter = BsonDocument.Parse(resumeToken) };
 
                     }
-                    else if (string.IsNullOrEmpty(resumeToken) && version.StartsWith("3"))
+                    else if (string.IsNullOrEmpty(resumeToken) && version.StartsWith("3")) //for Mongo 3.6
                     {
                         options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup };
                     }
-                    else if (startedOn > DateTime.MinValue && !version.StartsWith("3"))
+                    else if (startedOn > DateTime.MinValue && !version.StartsWith("3"))  //newer version
                     {
                         var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp((DateTime)startedOn);
                         options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };

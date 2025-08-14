@@ -22,7 +22,7 @@ namespace OnlineMongoMigrationProcessor
         {
             if (ex is OperationCanceledException)
             {
-                _log.WriteLine($"Document copy operation was cancelled for {dbName}.{colName}-{chunkIndex}");
+                _log.WriteLine($"Document copy operation was cancelled for {dbName}.{colName}[{chunkIndex}]");
                 return Task.FromResult(TaskResult.Abort);
             }
             else if (ex is MongoExecutionTimeoutException)
@@ -32,12 +32,12 @@ namespace OnlineMongoMigrationProcessor
             }
             else if (ex.Message== "Copy Document Failed")
             {
-                _log.WriteLine($"{processName} attempt for {dbName}.{colName}-{chunkIndex} failed. Retrying in {currentBackoff} seconds...");
+                _log.WriteLine($"{processName} attempt for {dbName}.{colName}[{chunkIndex}] failed. Retrying in {currentBackoff} seconds...");
                 return Task.FromResult(TaskResult.Retry);
             }
             else
             {
-                _log.WriteLine($"{processName} attempt for {dbName}.{colName}-{chunkIndex} failed. Details:{ex.ToString()}. Retrying in {currentBackoff} seconds...", LogType.Error);
+                _log.WriteLine($"{processName} attempt for {dbName}.{colName}[{chunkIndex}] failed. Details:{ex.ToString()}. Retrying in {currentBackoff} seconds...", LogType.Error);
                 return Task.FromResult(TaskResult.Retry);
             }
         }
@@ -65,7 +65,7 @@ namespace OnlineMongoMigrationProcessor
 
                 ctx.DownloadCount += mu.MigrationChunks[chunkIndex].DumpQueryDocCount;
 
-                _log.WriteLine($"{ctx.DatabaseName}.{ctx.CollectionName}- Chunk [{chunkIndex}] Count is  {docCount}");
+                _log.WriteLine($"Count for {ctx.DatabaseName}.{ctx.CollectionName}[{chunkIndex}] is  {docCount}");
 
             }
             else
@@ -109,7 +109,7 @@ namespace OnlineMongoMigrationProcessor
 
 
 
-        public override async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public override async Task<TaskResult> StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
 
             ProcessorContext ctx;
@@ -117,7 +117,7 @@ namespace OnlineMongoMigrationProcessor
 
             //when resuming a job, we need to check if post-upload change stream processing is already in progress
             if (CheckChangeStreamAlreadyProcessingAsync(ctx))
-                return;
+                return TaskResult.Success;
 
             // starting the  regular document copy process
             _log.WriteLine($"{ctx.DatabaseName}.{ctx.CollectionName} Document copy started");
@@ -147,6 +147,7 @@ namespace OnlineMongoMigrationProcessor
                         {
                             _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}-{i} failed after multiple attempts.", LogType.Error);
                             StopProcessing();
+                            return result;
                         }
                     }
                     else
@@ -178,6 +179,8 @@ namespace OnlineMongoMigrationProcessor
             }
 
             await PostCopyChangeStreamProcessor(ctx, mu);
+
+            return TaskResult.Success;
         }
     }
 }

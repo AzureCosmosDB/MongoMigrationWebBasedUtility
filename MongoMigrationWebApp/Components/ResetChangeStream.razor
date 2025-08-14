@@ -36,7 +36,9 @@
 
             @if (updatedMigrationUnits.Count > 0)
             {
-                <div class="alert alert-danger mt-2"> Resetting the change stream will reprocess all changes for the selected collections from the beginning of the migration. This may increase the migration workload and potentially delay processing for other collections. </div>
+                <div class="alert alert-danger mt-2"> 
+                    Resetting the change stream will reprocess all changes for the selected collections from the beginning of the migration. This may increase the migration workload and potentially delay processing for other collections.
+                 </div>
             }
             <div class="modal-footer">
                 <button type="button" class="btn btn-primary" @onclick=@HandleSubmit>Ok</button>

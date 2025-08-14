@@ -42,7 +42,10 @@
 
                 @if (!string.IsNullOrEmpty(errorMessage))
                 {
-                    <div class="alert alert-danger mt-2">@errorMessage</div>
+                    <div class="alert alert-danger mt-2">
+                        @errorMessage
+                        <button type="button" class="btn-close btn-close-sm" aria-label="Close" @onclick="() => errorMessage = string.Empty"></button>
+                    </div>
                 }
             </div>
             <div class="modal-footer">

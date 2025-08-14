@@ -76,3 +76,17 @@
 .table.console-output tr.warning-row, .table.message-output tr.error-row {
     color: yellow;
 }
+
+.alert .btn-close {
+    position: absolute;
+    top: 0.25rem; 
+    right: 0.25rem; 
+}
+
+.btn-close-sm {
+    width: 0.75rem;
+    height: 0.75rem;
+    padding: 0.25rem;
+    background-size: 0.75rem;
+}
+

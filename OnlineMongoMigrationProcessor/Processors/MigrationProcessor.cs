@@ -175,7 +175,7 @@ namespace OnlineMongoMigrationProcessor.Processors
         }
 
 
-        public virtual Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
-        { return Task.CompletedTask; }
+        public virtual Task<TaskResult> StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        { return Task.FromResult(TaskResult.Success); }
     }
 }

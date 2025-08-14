@@ -374,7 +374,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-    public static Task SetChangeStreamResumeTokenAsync(Log log,MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, int seconds)
+    public async static Task SetChangeStreamResumeTokenAsync(Log log,MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, int seconds, CancellationToken cts)
         {
             int retryCount = 0;
             bool isSucessful = false;
@@ -400,7 +400,6 @@ namespace OnlineMongoMigrationProcessor
                             var startedOnUtc = unit.ChangeStreamStartedOn.HasValue ? unit.ChangeStreamStartedOn.Value.ToUniversalTime() : DateTime.UtcNow;
                             log.WriteLine($"Resetting change stream resume token for {unit.DatabaseName}.{unit.CollectionName} to {startedOnUtc} (UTC)");
                             options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter = BsonDocument.Parse(unit.OriginalResumeToken) };
-
                         }
                         else
                         {
@@ -410,7 +409,6 @@ namespace OnlineMongoMigrationProcessor
                             var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(start);
                             options = new ChangeStreamOptions { BatchSize = 100, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };
                         }
-
                     }
                     else
                     {
@@ -418,11 +416,11 @@ namespace OnlineMongoMigrationProcessor
                         {
                             log.WriteLine($"Change stream resume token for {unit.DatabaseName}.{unit.CollectionName} already set");
 
-                            return Task.CompletedTask;
+                            return;
                         }
-
+                       
                         options = new ChangeStreamOptions
-                        {
+                        {                            
                             FullDocument = ChangeStreamFullDocumentOption.UpdateLookup
                         };
                     }
@@ -431,14 +429,19 @@ namespace OnlineMongoMigrationProcessor
                     //new way to get resume token
                     //On MongoDB 4.0+, the WatchChangeStreamAsync method opens a change stream and waits for changes.
                     //On MongoDB 3.6, TailOplogAsync opens a tailable cursor on the oplog, filtering on namespace and timestamp to detect new operations.
-                    if(!string.IsNullOrEmpty(job.SourceServerVersion) && job.SourceServerVersion.StartsWith("3") )
-                        TailOplogAsync(client, unit.DatabaseName, unit.CollectionName, unit, CancellationToken.None).Wait();
-                    else                       
-                        WatchChangeStreamUntilChangeAsync(log, client, jobList, job, unit, collection, options, resetCS, seconds).Wait();
+                    if (!string.IsNullOrEmpty(job.SourceServerVersion) && job.SourceServerVersion.StartsWith("3"))
+                    {
+                        if (!await TailOplogAsync(client, unit.DatabaseName, unit.CollectionName, unit, cts) && !resetCS)
+                        {
+                            //if failed to tail oplog, fallback to watching change stream infinelty. Should be called async only
+                            await WatchChangeStreamUntilChangeAsync(log, client, jobList, job, unit, collection, options, resetCS, -1, cts);                           
+                        }
+                    }
+                    else
+                        await WatchChangeStreamUntilChangeAsync(log, client, jobList, job, unit, collection, options, resetCS, seconds, cts);
                     //end of new way to get resume token
 
                     isSucessful = true;
-
                 }
                 catch (OperationCanceledException)
                 {
@@ -453,13 +456,12 @@ namespace OnlineMongoMigrationProcessor
                 finally
                 {
                     jobList.Save();
-
                 }
             }
-            return Task.CompletedTask;
+            return;
         }
 
-        private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS, int seconds)
+        private static async Task WatchChangeStreamUntilChangeAsync(Log log, MongoClient client, JobList jobList, MigrationJob job, MigrationUnit unit, IMongoCollection<BsonDocument> collection, ChangeStreamOptions options, bool resetCS, int seconds, CancellationToken manualCts)
         {
             var pipeline = new BsonDocument[] { };
             if (job.JobType == JobType.RUOptimizedCopy)
@@ -479,8 +481,15 @@ namespace OnlineMongoMigrationProcessor
                     };
             }
 
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
-            using var cursor = await collection.WatchAsync<ChangeStreamDocument<BsonDocument>>(pipeline, options, cts.Token);
+            CancellationTokenSource cts;
+            if (seconds > 0)
+                cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+            else
+                cts = new CancellationTokenSource();
+
+            CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, manualCts);
+
+            using var cursor = await collection.WatchAsync<ChangeStreamDocument<BsonDocument>>(pipeline, options, linkedCts.Token);
             {
                 try
                 {
@@ -500,7 +509,7 @@ namespace OnlineMongoMigrationProcessor
                     // Iterate until cancellation or first change detected
                     while (!cts.Token.IsCancellationRequested)
                     {
-                        var hasNext = await cursor.MoveNextAsync(cts.Token);
+                        var hasNext = await cursor.MoveNextAsync(linkedCts.Token);
                         if (!hasNext)
                         {
                             break; // Stream closed or no more data
@@ -539,8 +548,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
                 catch (OperationCanceledException)
-                {
-                    Console.WriteLine($"Change stream watching was cancelled for {unit.DatabaseName}.{unit.CollectionName}.");
+                {                   
                     // Cancellation requested - exit quietly
                 }
             }
@@ -548,58 +556,66 @@ namespace OnlineMongoMigrationProcessor
 
         /// Manually tails the oplog.rs capped collection for MongoDB 3.6 support.
         /// </summary>
-    private static async Task TailOplogAsync(MongoClient client, string dbName, string collectionName,MigrationUnit unit, CancellationToken cancellationToken)
+    private static async Task<bool> TailOplogAsync(MongoClient client, string dbName, string collectionName,MigrationUnit unit, CancellationToken cancellationToken)
         {
-            var localDb = client.GetDatabase("local");
-            var oplog = localDb.GetCollection<BsonDocument>("oplog.rs");
-
-            // The namespace string for filtering is "db.collection"
-            string ns = $"{dbName}.{collectionName}";
-
-            // Construct filter: ts > last timestamp or start from now
-            var tsFilter = unit.ChangeStreamStartedOn.HasValue
-                ? ConvertToBsonTimestamp(unit.ChangeStreamStartedOn.Value)
-                : ConvertToBsonTimestamp(DateTime.UtcNow.AddSeconds(-1));
-
-            var filterBuilder = Builders<BsonDocument>.Filter;
-            var filter = filterBuilder.Gt("ts", tsFilter) & filterBuilder.Eq("ns", ns);
-
-            // Options for tailable cursor
-            var options = new FindOptions<BsonDocument>
+            try
             {
-                CursorType = CursorType.TailableAwait,
-                NoCursorTimeout = true,
-                BatchSize = 100
-            };
 
-            using (var cursor = await oplog.FindAsync(filter, options, cancellationToken))
-            {
-                while (!cancellationToken.IsCancellationRequested)
+                var localDb = client.GetDatabase("local");
+                var oplog = localDb.GetCollection<BsonDocument>("oplog.rs");
+
+                // The namespace string for filtering is "db.collection"
+                string ns = $"{dbName}.{collectionName}";
+
+                // Construct filter: ts > last timestamp or start from now
+                var tsFilter = unit.ChangeStreamStartedOn.HasValue
+                    ? ConvertToBsonTimestamp(unit.ChangeStreamStartedOn.Value)
+                    : ConvertToBsonTimestamp(DateTime.UtcNow.AddSeconds(-1));
+
+                var filterBuilder = Builders<BsonDocument>.Filter;
+                var filter = filterBuilder.Gt("ts", tsFilter) & filterBuilder.Eq("ns", ns);
+
+                // Options for tailable cursor
+                var options = new FindOptions<BsonDocument>
                 {
-                    while (await cursor.MoveNextAsync(cancellationToken))
+                    CursorType = CursorType.TailableAwait,
+                    NoCursorTimeout = true,
+                    BatchSize = 100
+                };
+
+                using (var cursor = await oplog.FindAsync(filter, options, cancellationToken))
+                {
+                    while (!cancellationToken.IsCancellationRequested)
                     {
-                        foreach (var doc in cursor.Current)
+                        while (await cursor.MoveNextAsync(cancellationToken))
                         {
-                            // Parse oplog document for resume info
-                            var ts = doc["ts"].AsBsonTimestamp;
-                            var nsValue = doc["ns"].AsString;
+                            foreach (var doc in cursor.Current)
+                            {
+                                // Parse oplog document for resume info
+                                var ts = doc["ts"].AsBsonTimestamp;
+                                var nsValue = doc["ns"].AsString;
 
-                            if (!string.Equals(ns, nsValue, StringComparison.Ordinal))
-                                continue; // Filter different ns, just in case
+                                if (!string.Equals(ns, nsValue, StringComparison.Ordinal))
+                                    continue; // Filter different ns, just in case
 
-                            // Update unit fields
-                            unit.ChangeStreamStartedOn = BsonTimestampToUtcDateTime(ts);
-                            // Oplog does not have a resume token; use ts as marker.
+                                // Update unit fields
+                                unit.ChangeStreamStartedOn = BsonTimestampToUtcDateTime(ts);
+                                // Oplog does not have a resume token; use ts as marker.
 
-                            // If you have document key or op, you can extract here
+                                // If you have document key or op, you can extract here
 
-                            return; // Exit on first oplog mu detected
+                                return true; // Exit on first oplog mu detected
+                            }
                         }
-                    }
 
-                    // If no data yet, wait a bit before retrying
-                    await Task.Delay(1000, cancellationToken);
+                        // If no data yet, wait a bit before retrying
+                        await Task.Delay(1000, cancellationToken);
+                    }
                 }
+                return true; // Successfully tailing oplog
+            }
+            catch {
+            return false; // Return false if any error occurs
             }
         }
 

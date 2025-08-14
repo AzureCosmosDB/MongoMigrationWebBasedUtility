@@ -247,8 +247,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                     if (_job.IsOnline && unit.ResetChangeStream)
                     {
                         //if  reset CS needto get the latest CS resume token synchronously
-                        _log.WriteLine($"Resetting Change Stream for {unit.DatabaseName}.{unit.CollectionName}.");
-                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient, _jobList, _job, unit,15);
+                        _log.WriteLine($"Resetting change stream for {unit.DatabaseName}.{unit.CollectionName}.");
+                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient, _jobList, _job, unit,15,_cts);
                     }
 
                     if (unit.MigrationChunks == null || unit.MigrationChunks.Count == 0)
@@ -304,9 +304,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                             //run this job async to detect change stream resume token, if no chnage stream is detected, it will not be set and cancel in 5 minutes
                             _ = Task.Run(async () =>
                             {
-                                await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient!, _jobList, _job, unit,300);
+                                await MongoHelper.SetChangeStreamResumeTokenAsync(_log, _sourceClient!, _jobList, _job, unit,300,_cts);
                             });
-
                         }                        
                        
                         
@@ -339,7 +338,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             return TaskResult.Success;
         }
 
-        private async Task<TaskResult> MigrateJobCollections()
+        private async Task<TaskResult> MigrateJobCollections(CancellationToken ctsToken)
         {
             if (_job == null)
                 return TaskResult.FailedAfterRetries;
@@ -347,7 +346,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             var unitsForMigrate = _job.MigrationUnits ?? new List<MigrationUnit>();
             foreach (var migrationUnit in unitsForMigrate)
             {
-                if (_migrationCancelled) break;
+                if (_migrationCancelled) 
+                    return TaskResult.Canceled;
 
                 if (migrationUnit.SourceStatus == CollectionStatus.OK)
                 {
@@ -371,25 +371,43 @@ namespace OnlineMongoMigrationProcessor.Workers
                         if (_migrationProcessor != null)
                         {
                             if (string.IsNullOrWhiteSpace(_job.SourceConnectionString) || string.IsNullOrWhiteSpace(_job.TargetConnectionString))
-                                return TaskResult.FailedAfterRetries;
-                            await _migrationProcessor.StartProcessAsync(migrationUnit, _job.SourceConnectionString!, _job.TargetConnectionString!);
+                                return TaskResult.Abort;
 
-                            // since CS processsing has started, we can break the loop. No need to process all collections
-                            if (_job.IsOnline && _job.SyncBackEnabled && _job.CSPostProcessingStarted && Helper.IsOfflineJobCompleted(_job))
+                            var result = await _migrationProcessor.StartProcessAsync(migrationUnit, _job.SourceConnectionString!, _job.TargetConnectionString!);
+
+                            if (result == TaskResult.Success)
                             {
-                                return TaskResult.Success;
+                                // since CS processsing has started, we can break the loop. No need to process all collections
+                                if (_job.IsOnline && _job.SyncBackEnabled && _job.CSPostProcessingStarted && Helper.IsOfflineJobCompleted(_job))
+                                {
+                                    break;
+                                }
                             }
+                            else
+                                return result;
                         }
+                        else
+                            return TaskResult.Abort;
                     }
                     else
                     {
                         migrationUnit.SourceStatus = CollectionStatus.NotFound;
                         _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist on source or has zero records", LogType.Error);
-
+                        return TaskResult.Success;
                     }
-                }                
+                }
+                else
+                    return TaskResult.Success;
             }
-            return TaskResult.Success;
+
+            //wait till all activities are done
+            //if there are errors in an actiivty it will stop independently.
+            while (_migrationProcessor!=null && _migrationProcessor.ProcessRunning)
+            {
+                //check back after 10 sec
+                Task.Delay(10000, ctsToken).Wait(ctsToken);
+            }
+            return TaskResult.Success; //all  actiivty completed successfully
         }
 
         
@@ -413,7 +431,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             LoadConfig();
 
             _migrationCancelled = false;
-
+            _cts = new CancellationTokenSource();
 
             if (string.IsNullOrWhiteSpace(_job.Id)) _job.Id = Guid.NewGuid().ToString("N");
             string logfile = _log.Init(_job.Id);
@@ -467,7 +485,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
 
 
-            _cts = new CancellationTokenSource();
+           
             result = await new RetryHelper().ExecuteTask(
                 () => PreparePartitions(_cts.Token),
                 (ex, attemptCount, currentBackoff) => Default_ExceptionHandler(
@@ -498,7 +516,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             
             result = await new RetryHelper().ExecuteTask(
-                () => MigrateJobCollections(),
+                () => MigrateJobCollections(_cts.Token),
                 (ex, attemptCount, currentBackoff) => MigrateCollections_ExceptionHandler(
                     ex, attemptCount,
                     "Migrate collections", currentBackoff
@@ -506,8 +524,14 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _log
             );
 
-            if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries || _migrationCancelled)
-            {
+            if (result==TaskResult.Success|| result == TaskResult.Abort || result == TaskResult.FailedAfterRetries || _migrationCancelled)
+            {                
+                if (result == TaskResult.Success)
+                {
+                    _job.IsCompleted = true;
+                    _jobList.Save();
+                }
+
                 StopMigration();
                 return;
             }

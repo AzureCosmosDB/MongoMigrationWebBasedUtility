@@ -359,7 +359,7 @@ namespace OnlineMongoMigrationProcessor.Processors
         }
                         
 
-        public override async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public override async Task<TaskResult> StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
             ProcessRunning = true;
 
@@ -370,7 +370,7 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             // Check if post-upload change stream processing is already in progress
             if (CheckChangeStreamAlreadyProcessingAsync(ctx))
-                return;
+                return TaskResult.Success;
 
             _log.WriteLine($"RU Copy Processor started for {ctx.DatabaseName}.{ctx.CollectionName}");
 
@@ -394,13 +394,13 @@ namespace OnlineMongoMigrationProcessor.Processors
                 {
                     _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} failed after multiple attempts.", LogType.Error);
                     StopProcessing();
-                    return;
+                    return TaskResult.FailedAfterRetries;
                 }
                 else if (result == TaskResult.Canceled)
                 {
                     _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} was cancelled.");
                     StopProcessing();
-                    return;
+                    return TaskResult.Canceled;
                 }
             }
 
@@ -417,10 +417,12 @@ namespace OnlineMongoMigrationProcessor.Processors
             if (vresult == TaskResult.Abort || vresult == TaskResult.FailedAfterRetries)
             {
                 StopProcessing();
-                return;
+                return vresult;
             }
 
             await PostCopyChangeStreamProcessor(ctx, mu);
+
+            return TaskResult.Success;
         }
 
         private async Task<TaskResult> CheckForPartitionSplitsAsync(MigrationUnit unit)

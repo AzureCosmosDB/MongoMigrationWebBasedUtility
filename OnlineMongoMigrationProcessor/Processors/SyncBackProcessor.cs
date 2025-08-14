@@ -68,7 +68,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             return Task.FromResult(TaskResult.Success);
         }
 
-        public override async Task StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public override async Task<TaskResult> StartProcessAsync(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
             ProcessRunning = true;
 
@@ -99,8 +99,10 @@ namespace OnlineMongoMigrationProcessor.Processors
                 {
                     _changeStreamProcessor.ExecutionCancelled = true;
                     _changeStreamProcessor = null;
-                }
+                }                
             }
+
+            return resultStatus;
         }
     }
 }
