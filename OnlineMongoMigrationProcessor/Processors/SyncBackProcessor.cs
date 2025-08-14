@@ -50,7 +50,7 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             _cts.Token.ThrowIfCancellationRequested();
 
-            _log.WriteLine($"Sync back to source starting.");
+            _log.WriteLine($"SyncBack to source starting.");
 
             var units = _job.MigrationUnits;
             if (units != null)

@@ -104,7 +104,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                             try
                             {
                                 process.Kill();
-                                _log.WriteLine($"{processType} Process terminated due to cancellation.");
+                                _log.WriteLine($"{processType} process terminated due to cancellation.");
                                 _migrationCancelled = false;
                                 break;
                             }

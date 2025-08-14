@@ -56,10 +56,8 @@ namespace OnlineMongoMigrationProcessor.Processors
             {
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
-                {
                     return TaskResult.Canceled;
-                }
-
+  
                 var chunksToProcess = mu.MigrationChunks
                     .Where(s => s.IsUploaded == false)
                     .Take(MaxConcurrentPartitions)
@@ -69,15 +67,12 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
-                {
                     return TaskResult.Canceled;
-                }
 
                 SemaphoreSlim semaphore = new SemaphoreSlim(MaxConcurrentPartitions);
                 List<Task<TaskResult>> tasks = new List<Task<TaskResult>>();
                 foreach (var chunk in chunksToProcess)
                 {
-
                     tasks.Add(Task.Run(async () =>
                     {
                         try
@@ -88,7 +83,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                             }
                             else
                             {
-                                _log.WriteLine($"Target collection is null for {ctx.DatabaseName}.{ctx.CollectionName}. Skipping chunk {chunk.Id} processing.",LogType.Error);
+                                _log.WriteLine($"Target collection is null for {ctx.DatabaseName}.{ctx.CollectionName}.",LogType.Error);
                                 return TaskResult.Retry;
                             }
                         }
@@ -103,7 +98,7 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                 if (results.Any(r => r == TaskResult.Canceled))
                 {
-                    _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName} was cancelled.");
+                    _log.WriteLine($"RU copy operation for {ctx.DatabaseName}.{ctx.CollectionName} was cancelled.");
                     return TaskResult.Canceled;
                 }
 
@@ -118,7 +113,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 var completedCount = mu.MigrationChunks.Count(s => s.IsUploaded == true);
                 var totalProcessed = mu.MigrationChunks.Sum(s => (long)s.DocCountInTarget);
 
-                _log.WriteLine($"Batch completed. RU partitions completed: {completedCount}/{mu.MigrationChunks.Count}, " +
+                _log.WriteLine($"Batch completed. RU partitions processed: {completedCount}/{mu.MigrationChunks.Count}, " +
                                 $"Total documents processed: {totalProcessed}");
 
                 // Update progress
@@ -131,7 +126,6 @@ namespace OnlineMongoMigrationProcessor.Processors
             
             if(mu.MigrationChunks.All(s => s.IsUploaded == true))
             {
-
                 mu.DumpComplete = true;
                 mu.RestoreComplete = true;
                 mu.BulkCopyEndedOn = DateTime.UtcNow;
@@ -152,19 +146,17 @@ namespace OnlineMongoMigrationProcessor.Processors
         private async Task<TaskResult> ProcessChunksInBatchesAsync(MigrationChunk chunk,MigrationUnit mu, IMongoCollection<BsonDocument> sourceCollection,
             IMongoCollection<BsonDocument> targetCollection, CancellationToken timeoutCts, CancellationToken manualToken, bool isSimulated)
         {
-     
+            int counter = 0;
+
             if (chunk.IsUploaded == true)
                 return TaskResult.Success;
 
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts, manualToken);
-
-            int counter = 0;
+            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts, manualToken);    
 
             _log.AddVerboseMessage("Processing RU partition: " + chunk.Id);
 
             try
             {
-
                 var options = new ChangeStreamOptions
                 {
                     FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
@@ -208,11 +200,10 @@ namespace OnlineMongoMigrationProcessor.Processors
                         resumeToken = change.ResumeToken;
                         batchCounter++;
                         counter++;
+
                         // Check for cancellation
                         if (manualToken.IsCancellationRequested)
-                        {
                             return TaskResult.Canceled;
-                        }
 
                         if (counter > _config.ChangeStreamMaxDocsInBatch)
                         {
@@ -221,7 +212,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                         }
                     }
                    
-                    _log.AddVerboseMessage($"Processing RU partition {chunk.Id}, processed {batchCounter}");
+                    _log.AddVerboseMessage($"Processing partition {mu.DatabaseName}.{mu.CollectionName}.[{chunk.Id}], processed {batchCounter}.");
                     await BulkProcessChangesAsync(chunk, targetCollection, changeStreamDocuments);
 
                     if (resumeToken == null)
@@ -249,7 +240,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                         if (currentLSN >= chunk.RUStopLSN)
                         {
                             chunk.IsUploaded = true;
-                            _log.WriteLine($"Chunk [{chunk.Id}] offline copy completed.");
+                            _log.WriteLine($"Partition {mu.DatabaseName}.{mu.CollectionName}.[{chunk.Id}] offline copy completed.");
                             return TaskResult.Success;
                         }
                     }
@@ -259,7 +250,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                     }
                     catch (Exception ex)
                     {
-                        _log.WriteLine($"Error processing chunk {chunk.Id}: {ex}", LogType.Error);
+                        _log.WriteLine($"Error processing partition {mu.DatabaseName}.{mu.CollectionName}.[{chunk.Id}]: {ex}", LogType.Error);
                         IncrementSkippedCounter(chunk);
                         continue;
                     }                    
@@ -278,7 +269,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 if (counter==0)
                 {
                     chunk.IsUploaded = true;
-                    _log.WriteLine($"Chunk [{chunk.Id}] offline copy completed.");
+                    _log.WriteLine($"Partition {mu.DatabaseName}.{mu.CollectionName}.[{chunk.Id}] offline copy completed.");
                     return TaskResult.Success;
                 }
             }
@@ -288,7 +279,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error processing chunk {chunk.Id}: {ex}", LogType.Error);
+                _log.WriteLine($"Error processing partition {mu.DatabaseName}.{mu.CollectionName}.[{chunk.Id}]: {ex}", LogType.Error);
                 return TaskResult.Retry;
             }
             return TaskResult.Retry;
@@ -306,7 +297,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             {
                 // Create the counter delegate implementation
                 CounterDelegate<MigrationChunk> counterDelegate = (t, counterType, operationType, count) => IncrementDocCounter(chunk, count);
-                await MongoHelper.ProcessInsertsAsync<MigrationChunk>(chunk, targetCollection, changeStreamDocuments, counterDelegate, _log, $"Processing RU partition {chunk.Id} - ");
+                await MongoHelper.ProcessInsertsAsync<MigrationChunk>(chunk, targetCollection, changeStreamDocuments, counterDelegate, _log, $"Processing partition {targetCollection.CollectionNamespace}.[{chunk.Id}].");
             }
             else
                 IncrementDocCounter(chunk, changeStreamDocuments.Count);
@@ -372,7 +363,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             if (CheckChangeStreamAlreadyProcessingAsync(ctx))
                 return TaskResult.Success;
 
-            _log.WriteLine($"RU Copy Processor started for {ctx.DatabaseName}.{ctx.CollectionName}");
+            _log.WriteLine($"RU copy Processor started for {ctx.DatabaseName}.{ctx.CollectionName}");
 
             if (!mu.DumpComplete && !_cts.Token.IsCancellationRequested)
             {
@@ -385,20 +376,20 @@ namespace OnlineMongoMigrationProcessor.Processors
                     () => ProcessChunksAsync(mu, ctx),
                     (ex, attemptCount, currentBackoff) => RUProcess_ExceptionHandler(
                         ex, attemptCount,
-                        "RU Chunk processor", ctx.DatabaseName, ctx.CollectionName, "all", currentBackoff
+                        "RU chunk processor", ctx.DatabaseName, ctx.CollectionName, "all", currentBackoff
                     ),
                     _log
                 );
 
                 if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries)
                 {
-                    _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} failed after multiple attempts.", LogType.Error);
+                    _log.WriteLine($"RU copy operation for {ctx.DatabaseName}.{ctx.CollectionName} failed after multiple attempts.", LogType.Error);
                     StopProcessing();
                     return TaskResult.FailedAfterRetries;
                 }
                 else if (result == TaskResult.Canceled)
                 {
-                    _log.WriteLine($"RU Copy operation for {ctx.DatabaseName}.{ctx.CollectionName} was cancelled.");
+                    _log.WriteLine($"RU copy operation for {ctx.DatabaseName}.{ctx.CollectionName} was cancelled.");
                     StopProcessing();
                     return TaskResult.Canceled;
                 }

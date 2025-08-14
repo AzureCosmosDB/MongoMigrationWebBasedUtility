@@ -142,7 +142,7 @@
     private bool startCSAfterUploads = true; // Start change streams after all uploads are done
     private bool enableSyncBack = false;// if the migration is online, reverse sync can be enabled
     private bool skipIndexes = false;// create indexes on Target
-    private bool appendMode = false;// if the target collection exists, it will be deleted
+    private bool appendMode = true;// if the target collection exists, it will be deleted
     private string namespaces = string.Empty;   // Comma-separated list of namespaces to migrate
     private string name = string.Empty; // Name of the migration job
     private string sourceEndpoint = string.Empty;   // Source endpoint extracted from the connection string
@@ -195,7 +195,7 @@
             selectedOption = "MongoDump and MongoRestore";
             isSimulatedRun = false;
             skipIndexes = false;
-            appendMode = false;
+            appendMode = true;
         }
         else
         {

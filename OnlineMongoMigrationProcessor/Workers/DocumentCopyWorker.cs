@@ -96,7 +96,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             ConcurrentBag<Exception> errors = new ConcurrentBag<Exception>();
             try
             {
-               _log.WriteLine($"Document copy for Chunk [{migrationChunkIndex}] with {mu.MigrationChunks[migrationChunkIndex].Segments.Count}. Segments started");
+               _log.WriteLine($"Document copy for {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}] with {mu.MigrationChunks[migrationChunkIndex].Segments.Count} segments started");
                 
                 if(!mu.BulkCopyStartedOn.HasValue || mu.BulkCopyStartedOn == DateTime.MinValue)
                     mu.BulkCopyStartedOn = DateTime.UtcNow;
@@ -173,7 +173,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             if (!errors.IsEmpty)
             {
-               _log.WriteLine($"Document copy for chunk [{migrationChunkIndex}] encountered {errors.Count} errors, skipped {_skippedCount} during the process");
+               _log.WriteLine($"Document copy for {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}] encountered {errors.Count} errors, skipped {_skippedCount} during the process");
                 
             }
 
@@ -184,7 +184,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 var gte = bounds.gte;
                 var lt = bounds.lt;
 
-               _log.WriteLine($"Document copy for chunk[{ migrationChunkIndex}], counting documents on target");
+               _log.WriteLine($"Counting documents on target {mu.DatabaseName}.{mu.CollectionName}[{ migrationChunkIndex}].");
                 
 
                 try
@@ -194,7 +194,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 }
                 catch (Exception ex)
                 {
-                   _log.WriteLine($"Document copy for chunk [{migrationChunkIndex}] encountered error while counting documents on target. Chunk will be reprocessed. Details: {ex.ToString()}", LogType.Error);
+                   _log.WriteLine($"Encountered error while counting documents on target for {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}]. Chunk will be reprocessed. Details: {ex.ToString()}", LogType.Error);
                     
                     ResetSegmentsInChunk(mu.MigrationChunks[migrationChunkIndex]);
                     return TaskResult.Retry;
@@ -202,11 +202,11 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 if (mu.MigrationChunks[migrationChunkIndex].DocCountInTarget == mu.MigrationChunks[migrationChunkIndex].DumpQueryDocCount)
                 {
-                   _log.WriteLine($"Document copy for chunk [{migrationChunkIndex}], verified no documents missing, count in target: {mu.MigrationChunks[migrationChunkIndex].DocCountInTarget}");
+                   _log.WriteLine($"No documents missing in {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}]. Target count: {mu.MigrationChunks[migrationChunkIndex].DocCountInTarget}");
                 }
                 else
                 {
-                   _log.WriteLine($"Document copy for chunk [{migrationChunkIndex}] count mismatch. Chunk will be reprocessed.", LogType.Error);
+                   _log.WriteLine($"Count mismatch in {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}]. Chunk will be reprocessed.", LogType.Error);
 					return TaskResult.Retry;
 				}
                 jobList?.Save(); //persists state
@@ -239,12 +239,12 @@ namespace OnlineMongoMigrationProcessor.Workers
             string segmentId = segment.Id;
             TimeSpan backoff = TimeSpan.FromSeconds(2);
 
-           _log.WriteLine($"Document copy started for segment [{migrationChunkIndex}.{segmentId}]");
+           _log.WriteLine($"Document copy started for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]");
             
 
             if (segment.IsProcessed == true)
             {
-               _log.WriteLine($"Skipping processed segment [{migrationChunkIndex}.{segmentId}]");
+               _log.WriteLine($"Skipping processed segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]");
                 
 
                 Interlocked.Add(ref _successCount, segment.QueryDocCount);
@@ -318,24 +318,24 @@ namespace OnlineMongoMigrationProcessor.Workers
                         {
                             Interlocked.Add(ref _failureCount, otherErrors);
                             _log.WriteLine(
-                                $"Document copy MongoBulkWriteException with non-dupe errors for segment [{migrationChunkIndex}.{segmentId}]",
+                                $"Document copyencountered errors for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]",
                                 LogType.Error);
                             LogErrors(
                                 ex.WriteErrors.Where(e => e.Code != 11000).ToList(),
-                                $"segment [{migrationChunkIndex}.{segmentId}]"
+                                $"segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]"
                             );
                         }
                     }
                     catch (OutOfMemoryException ex)
                     {
                         _log.WriteLine(
-                            $"Document copy encountered OutOfMemoryException for segment [{migrationChunkIndex}.{segmentId}]. " +
+                            $"Encountered Out Of Memory exception for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. " +
                             $"Try reducing _pageSize. Details: {ex}", LogType.Error);
 						return TaskResult.Retry;
 					}
                     catch (Exception ex) when (ex.ToString().Contains("canceled."))
                     {
-                        _log.WriteLine($"Document copy operation for segment [{migrationChunkIndex}.{segmentId}] was canceled.");
+                        _log.WriteLine($"Document copy operation for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] was canceled.");
 						//throw new OperationCanceledException("Document copy operation was cancelled.");
 						return TaskResult.Canceled;
 					}
@@ -343,7 +343,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     {
                         errors.Add(ex);
                         _log.WriteLine(
-                            $"Batch processing error during document copy for segment [{migrationChunkIndex}.{segmentId}]. Details: {ex}",
+                            $"Batch processing error encountered during document copy of segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. Details: {ex}",
                             LogType.Error);
                         failed = true;
                     }
@@ -361,15 +361,15 @@ namespace OnlineMongoMigrationProcessor.Workers
                 {
                     if(failed)
                     {
-                        _log.WriteLine($"Document copy failed for segment [{migrationChunkIndex}.{segmentId}].");
+                        _log.WriteLine($"Document copy failed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}].");
                     }
                     else if(_failureCount > 0 || _skippedCount > 0)
 					{
-                        _log.WriteLine($"Document copy completed for segment [{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied, {_skippedCount} documents skipped(duplicate), {_failureCount} documents failed.");
+                        _log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied, {_skippedCount} documents skipped(duplicate), {_failureCount} documents failed.");
 					}
                     else
                     {
-						_log.WriteLine($"Document copy completed for segment [{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied.");
+						_log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied.");
 					}
                     segment.IsProcessed = !failed;
                     jobList.Save();
@@ -381,7 +381,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             catch (Exception ex) when (!(ex is OperationCanceledException))
             {
                 errors.Add(ex);
-                _log.WriteLine($"Document copy encountered error while processing segment [{migrationChunkIndex}.{segmentId}], Details: {ex.ToString()}", LogType.Error);
+                _log.WriteLine($"Document copy encountered error while processing segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}], Details: {ex.ToString()}", LogType.Error);
 				return TaskResult.Retry;
 			}
         }

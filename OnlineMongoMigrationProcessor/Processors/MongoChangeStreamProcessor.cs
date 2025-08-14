@@ -55,7 +55,7 @@ namespace OnlineMongoMigrationProcessor
             _config = config;
             _syncBack = syncBack;
             if (_syncBack)
-                _syncBackPrefix = "Sync Back: ";
+                _syncBackPrefix = "SyncBack: ";
 
             _concurrentProcessors = _config?.ChangeStreamMaxCollsInBatch ?? 5;
             _processorRunMaxDurationInSec = _config?.ChangeStreamBatchDuration ?? 120;

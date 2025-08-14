@@ -43,7 +43,7 @@ namespace OnlineMongoMigrationProcessor
                 userFilter= BsonDocument.Parse(userFilterCondition);
             }
 
-            log.AddVerboseMessage($"Counting documents before sampling data where _id is {dataType}");
+            log.AddVerboseMessage($"Counting documents in {collection.CollectionNamespace}. Sampling data where _id is {dataType}");
 
             try
             {
@@ -56,8 +56,8 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (Exception ex)
                 {
-                    log.WriteLine($"Exception occurred while counting documents: {ex.ToString()}", LogType.Error);
-                    log.WriteLine($"Using Estimated document count");
+                    log.WriteLine($"Exception occurred while counting documents in {collection.CollectionNamespace}. Details: {ex.ToString()}", LogType.Error);
+                    log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace}");
 
                     docCountByType = GetDocumentCountByDataType(collection, dataType, true, userFilter);
                 }
@@ -65,23 +65,23 @@ namespace OnlineMongoMigrationProcessor
 
                 if (docCountByType == 0)
                 {
-                    log.WriteLine($"No documents where _id is {dataType}");
+                    log.WriteLine($"{collection.CollectionNamespace} has no documents where _id is {dataType}");
                     return null;
                 }
                 else if (docCountByType < minDocsPerChunk)
                 {
-                    log.WriteLine($"Document count where _id is {dataType}:{docCountByType} is less than min chunk size.");
+                    log.WriteLine($"{collection.CollectionNamespace} has {docCountByType} document(s) where _id is {dataType}. Count is less than minimum chunk size.");
                     sampleCount = 1;
                     chunkCount = 1;
                 }
                 else
                 {
-                    log.WriteLine($"Document count where _id is {dataType}:{docCountByType} : {docCountByType}");
+                    log.WriteLine($"{collection.CollectionNamespace} has {docCountByType} document(s) where _id is {dataType}");
 
                 }
 
                 if (chunkCount > MaxSamples)
-                    throw new ArgumentException("Chunk count too large. Retry with larger Chunk Size.");
+                    throw new ArgumentException("Chunk count too large. Retry with larger 'Chunk Size'.");
 
 
                 // Ensure minimum documents per chunk
@@ -154,7 +154,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                     catch (Exception ex)
                     {
-                        log.WriteLine($"Attempt {i} encountered error sampling data where _id is {dataType}: {ex.ToString()}");
+                        log.WriteLine($"Attempt {i} encountered error while sampling data where _id is {dataType}: {ex.ToString()}");
 
                     }
                 }

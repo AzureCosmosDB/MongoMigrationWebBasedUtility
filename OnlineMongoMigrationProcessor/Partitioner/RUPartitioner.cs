@@ -38,7 +38,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
 
                 if (!startTokens.Any())
                 {
-                    _log.WriteLine($"No RU partition tokens found for {_sourceCollection.CollectionNamespace}", LogType.Error);
+                    _log.WriteLine($"No partition found for {_sourceCollection.CollectionNamespace}", LogType.Error);
                     return new List<MigrationChunk>();
                 }
 
@@ -48,9 +48,9 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 foreach (var token in startTokens)
                 {
                     if(isVerificationMode)
-                        _log.AddVerboseMessage($"Verifying RU partition token #{counter + 1}");
+                        _log.AddVerboseMessage($"Verifying partition #{_sourceCollection.CollectionNamespace}[{counter + 1}]");
                     else
-                        _log.AddVerboseMessage($"Processing RU partition token #{counter + 1}");
+                        _log.AddVerboseMessage($"Processing partition #{_sourceCollection.CollectionNamespace}[{counter + 1}]");
 
                     //for FFCF create a new resume token with the current timestamp
                     var currentToken = UpdateStartAtOperationTime(token, MongoHelper.ConvertToBsonTimestamp(DateTime.UtcNow)); // Set initial timestamp to 0
@@ -68,13 +68,13 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                     counter++;
                 }
                 if (!isVerificationMode)
-                    _log.WriteLine($"Partitioning complete.");
+                    _log.WriteLine($"Partitioning complete for {_sourceCollection.CollectionNamespace}.");
 
                 return chunks;
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error processing RU partitions: {ex}", LogType.Error);
+                _log.WriteLine($"Error processing partitions for {_sourceCollection.CollectionNamespace}. Details: {ex}", LogType.Error);
                 return new List<MigrationChunk>();
             }
         }
