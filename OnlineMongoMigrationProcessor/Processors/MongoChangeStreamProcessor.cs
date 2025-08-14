@@ -665,6 +665,7 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
+                IncrementEventCounter(mu, opType);
                 switch (opType)
                 {
                     case ChangeStreamOperationType.Insert:
@@ -712,8 +713,8 @@ namespace OnlineMongoMigrationProcessor
                         _log.WriteLine($"Unhandled operation type: {opType}");
                         return false;
                 }
-            }
-
+                
+            }          
 
             catch (MongoException mex) when (opType == ChangeStreamOperationType.Insert && mex.Message.Contains("DuplicateKey"))
             {

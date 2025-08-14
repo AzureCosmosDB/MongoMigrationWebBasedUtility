@@ -572,6 +572,20 @@ namespace OnlineMongoMigrationProcessor.Workers
             _migrationProcessor = new SyncBackProcessor(_log,_jobList, _job, dummySourceClient, _config!);
             _migrationProcessor.ProcessRunning = true;
             var dummyUnit = new MigrationUnit("","", new List<MigrationChunk>());
+
+            //if run comparison is set by customer.
+            if (_job.RunComparison)
+            {
+                var compareHelper = new ComparisonHelper();
+                _compare_cts = new CancellationTokenSource();
+                compareHelper.CompareRandomDocumentsAsync(_log, _jobList, _job, _config!, _compare_cts.Token).GetAwaiter().GetResult();
+                compareHelper = null;
+                _job.RunComparison = false;
+                _jobList.Save();
+
+                _log.WriteLine("Resuming Sync Back.");
+            }
+
             _migrationProcessor.StartProcessAsync(dummyUnit, sourceConnectionString, targetConnectionString).GetAwaiter().GetResult();
             
         }
@@ -635,10 +649,6 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                         if (docCountByType == 0  || chunkBoundaries == null) continue;
 
-                        //if (chunkBoundaries == null)
-                        //{
-                        //    CreateDummyChunk(chunkBoundaries);
-                        //}
                         
                         CreateSegments(chunkBoundaries, migrationChunks, dataType);
                     }
@@ -661,28 +671,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 return new List<MigrationChunk>();
             }
         }
-
-        private void CreateDummyChunk(ChunkBoundaries chunkBoundaries)
-        {           
-            var min = BsonNull.Value;
-            var max = BsonNull.Value;
-
-            var chunkBoundary = new Boundary
-            {
-                StartId = min,
-                EndId = max,
-                SegmentBoundaries = new List<Boundary>()
-            };
-
-            chunkBoundaries.Boundaries ??= new List<Boundary>();
-            chunkBoundaries.Boundaries.Add(chunkBoundary);
-            var segmentBoundary = new Boundary
-            {
-                StartId = min,
-                EndId = max
-            };
-            chunkBoundary.SegmentBoundaries.Add(segmentBoundary);            
-        }
+              
 
         private void CreateSegments(ChunkBoundaries chunkBoundaries, List<MigrationChunk> migrationChunks, DataType dataType)
         {

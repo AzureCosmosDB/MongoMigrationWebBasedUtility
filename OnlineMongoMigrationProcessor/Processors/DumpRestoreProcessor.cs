@@ -357,7 +357,7 @@ namespace OnlineMongoMigrationProcessor
 
                         if (result == TaskResult.Abort || result == TaskResult.FailedAfterRetries)
                         {
-                            _log.WriteLine($"Dump operation for {dbName}.{colName}-{i} failed after multiple attempts.", LogType.Error);
+                            _log.WriteLine($"Dump operation for {dbName}.{colName}[{i}] failed after multiple attempts.", LogType.Error);
                             StopProcessing();
 
                             return result; // Abort the process
@@ -517,7 +517,7 @@ namespace OnlineMongoMigrationProcessor
                     double contributionFactor = (double)mu.MigrationChunks[i].DumpQueryDocCount / Helper.GetMigrationUnitDocCount(mu);
                     if (mu.MigrationChunks.Count == 1) contributionFactor = 1;
 
-                    _log.WriteLine($"{dbName}.{colName}-{i} uploader processing");
+                    _log.WriteLine($"{dbName}.{colName}[{i}] uploader processing");
 
                     var restoreResult = new RetryHelper()
                         .ExecuteTask(
@@ -529,7 +529,7 @@ namespace OnlineMongoMigrationProcessor
 
                     if (restoreResult == TaskResult.Abort || restoreResult == TaskResult.FailedAfterRetries)
                     {
-                        _log.WriteLine($"Restore operation for {dbName}.{colName}-{i} failed after multiple attempts.", LogType.Error);
+                        _log.WriteLine($"Restore operation for {dbName}.{colName}[{i}] failed after multiple attempts.", LogType.Error);
                         StopProcessing();
                         return;
                     }
@@ -559,8 +559,8 @@ namespace OnlineMongoMigrationProcessor
             }
             catch { }
 
-            // Start change stream immediately per-mu if configured
-            //AddCollectionToChangeStreamQueue(mu, targetConnectionString);
+            // Start change stream immediately if configured
+            AddCollectionToChangeStreamQueue(mu, targetConnectionString);
 
             // Remove from upload queue
             MigrationUnitsPendingUpload.Remove(key);

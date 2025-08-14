@@ -96,12 +96,12 @@ namespace OnlineMongoMigrationProcessor
             }
             else if(result == TaskResult.Canceled)
             {
-                _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}-{chunkIndex} was cancelled.");
+                _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}[{chunkIndex}] was cancelled.");
 				return TaskResult.Canceled;
 			}
 			else
             {
-                _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}-{chunkIndex} failed.", LogType.Error);
+                _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}[{chunkIndex}] failed.", LogType.Error);
 				return TaskResult.Retry;
 			}
 
@@ -145,7 +145,7 @@ namespace OnlineMongoMigrationProcessor
 
                         if (result== TaskResult.Abort || result== TaskResult.FailedAfterRetries)
                         {
-                            _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}-{i} failed after multiple attempts.", LogType.Error);
+                            _log.WriteLine($"Document copy operation for {ctx.DatabaseName}.{ctx.CollectionName}[{i}] failed after multiple attempts.", LogType.Error);
                             StopProcessing();
                             return result;
                         }
