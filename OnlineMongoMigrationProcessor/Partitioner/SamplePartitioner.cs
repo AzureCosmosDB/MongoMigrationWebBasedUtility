@@ -81,7 +81,7 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 if (chunkCount > MaxSamples)
-                    throw new ArgumentException("Chunk count too large. Retry with larger 'Chunk Size'.");
+                    throw new ArgumentException($"Chunk count too large for {collection.CollectionNamespace}. Retry with larger 'Chunk Size'.");
 
 
                 // Ensure minimum documents per chunk
@@ -123,7 +123,7 @@ namespace OnlineMongoMigrationProcessor
 
                 // Step 2: Sample the data
 
-                log.WriteLine($"Sampling data where _id is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
+                log.WriteLine($"Sampling {collection.CollectionNamespace} for data where _id is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
 
 
                 var pipeline = new[]
@@ -154,7 +154,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                     catch (Exception ex)
                     {
-                        log.WriteLine($"Attempt {i} encountered error while sampling data where _id is {dataType}: {ex.ToString()}");
+                        log.WriteLine($"Encountered error in attempt {i} while sampling data where _id is {dataType}: {ex.ToString()}");
 
                     }
                 }

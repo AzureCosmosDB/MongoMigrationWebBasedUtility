@@ -1,11 +1,22 @@
 # Migration Tool for Azure Cosmos DB for MongoDB (vCore-Based)
 
-Streamline your migration to Azure Cosmos DB for MongoDB (vCore-based) with a tool built for efficiency, reliability, and ease of use. Whether you're migrating data online or offline, this tool delivers a seamless experience tailored to your requirements. It can either use `mongodump` and `mongorestore` for data movement or employ the MongoDB driver to read data from the source and write it to the target. You don’t need to learn or use these command-line tools yourself.
+Streamline your migration to Azure Cosmos DB for MongoDB (vCore‑based) with a reliable, easy‑to‑use web app. Choose your migration tool and migration mode (offline or online). The app orchestrates bulk copy and, for online jobs, change‑stream catch‑up. You don’t need to learn or use these command-line tools yourself.
+
+### Migration tool
+
+- **MongoDump and MongoRestore**: Uses mongo-tools. Best for moving from self-hosted or Atlas.
+- **MongoDB Driver**: Uses the driver for bulk copy and change stream catch-up.
+- **MongoDB Driver (Cosmos DB RU read optimized)**: Optimized for Cosmos DB Mongo RU as source. Uses RU-friendly read patterns.
+
+### Migration mode
+
+- **Offline**: Snapshot-only copy. Job completes automatically when copy finishes.
+- **Online**: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
 
 ## Key Features
 
 - **Flexible Migration Options**  
-  Supports both online and offline migrations to suit your business requirements. It can either use `mongodump` and `mongorestore` for data movement or employ the MongoDB driver to read data from the source and write it to the target. If you are migrating an on-premises MongoDB VM, consider using the [On-Premises Deployment](#on-premises-deployment) to install the app locally and transfer data to Azure. This eliminates the need to set up an Azure VPN.
+  Supports both online and offline migrations to suit your business requirements. It supports multiple tools to read data from the source and write it to the target. If you are migrating from on-premises MongoDB VM, consider using the [On-Premises Deployment](#on-premises-deployment) to install the app locally and transfer data to Azure Cosmos DB for MongoDB (vCore‑based). This eliminates the need to set up an Azure VPN.
 
 - **User-Friendly Interface**  
   No steep learning curve—simply provide your connection strings and specify the collections to migrate.
@@ -14,7 +25,7 @@ Streamline your migration to Azure Cosmos DB for MongoDB (vCore-based) with a to
   Migration resumes automatically in case of connection loss, ensuring uninterrupted reliability.
 
 - **Private Deployment**  
-  Deploy the tool within your private virtual network (vNet) for enhanced security. (Update `main.bicep` for vNet configuration.)
+  Deploy the tool within your private virtual network (VNet) for enhanced security. (Update `main.bicep` for VNet configuration.)
 
 - **Standalone Solution**  
   Operates independently, with no dependencies on other Azure resources.
@@ -22,7 +33,7 @@ Streamline your migration to Azure Cosmos DB for MongoDB (vCore-based) with a to
 - **Scalable Performance**  
   Select your Azure Web App pricing plan based on performance requirements:  
   - Default: **B1**  
-  - Recommended for large workloads: **Premium v3 P1V3** (Update `main.bicep` accordingly.)
+  - Recommended for large workloads: **Premium v3 P2V3** (Update `main.bicep` accordingly.)
 
 - **Customizable**  
   Modify the provided C# code to suit your specific use cases.
@@ -43,7 +54,6 @@ Follow these steps to migrate data from a cloud-based MongoDB VM or MongoDB Atla
 
 
 ### Deploy on Azure using Source Files (option 1)
-
 This option involves cloning the repository and building the C# project source files locally on a Windows machine. If you’re not comfortable working with code, consider using Option 2 below.
 
 
@@ -76,10 +86,10 @@ This option involves cloning the repository and building the C# project source f
    az deployment group create --resource-group $resourceGroupName --template-file main.bicep --parameters location=WestUs3 webAppName=$webAppName
 
 
-   # Configure Nuget Path. Execute only once on a machine
+    # Configure NuGet path (execute only once on a machine)
    dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 
-   # Delete the existing publish folder (if exist)
+    # Delete the existing publish folder (if it exists)
    if (Test-Path $publishFolder) {
 		Remove-Item -Path $publishFolder -Recurse -Force -Confirm:$false
    }
@@ -168,7 +178,6 @@ Accessing MongoDB servers within a VNet requires VNet injection. To enable conne
 
 3. **Create the VNet**:
    - Click **Review + Create** and then **Create**.
-
 #### 1. Enable VNet Integration for the Web App
 
 1. **Go to the Web App**:
@@ -179,11 +188,9 @@ Accessing MongoDB servers within a VNet requires VNet injection. To enable conne
    - Under **Outbound Traffic**, click **VNet Integration**.
    - Click **Add VNet** and choose an existing VNet and subnet.
    - Ensure the subnet is delegated to **Microsoft.Web**.
-
 3. **Save** the configuration.
 
 #### 2. Configure a NAT Gateway for the VNet
-
 1. **Create a Public IP Address**:
    - Go to **Create a resource** in the Azure Portal.
    - Search for **Public IP Address** and click **Create**.
@@ -384,7 +391,7 @@ Follow these steps to migrate data from an on-premises MongoDB VM. You can deplo
 2. In the **New Job Details** pop-up, enter all required information.  
 3. If necessary, use the [list collection steps](#create-comma-separated-list-of-collections) to create a comma-separated list of collection names.  
 4. Choose the migration tool: either **Mongo Dump/Restore** or **Mongo Driver**.  
-5. Select the desired [migration mode](#migrations-modes).
+5. Select the desired [migration mode](#migration-modes).
 1. Select **Post Migration Sync Back** to enable syncing back to the source after migration, this helps reduce risk by allowing a rollback to the original server if needed.
 1. Select **Append Mode** to preserve existing collection(s) on the target without deleting them.  
 1. Select **Skip Indexes** to prevent the tool from copying indexes from the source.
@@ -395,13 +402,13 @@ Follow these steps to migrate data from an on-premises MongoDB VM. You can deplo
 **Note:** For the Mongo Dump/Restore option, the Web App will download the mongo-tools from the URL specified in the Web App settings. Ensure that the Web App has access to this URL. If the Web App does not have internet access, you can download the mongo-tools zip file to your development machine, then copy it to the wwwroot folder inside the published folder before compressing it. Afterward, update the URL in the Web App settings to point to the Web App’s URL (e.g., https://<WebAppName>.azurewebsites.net/<zipfilename.zip>).
 
 
-### Migrations modes
+### Migration modes
 
 Migrations can be done in two ways:
 
-- Offline Migration: A snapshot based bulk copy from source to target. New data added/updated/deleted on the source after the snapshot isn't copied to the target. The application downtime required depends on the time taken for the bulk copy activity to complete.
+- **Offline Migration**: A snapshot based bulk copy from source to target. New data added/updated/deleted on the source after the snapshot isn't copied to the target. The application downtime required depends on the time taken for the bulk copy activity to complete.
 
-- Online Migration: Apart from the bulk data copy activity done in the offline migration, a change stream monitors all additions/updates/deletes. After the bulk data copy is completed, the data in the change stream is copied to the target to ensure that all updates made during the migration process are also transferred to the target. The application downtime required is minimal.
+- **Online Migration**: Apart from the bulk data copy activity done in the offline migration, a change stream monitors all additions/updates/deletes. After the bulk data copy is completed, the data in the change stream is copied to the target to ensure that all updates made during the migration process are also transferred to the target. The application downtime required is minimal.
 
 
 #### Oplog retention size
@@ -526,3 +533,133 @@ Initially, you may not see updates here until the application cutover is complet
 ### Download Job Details
 1. From the home page  
 2. Select the **download icon** next to the job title to download the job details as JSON. This may be used for debugging purposes. 
+
+## Job options and behaviors
+
+When creating or resuming a job, you can tailor behavior via these options:
+
+- Migration tool
+    - MongoDump and MongoRestore: Uses mongo-tools. Best for moving from self-hosted or Atlas to Cosmos DB. Requires access to Mongo Tools ZIP URL configured in Settings.
+    - MongoDB Driver: Uses the driver for bulk copy and change stream catch-up.
+    - MongoDB Driver (Cosmos DB RU read optimized): Optimized for Cosmos DB Mongo vCore as source. Skips index creation and uses RU-friendly read patterns. Filters on collections are not supported for this mode.
+
+- Migration mode
+    - Offline: Snapshot-only copy. Job completes automatically when copy finishes.
+    - Online: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
+
+- Append Mode
+    - If ON: Keeps existing target data and appends new documents. No collection drop. Good for incremental top-ups.
+    - If OFF: Target collections are overwritten. A confirmation checkbox is required to proceed.
+
+- Skip Indexes
+    - If ON: Skips index creation on target (data only). Forced ON for RU-optimized copy. You can create indexes separately before migration.
+
+- Delay Change Stream (CS starts after uploads)
+    - If ON: For online jobs, change stream processing starts only after all collections finish bulk upload.
+    - If OFF: Change streams start per-collection after that collection’s bulk upload is done.
+
+- Post Migration Sync Back
+    - For online jobs, after Cut Over you can enable syncing from target back to source. This reduces rollback risk. UI shows Time Since Sync Back once active.
+
+- Simulation Mode (No Writes to Target)
+    - Runs a dry-run where reads occur but no writes are performed on target. Useful for validation and sizing.
+
+## Collections input formats
+
+You can specify collections in two ways:
+
+1) CSV list
+- Example: `db1.col1,db1.col2,db2.colA`
+- Order matters. Larger collections should appear first to reduce overall time.
+
+2) JSON list with optional filters
+- Use the structure below (see `CollectionInfoFormat.JSON` in the repo):
+
+Notes:
+- Filters must be valid MongoDB query JSON (as a string). Only supports basic operators (`eq`,`lt`,`lte`,`gt`,`gte`,`in`) on root fields. They apply to both bulk copy and change stream.
+- RU-optimized copy does not support filters; provide only DatabaseName and CollectionName.
+- System collections are not supported.
+
+### CollectionInfoFormat Format
+
+ ```JSON
+[
+    { "CollectionName": "Customers", "DatabaseName": "SalesDB", "Filter": "{ \"status\": \"active\"}" },
+    { "CollectionName": "Orders", "DatabaseName": "SalesDB", "Filter": "{ \"orderDate\": { \"$gte\": { \"$date\": \"2024-01-01T00:00:00Z\" } } }" },
+    { "CollectionName": "Products", "DatabaseName": "InventoryDB", "Filter": null }
+]
+```
+
+## Settings (gear icon) 
+
+These settings are persisted per app instance and affect all jobs:
+
+- Mongo tools download URL
+    - HTTPS ZIP URL to mongo-tools used by Dump/Restore. If your app has no internet egress, upload the ZIP alongside your app content and point this URL to your app’s public URL of the file.
+    - Must start with https:// and end with .zip
+
+- Binary format utilized for the _id
+    - Use when your source uses binary GUIDs for _id.
+
+- Chunk size (MB) for mongodump
+    - Range: 2–5120. Affects download-and-upload batching for Dump/Restore.
+
+- Mongo driver page size
+    - Range: 50–40000. Controls batch size for driver-based bulk reads/writes.
+
+- Change stream max docs per batch
+    - Range: 100–10000. Larger batches reduce overhead but increase memory/latency.
+
+- Change stream batch duration (max/min, seconds)
+    - Max range: 20–3600; Min range: 10–600; Min must be less than Max. Controls how long change processors run per batch window.
+
+- Max collections per change stream batch
+    - Range: 1–30. Concurrency limit when processing multiple collections.
+
+- Sample size for hash comparison
+    - Range: 5–2000. Used by the “Run Hash Check” feature to spot-check document parity.
+
+- CA certificate file for source server (.pem)
+    - Paste/upload the PEM (CA chain) if your source requires a custom CA to establish TLS.
+
+Advanced notes:
+- App setting `AllowMongoDump` (see `MongoMigrationWebApp/appsettings.json`) toggles whether the “MongoDump and MongoRestore” option is available in the UI.
+- The app’s working folder defaults to the system temp path, or to `%ResourceDrive%\home\` when present (e.g., on Azure App Service). It stores job state under `migrationjobs` and logs under `migrationlogs`.
+
+## Job lifecycle controls in Job Viewer
+
+- **Resume Job**: Resume with updated or existing connection strings.
+- **Pause Job**: Safely pause the running job.
+- **Cut Over**: For online jobs, enabled when change stream lag reaches zero for all collections. You can choose Cut Over with or without Sync Back.
+- **Update Collections**: Add/remove collections on a paused job. Removing a collection discards its migration and change stream state.
+- **Reset Change Stream**: For selected collections, reset the checkpoint to reprocess from the beginning. Useful if you suspect missed events.
+- **Run Hash Check**: Randomly samples documents and compares hashes between source and target to detect mismatches. Controlled by the Settings sample size.
+
+
+## RU-optimized copy (Cosmos DB source)
+
+- Reduce RU consumption when reading from Cosmos DB for MongoDB (RU) by using change-feed-like incremental reads and partition batching. This method skips index creation during the copy; use the schema migration script at https://aka.ms/mongoruschemamigrationscript to create the indexes on the target collections. It focuses on efficient incremental ingestion. Collection filters are not supported.
+
+## Security and data handling
+
+- Connection strings are not persisted on disk (they’re excluded from persistence). Endpoints are stored for display and validation.
+- Provide a PEM CA certificate if your source uses a private CA for TLS.
+- Consider deploying behind VNet integration and/or Private Endpoint (see earlier sections) to restrict access.
+
+## Logs, backup, and recovery
+
+- Logs: Each job writes under `migrationlogs`. From Job Viewer you can download the current log or a backup if corruption is detected.
+- Job state: Persisted under `migrationjobs\list.json` with rotating backups every few minutes. Use the “Recover Jobs” button on Home to restore from the best available backup snapshot. This stops any running jobs and replaces the in-memory list with the recovered state.
+
+## Performance tips
+
+- Choose an appropriate App Service plan (P2v3 recommended for large or high-TPS workloads). You can dedicate a web app per large collection.
+- For driver copy, tune “Mongo driver page size” upward for higher throughput, but watch memory and target write capacity.
+- For online jobs, ensure oplog retention on the source is large enough to cover full bulk copy duration plus catch-up.
+- For Dump/Restore, set chunk size to balance disk IO and memory; ensure sufficient disk space on the working folder drive.
+
+## Troubleshooting
+
+- “Unable to load job details” on Home: Use “Recover Jobs” to restore the latest healthy snapshot.
+- Change stream lag not decreasing: Confirm the job is running, source writes exist, and consider increasing plan size or reducing concurrent collections.
+- RU-optimized copy stalls: Validate source is Cosmos DB Mongo vCore, ensure no partition split warnings, and verify target write capacity.
