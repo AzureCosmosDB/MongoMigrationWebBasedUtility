@@ -1,0 +1,193 @@
+@page "/jobreport/{JobId}"
+@using OnlineMongoMigrationProcessor
+@inject Service.JobManager JobManager
+@inject NavigationManager NavigationManager
+
+<div class="no-print d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">@MigrationJob?.Name - Job Report</h3>
+    <div class="d-flex align-items-center mb-3">
+        <button class="btn btn-light me-2" title="Back to Job List" @onclick="GoBack" style="border: none; background: transparent;">
+            <i class="bi bi-arrow-left"></i>
+        </button>
+        <button class="btn btn-primary" title="Print" onclick="window.print()">
+            <i class="bi bi-printer"></i>
+        </button>
+    </div>
+</div>
+
+@if (MigrationJob is null)
+{
+    <div class="alert alert-warning">Job not found.</div>
+}
+else
+{
+    <style>
+        /* Printer friendly styles */
+        @@page {
+            size: A4 landscape;
+            margin: 8mm;
+        }
+        @@media print {
+            .no-print { display: none !important; }
+            body { -webkit-print-color-adjust: exact; print-color-adjust: exact; font-size: 10px; }
+            .small-text { font-size: 9px; }
+            .table-tight td, .table-tight th { padding: 2px 4px; }
+            .group-cell { line-height: 1.2; }
+        }
+        .kv-table thead th { width: 30%; }
+        .kv-table thead th + th { width: 70%; }
+        .section-title { font-size: 1.05rem; margin-top: 1rem; }
+        .small-text { font-size: .9rem; }
+        .nowrap { white-space: nowrap; }
+        .wrap { word-break: break-word; }
+        .table-tight td, .table-tight th { padding: .35rem .5rem; }
+        .report-table { table-layout: fixed; width: 100%; }
+        th, td { vertical-align: top; }
+        .col-db { width: 18ch; }
+        .col-coll { width: 22ch; }
+        .col-off { width: 26ch; }
+        .col-cs { width: 28ch; }
+        .col-sb { width: 26ch; }
+        .col-cnt { width: 26ch; }
+        .col-cmp { width: 20ch; }
+        .group-cell div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .lbl { color: #555; }
+    </style>
+
+    <div>
+        <div class="section-title">Job Details</div>
+        <table class="table table-borderless table-sm kv-table small-text">
+            <thead>
+                <tr>
+                    <th>Property</th>
+                    <th>Value</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td class="nowrap">Job Name</td><td class="wrap">@MigrationJob.Name</td></tr>
+                <tr><td class="nowrap">Job Type</td><td>@GetToolName(MigrationJob.JobType)</td></tr>
+                <tr><td class="nowrap">Started On (UTC)</td><td>@(MigrationJob.StartedOn?.ToString() ?? "N/A")</td></tr>
+                <tr><td class="nowrap">Is Online</td><td>@(MigrationJob.IsOnline ? "Yes" : "No")</td></tr>
+                <tr><td class="nowrap">Is Completed</td><td>@(MigrationJob.IsCompleted ? "Yes" : "No")</td></tr>
+                <tr><td class="nowrap">Sync Back Enabled</td><td>@(MigrationJob.SyncBackEnabled ? "Yes" : "No")</td></tr>
+                <tr><td class="nowrap">Processing Sync Back</td><td>@(MigrationJob.ProcessingSyncBack ? "Yes" : "No")</td></tr>
+                <tr><td class="nowrap">Run Comparison</td><td>@(MigrationJob.RunComparison ? "Yes" : "No")</td></tr>
+                <tr><td class="nowrap">Source Endpoint</td><td class="wrap">@MigrationJob.SourceEndpoint</td></tr>
+                <tr><td class="nowrap">Target Endpoint</td><td class="wrap">@MigrationJob.TargetEndpoint</td></tr>
+                <tr><td class="nowrap">Namespaces</td><td class="wrap">@MigrationJob.NameSpaces</td></tr>
+                <tr><td class="nowrap">Collections</td><td>@(MigrationJob.MigrationUnits?.Count ?? 0)</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section-title">Collections</div>
+    <table class="table table-bordered table-striped table-tight small-text report-table">
+        <thead>
+            <tr>
+                <th class="col-db">Database</th>
+                <th class="col-coll">Collection</th>
+                <th class="col-off">Offline Copy</th>
+                <th class="col-cs">Change Stream</th>
+                <th class="col-sb">Sync Back</th>
+                <th class="col-cnt">Counts</th>
+                <th class="col-cmp">Comparison</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var mu in (MigrationJob.MigrationUnits ?? new List<MigrationUnit>()))
+        {
+            var duration = GetDuration(mu.BulkCopyStartedOn, mu.BulkCopyEndedOn);
+            <tr>
+                <td>@mu.DatabaseName</td>
+                <td>@mu.CollectionName</td>
+                <td class="group-cell">
+                    <div><span class="lbl">Start:</span> @(mu.BulkCopyStartedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">End:</span> @(mu.BulkCopyEndedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Duration:</span> @duration</div>
+                    <div><span class="lbl">Dump %:</span> @FormatPercent(mu.DumpPercent)</div>
+                    <div><span class="lbl">Restore %:</span> @FormatPercent(mu.RestorePercent)</div>
+                    <div><span class="lbl">Idx Migrated:</span> @mu.IndexesMigrated</div>
+                </td>
+                <td class="group-cell">
+                    <div><span class="lbl">Started:</span> @(mu.ChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Last Age:</span> @GetChangeStreamLag(mu, false)</div>
+                    <div><span class="lbl">Last Batch:</span> @FormatLong(mu.CSUpdatesInLastBatch)</div>
+                    <div><span class="lbl">Batch Secs:</span> @mu.CSLastBatchDurationSeconds</div>
+                </td>
+                <td class="group-cell">
+                    <div><span class="lbl">Started:</span> @(mu.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Last Age:</span> @GetChangeStreamLag(mu, true)</div>
+                    <div><span class="lbl">Last Batch:</span> @FormatLong(mu.SyncBackUpdateEvents)</div>
+                </td>
+                <td class="group-cell">
+                    <div><span class="lbl">Src Status:</span> @mu.SourceStatus</div>
+                    <div><span class="lbl">Estimated:</span> @FormatLong(mu.EstimatedDocCount)</div>
+                    <div><span class="lbl">Actual:</span> @FormatLong(mu.ActualDocCount)</div>
+                    <div><span class="lbl">Src @@ Copy:</span> @FormatLong(mu.SourceCountDuringCopy)</div>
+                    <div><span class="lbl">Dump Gap:</span> @FormatLong(mu.DumpGap)</div>
+                    <div><span class="lbl">Restore Gap:</span> @FormatLong(mu.RestoreGap)</div>
+                </td>
+                <td class="group-cell">
+                    <div><span class="lbl">Compared On:</span> @(mu.ComparedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Variance:</span> @mu.VarianceCount</div>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
+
+@code {
+    [Parameter]
+    public string JobId { get; set; } = string.Empty;
+
+    private MigrationJob? MigrationJob { get; set; }
+
+    protected override void OnParametersSet()
+    {
+        MigrationJob = JobManager.GetMigrations(out _, true)?.Find(m => m.Id == JobId);
+    }
+
+    private void GoBack()
+    {
+        NavigationManager.NavigateTo("/");
+    }
+
+    private string GetToolName(OnlineMongoMigrationProcessor.Models.JobType jobType)
+    {
+        return jobType switch
+        {
+            OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy => "MongoDB Driver (Cosmos DB RU read optimized)",
+            OnlineMongoMigrationProcessor.Models.JobType.MongoDriver => "MongoDB Driver",
+            OnlineMongoMigrationProcessor.Models.JobType.DumpAndRestore => "MongoDump and MongoRestore",
+            _ => "NA"
+        };
+    }
+
+    private static string FormatPercent(double value)
+    {
+        if (value >= 100) return "100%";
+        if (value <= 0) return "0%";
+        return $"{value:F1}%";
+    }
+
+    private static string GetDuration(DateTime? start, DateTime? end)
+    {
+        if (!start.HasValue || !end.HasValue || start.Value == DateTime.MinValue || end.Value == DateTime.MinValue)
+            return "N/A";
+        var d = end.Value - start.Value;
+        return $"{(int)d.TotalHours}h {d.Minutes}m {d.Seconds}s";
+    }
+
+    private static string GetChangeStreamLag(MigrationUnit unit, bool isSyncBack)
+    {
+        DateTime timestamp = isSyncBack ? unit.SyncBackCursorUtcTimestamp : unit.CursorUtcTimestamp;
+        if (timestamp == DateTime.MinValue || unit.ResetChangeStream)
+            return "NA";
+        var lag = DateTime.UtcNow - timestamp;
+        if (lag.TotalSeconds < 0) return "Invalid";
+        return $"{(int)lag.TotalMinutes} min {(int)lag.Seconds} sec";
+    }
+
+    private static string FormatLong(long value) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:N0}", value);
+}

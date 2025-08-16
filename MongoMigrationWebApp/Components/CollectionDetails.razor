@@ -1,30 +1,133 @@
 ﻿@using OnlineMongoMigrationProcessor
 
 <div class="modal fade show d-block bg-dark bg-opacity-75" id="myModal" aria-modal="true" role="dialog">
-    <div class="modal-dialog bg-dark">
+    <div class="modal-dialog bg-dark modal-xl">
         <div class="modal-content">
             <div class="modal-header">
                 <h4 class="modal-title">Collection Details</h4>
                 <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button>
             </div>
             <div class="modal-body">
-                @if (Properties?.Any() == true)
+                @if (MigrationUnit is not null)
                 {
-                    <table class="table table-borderless" style="font-size: 0.85rem; line-height: 1.1;">
+                    <style>
+                        .cd-table { table-layout: fixed; width: 100%; font-size: .9rem; }
+                        .cd-table th, .cd-table td { vertical-align: top; padding: .35rem .5rem; }
+                        .cd-col-label { width: 20ch; white-space: nowrap; }
+                        /* Show full values without trimming */
+                        .group div { line-height: 1.3; white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; overflow-wrap: anywhere; }
+                        .lbl { color: #666; }
+                        @@media (max-width: 768px) { .modal-dialog { max-width: 98vw; } }
+                        /* Allow scrolling if content is very long */
+                        .modal-body { max-height: 78vh; overflow: auto; }
+                    </style>
+
+                    <table class="table table-bordered table-striped cd-table">
                         <thead>
                             <tr>
-                                <th style="width: 30%; white-space: nowrap;">Property</th>
-                                <th style="width: 70%; word-break: break-word;">Value</th>
+                                <th class="cd-col-label">Group</th>
+                                <th>Details</th>
                             </tr>
                         </thead>
                         <tbody>
-                            @foreach (var kvp in Properties)
-                            {
-                                <tr>
-                                    <td style="white-space: nowrap;">@kvp.Key</td>
-                                    <td style="word-break: break-word;">@kvp.Value</td>
-                                </tr>
-                            }
+                            <tr>
+                                <td class="cd-col-label">General</td>
+                                <td class="group">
+                                    <div><span class="lbl">Database:</span> @MigrationUnit.DatabaseName</div>
+                                    <div><span class="lbl">Collection:</span> @MigrationUnit.CollectionName</div>
+                                    <div><span class="lbl">Source Status:</span> @MigrationUnit.SourceStatus</div>
+                                    @if (!string.IsNullOrEmpty(MigrationUnit.UserFilter))
+                                    {
+                                        <div><span class="lbl">Initial Estimate:</span> N/A since filter applied</div>
+                                        <div><span class="lbl">User Filter:</span> @MigrationUnit.UserFilter</div>
+                                    }
+                                    else
+                                    {
+                                        <div><span class="lbl">Initial Estimate:</span> @FormatLong(MigrationUnit.EstimatedDocCount)</div>
+                                        <div><span class="lbl">User Filter:</span> N/A</div>
+                                    }
+                                    <div><span class="lbl">Before Copying:</span> @FormatLong(MigrationUnit.ActualDocCount)</div>
+                                    <div><span class="lbl">While Processing:</span> @FormatLong(MigrationUnit.SourceCountDuringCopy)</div>
+                                    <div><span class="lbl">Indexes Created:</span> @MigrationUnit.IndexesMigrated</div>
+                                </td>
+                            </tr>
+
+                            <tr>
+                                <td class="cd-col-label">Offline Copy</td>
+                                <td class="group">
+                                    <div><span class="lbl">Start:</span> @(MigrationUnit.BulkCopyStartedOn?.ToString() ?? "N/A")</div>
+                                    <div><span class="lbl">End:</span> @(MigrationUnit.BulkCopyEndedOn?.ToString() ?? "N/A")</div>
+                                    <div><span class="lbl">Duration:</span> @GetDuration(MigrationUnit.BulkCopyStartedOn, MigrationUnit.BulkCopyEndedOn)</div>
+                                    @{
+                                        var totals = GetProcessedTotals(MigrationUnit);
+                                    }
+                                    <div><span class="lbl">Processed Total:</span> @FormatLong(totals.Total)</div>
+                                    <div><span class="lbl">Insert:</span> @FormatLong(totals.Inserted)</div>
+                                    <div><span class="lbl">Duplicates (skipped):</span> @FormatLong(totals.Skipped)</div>
+                                    <div><span class="lbl">Failed:</span> @FormatLong(totals.Failed)</div>
+                                </td>
+                            </tr>
+
+                            <tr>
+                                <td class="cd-col-label">Change Stream</td>
+                                <td class="group">
+                                    @if (MigrationJob?.IsOnline ?? false)
+                                    {
+                                        <div><span class="lbl">Started On:</span> @(MigrationUnit.ChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.OriginalResumeToken ?? "N/A")</div>
+                                        <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.CursorUtcTimestamp</div>
+                                        <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.ResumeToken ?? "N/A")</div>
+                                        <div><span class="lbl">First Change Replayed:</span> @MigrationUnit.InitialDocumenReplayed</div>
+                                        <div><span class="lbl">First Change Document:</span> @(MigrationUnit.ResumeDocumentId?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">First Change Operation:</span> @MigrationUnit.ResumeTokenOperation</div>
+                                        <div><span class="lbl">Inserted:</span> @FormatLong(MigrationUnit.CSDocsInserted) (from @FormatLong(MigrationUnit.CSDInsertEvents) events)</div>
+                                        <div><span class="lbl">Deleted:</span> @FormatLong(MigrationUnit.CSDocsDeleted) (from @FormatLong(MigrationUnit.CSDeleteEvents) events)</div>
+                                        <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.CSDocsUpdated) (from @FormatLong(MigrationUnit.CSUpdatedEvents) events)</div>
+                                        <div><span class="lbl">Duplicate Processed:</span> @FormatLong(MigrationUnit.CSDuplicateDocsSkipped) skipped</div>
+                                        <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.CSErrors)</div>
+                                    }
+                                    else
+                                    {
+                                        <div class="text-muted">Not an online migration.</div>
+                                    }
+                                </td>
+                            </tr>
+
+                            <tr>
+                                <td class="cd-col-label">Sync Back</td>
+                                <td class="group">
+                                    @if ((MigrationJob?.IsOnline ?? false) && (MigrationJob?.SyncBackEnabled ?? false))
+                                    {
+                                        <div><span class="lbl">Resume Token:</span> @(MigrationUnit.SyncBackResumeToken ?? "N/A")</div>
+                                        <div><span class="lbl">Started On:</span> @(MigrationUnit.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">Cursor Utc Timestamp:</span> @MigrationUnit.SyncBackCursorUtcTimestamp</div>
+                                        <div><span class="lbl">Inserted:</span> @FormatLong(MigrationUnit.SyncBackDocsInserted) (from @FormatLong(MigrationUnit.SyncBackInsertEvents) events)</div>
+                                        <div><span class="lbl">Deleted:</span> @FormatLong(MigrationUnit.SyncBackDocsDeleted) (from @FormatLong(MigrationUnit.SyncBackDeleteEvents) events)</div>
+                                        <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.SyncBackDocsUpdated) (from @FormatLong(MigrationUnit.SyncBackUpdateEvents) events)</div>
+                                        <div><span class="lbl">Duplicate Processed:</span> @FormatLong(MigrationUnit.SyncBackDuplicateDocsSkipped) skipped</div>
+                                        <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.SyncBackErrors)</div>
+                                    }
+                                    else
+                                    {
+                                        <div class="text-muted">Sync Back not enabled.</div>
+                                    }
+                                </td>
+                            </tr>
+
+                            <tr>
+                                <td class="cd-col-label">Comparison</td>
+                                <td class="group">
+                                    @if (MigrationUnit.ComparedOn.HasValue && MigrationUnit.ComparedOn != DateTime.MinValue)
+                                    {
+                                        <div><span class="lbl">Hash Compared Time:</span> @MigrationUnit.ComparedOn</div>
+                                        <div><span class="lbl">Differences:</span> @FormatLong(MigrationUnit.VarianceCount)</div>
+                                    }
+                                    else
+                                    {
+                                        <div class="text-muted">No comparison recorded.</div>
+                                    }
+                                </td>
+                            </tr>
                         </tbody>
                     </table>
                 }
@@ -54,96 +157,24 @@
     [Parameter]
     public EventCallback OnClose { get; set; }
 
-    private Dictionary<string, string> Properties = new();
-
-    protected override void OnInitialized()
+    private (long Total, long Inserted, long Skipped, long Failed) GetProcessedTotals(MigrationUnit mu)
     {
-    if (MigrationUnit == null)
-            return;
-
-        // Add properties to display
-
-        Properties.Add("Source Status", MigrationUnit.SourceStatus.ToString() ?? "N/A");
-
-        Properties.Add("Offline Copy Start Time", MigrationUnit.BulkCopyStartedOn.ToString() ?? "N/A");
-        Properties.Add("Offline Copy End Time", MigrationUnit.BulkCopyEndedOn.ToString() ?? "N/A");
-
-        if (MigrationUnit.BulkCopyStartedOn.HasValue && MigrationUnit.BulkCopyEndedOn.HasValue
-            && MigrationUnit.BulkCopyStartedOn != DateTime.MinValue && MigrationUnit.BulkCopyEndedOn != DateTime.MinValue)
-        {
-            var duration = MigrationUnit.BulkCopyEndedOn.Value - MigrationUnit.BulkCopyStartedOn.Value;
-            Properties.Add("Offline Copy Duration", $"{(int)duration.TotalMinutes} min {(int)duration.Seconds} sec");
-        }
-        else
-        {
-            Properties.Add("Offline Copy Duration", "N/A");
-        }
-
-        if (MigrationUnit.UserFilter != null && MigrationUnit.UserFilter.Any())
-        {
-            Properties.Add("Source Document Count Initial Estimate", "N/A since filter applied");
-            Properties.Add("User Filter", MigrationUnit.UserFilter);
-        }
-        else
-        {
-            Properties.Add("Source Document Count Initial Estimate", MigrationUnit.EstimatedDocCount.ToString() ?? "N/A");
-            Properties.Add("User Filter", "N/A");
-        }
-        
-        Properties.Add("Source Document Count Before Copying", MigrationUnit.ActualDocCount.ToString() ?? "N/A");
-
-        long totalSkipped = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.SkippedAsDuplicateCount) ?? 0;
-        long totalInserted = (MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredSuccessDocCount) ?? 0) - totalSkipped;
-        long totalFailed = MigrationUnit.MigrationChunks?.Sum(MigrationChunk => MigrationChunk.RestoredFailedDocCount) ?? 0;
-
-        Properties.Add("Source Document Count While Processing ", MigrationUnit.SourceCountDuringCopy.ToString() ?? "N/A");
-        Properties.Add("Processed Total", (totalInserted + totalSkipped + totalFailed).ToString() ?? "N/A");
-        Properties.Add("*********** Insert", (totalInserted).ToString() ?? "N/A");
-        Properties.Add("*********** Duplicates(skipped)", (totalSkipped).ToString() ?? "N/A");
-        Properties.Add("*********** Failed", (totalFailed).ToString() ?? "N/A");
-        Properties.Add("*********** Indexes Created", MigrationUnit.IndexesMigrated.ToString() ?? "N/A");
-
-
-        if (MigrationJob != null && MigrationJob.IsOnline)
-        {
-            Properties.Add("Change Stream (CS) Started On", MigrationUnit.ChangeStreamStartedOn.ToString() ?? "N/A");
-            Properties.Add("CS Start Resume Token", MigrationUnit.OriginalResumeToken ?? "N/A");
-
-            Properties.Add("CS Current TimeStamp", MigrationUnit.CursorUtcTimestamp.ToString() ?? "N/A");
-            Properties.Add("CS CurrentResume Token", MigrationUnit.ResumeToken ?? "N/A");
-
-            Properties.Add("CS First Change Replayed", MigrationUnit.InitialDocumenReplayed.ToString());
-            Properties.Add("CS First Change Document", MigrationUnit.ResumeDocumentId?.ToString() ?? "N/A");
-            Properties.Add("CS First Change Operation", MigrationUnit.ResumeTokenOperation.ToString());
-            Properties.Add("CS Inserted",$"{MigrationUnit.CSDocsInserted.ToString()} (from {MigrationUnit.CSDInsertEvents.ToString()} events)");
-            Properties.Add("CS Deleted", $"{MigrationUnit.CSDocsDeleted.ToString()} (from {MigrationUnit.CSDeleteEvents.ToString()} events)");
-            Properties.Add("CS Updated", $"{MigrationUnit.CSDocsUpdated.ToString()} (from {MigrationUnit.CSUpdatedEvents.ToString()} events)");
-            Properties.Add("CS Duplicate Processed",$"{MigrationUnit.CSDuplicateDocsSkipped.ToString()} skipped");
-            Properties.Add("CS Failed (with retries)", $"{MigrationUnit.CSErrors.ToString()}");
-
-
-            if (MigrationJob.SyncBackEnabled)
-            {
-                Properties.Add("SyncBack Resume Token", MigrationUnit.SyncBackResumeToken ?? "N/A");
-                Properties.Add("SyncBack Change Stream Started On", MigrationUnit.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A");
-                Properties.Add("SyncBack Cursor Utc Timestamp", MigrationUnit.SyncBackCursorUtcTimestamp.ToString() ?? "N/A");
-
-                Properties.Add("SyncBack Inserted", $"{MigrationUnit.SyncBackDocsInserted.ToString()} (from {MigrationUnit.SyncBackInsertEvents.ToString()} events)");
-                Properties.Add("SyncBack Deleted", $"{MigrationUnit.SyncBackDocsDeleted.ToString()} (from {MigrationUnit.SyncBackDeleteEvents.ToString()} events)");
-                Properties.Add("SyncBack Updated", $"{MigrationUnit.SyncBackDocsUpdated.ToString()} (from {MigrationUnit.SyncBackUpdateEvents.ToString()} events)");
-                Properties.Add("SyncBack Duplicate Processed", $"{MigrationUnit.SyncBackDuplicateDocsSkipped.ToString()} skipped");
-                Properties.Add("SyncBack Failed (with retries)", $"{MigrationUnit.SyncBackErrors.ToString()}");
-            } 
-
-            if (MigrationUnit.ComparedOn.HasValue && MigrationUnit.ComparedOn != DateTime.MinValue)
-            {
-                Properties.Add("Hash Compared Time", MigrationUnit.ComparedOn.Value.ToString() ?? "N/A");
-                Properties.Add("***********Differences", MigrationUnit.VarianceCount.ToString() ?? "N/A");
-            }
-
-        }
+        long skipped = mu.MigrationChunks?.Sum(c => c.SkippedAsDuplicateCount) ?? 0;
+        long inserted = (mu.MigrationChunks?.Sum(c => c.RestoredSuccessDocCount) ?? 0) - skipped;
+        long failed = mu.MigrationChunks?.Sum(c => c.RestoredFailedDocCount) ?? 0;
+        long total = inserted + skipped + failed;
+        return (total, inserted, skipped, failed);
     }
 
+    private static string GetDuration(DateTime? start, DateTime? end)
+    {
+        if (!start.HasValue || !end.HasValue || start.Value == DateTime.MinValue || end.Value == DateTime.MinValue)
+            return "N/A";
+        var d = end.Value - start.Value;
+        return $"{(int)d.TotalHours}h {d.Minutes}m {d.Seconds}s";
+    }
+
+    private static string FormatLong(long value) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:N0}", value);
 
     private void Cancel()
     {

@@ -65,6 +65,9 @@
                             <button class="btn btn-primary" title="View Job" @onclick="() => ViewMigration(migration.Id)">
                                 <i class="bi bi-eye"></i>
                             </button>
+                            <button class="btn btn-success" title="Job Report" @onclick="() => ViewJobReport(migration.Id)">
+                                <i class="bi bi-printer"></i>
+                            </button>
                             <button class="btn btn-secondary" title="Delete Job" @onclick="() => RemoveMigration(migration.Id)">
                                 <i class="bi bi-trash"></i>
                             </button>
@@ -336,7 +339,6 @@
 
 
 
-
     private void OpenConfig()
     {
         _editSettingsOpen = true;
@@ -360,6 +362,11 @@
     {
 
         NavigationManager.NavigateTo($"/migrationjobviewer/{id}");
+    }
+
+    private void ViewJobReport(string? id)
+    {
+        NavigationManager.NavigateTo($"/jobreport/{id}");
     }
 
     private void StartMigrationAsync()
