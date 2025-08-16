@@ -4,11 +4,14 @@
 @inject NavigationManager NavigationManager
 
 <div class="no-print d-flex justify-content-between align-items-center mb-3">
-    <h3 class="mb-0">@MigrationJob?.Name - Job Report</h3>
-    <div class="d-flex align-items-center mb-3">
+   
+    <h3 class="mb-0">
         <button class="btn btn-light me-2" title="Back to Job List" @onclick="GoBack" style="border: none; background: transparent;">
             <i class="bi bi-arrow-left"></i>
         </button>
+        @MigrationJob?.Name - Job Report</h3>
+    <div class="d-flex align-items-center mb-3">
+       
         <button class="btn btn-primary" title="Print" onclick="window.print()">
             <i class="bi bi-printer"></i>
         </button>
