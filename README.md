@@ -13,6 +13,39 @@ Streamline your migration to Azure Cosmos DB for MongoDB (vCore‑based) with a 
 - **Offline**: Snapshot-only copy. Job completes automatically when copy finishes.
 - **Online**: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
 
+
+## Table of Contents
+
+- [Key Features](#key-features)
+- [Azure Deployment](#azure-deployment)
+  - [Prerequisites](#prerequisites)
+  - [Deploy on Azure using Source Files (option 1)](#deploy-on-azure-using-source-files-option-1)
+  - [Deploy on Azure using precompiled binaries (option 2)](#deploy-on-azure-using-precompiled-binaries-option-2)
+  - [VNet Integration for MongoDB servers within a private Virtual Network (VNet)](#vnet-integration-for-mongodb-servers-within-a-private-virtual-network-vnet)
+  - [Integrating Azure Web App with a VNet to Use a Single Public IP (Optional)](#integrating-azure-web-app-with-a-vnet-to-use-a-single-public-ip-optional)
+  - [Steps to Enable Private Endpoint on the Azure Web App (Optional)](#steps-to-enable-private-endpoint-on-the-azure-web-app-optional)
+- [On-Premises Deployment](#on-premises-deployment)
+  - [Steps to Deploy on a Windows Server](#steps-to-deploy-on-a-windows-server)
+- [How to Use](#how-to-use)
+  - [Add a New Job](#add-a-new-job)
+  - [Migration modes](#migration-modes)
+  - [Create Comma Separated List of Collections](#create-comma-separated-list-of-collections)
+  - [Sequencing your collections](#sequencing-your-collections)
+  - [View a Job](#view-a-job)
+  - [Update Web App Settings](#update-web-app-settings)
+  - [Remove a Job](#remove-a-job)
+  - [Download Job Details](#download-job-details)
+- [Job options and behaviors](#job-options-and-behaviors)
+- [Collections input formats](#collections-input-formats)
+  - [CollectionInfoFormat Format](#collectioninfoformat-format)
+- [Settings (gear icon)](#settings-gear-icon)
+- [Job lifecycle controls in Job Viewer](#job-lifecycle-controls-in-job-viewer)
+- [RU-optimized copy (Cosmos DB source)](#ru-optimized-copy-cosmos-db-source)
+- [Security and data handling](#security-and-data-handling)
+- [Logs, backup, and recovery](#logs-backup-and-recovery)
+- [Performance tips](#performance-tips)
+- [Troubleshooting](#troubleshooting)
+
 ## Key Features
 
 - **Flexible Migration Options**  
