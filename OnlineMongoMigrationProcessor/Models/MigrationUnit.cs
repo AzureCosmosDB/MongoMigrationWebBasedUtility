@@ -62,7 +62,7 @@ namespace OnlineMongoMigrationProcessor
 
         public long CSDInsertEvents { get; set; }
         public long CSDeleteEvents { get; set; }
-        public long CSUpdatedEvents { get; set; }
+        public long CSUpdateEvents { get; set; }
         public long CSErrors { get; set; }
 
         public long CSDocsInserted { get; set; }

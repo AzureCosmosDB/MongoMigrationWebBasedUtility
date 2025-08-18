@@ -162,7 +162,7 @@
                         @if (MigrationJob.JobType != OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy || MigrationJob.ProcessingSyncBack)
                         {
                             <td>                           
-                               @GetChangeStreamLag(unit, MigrationJob.ProcessingSyncBack)                            
+                               @Helper.GetChangeStreamLag(unit, MigrationJob.ProcessingSyncBack)                            
                             </td>
                         }
                         <td>
@@ -471,33 +471,33 @@ else if (@_showLogBackupFile)
         return Task.FromResult(false);
     }
 
-    private string GetChangeStreamLag(MigrationUnit unit, bool isSyncBack=false)
-    {
-        DateTime timestamp;
-        if (isSyncBack)
-        {
-            timestamp = unit.SyncBackCursorUtcTimestamp;
-        }
-        else
-        {
-            timestamp = unit.CursorUtcTimestamp;
-        }
+    // private string GetChangeStreamLag(MigrationUnit unit, bool isSyncBack=false)
+    // {
+    //     DateTime timestamp;
+    //     if (isSyncBack)
+    //     {
+    //         timestamp = unit.SyncBackCursorUtcTimestamp;
+    //     }
+    //     else
+    //     {
+    //         timestamp = unit.CursorUtcTimestamp;
+    //     }
 
-        if (timestamp == DateTime.MinValue || unit.ResetChangeStream)
-        {
-            return "NA";
-        }
+    //     if (timestamp == DateTime.MinValue || unit.ResetChangeStream)
+    //     {
+    //         return "NA";
+    //     }
 
-        var currentUtc = DateTime.UtcNow;
-        var lag = currentUtc - timestamp;
+    //     var currentUtc = DateTime.UtcNow;
+    //     var lag = currentUtc - timestamp;
 
-        if (lag.TotalSeconds < 0)
-        {
-            return "Invalid";
-        }
+    //     if (lag.TotalSeconds < 0)
+    //     {
+    //         return "Invalid";
+    //     }
 
-        return $"{(int)lag.TotalMinutes} min {(int)lag.Seconds} sec";
-    }
+    //     return $"{(int)lag.TotalMinutes} min {(int)lag.Seconds} sec";
+    // }
 
     private bool CheckCutoverReadiness()
     {

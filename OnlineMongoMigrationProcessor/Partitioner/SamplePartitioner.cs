@@ -47,7 +47,7 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-
+                docCountByType = 0;
                 cts.ThrowIfCancellationRequested();
 
                 try
@@ -57,11 +57,14 @@ namespace OnlineMongoMigrationProcessor
                 catch (Exception ex)
                 {
                     log.WriteLine($"Exception occurred while counting documents in {collection.CollectionNamespace}. Details: {ex.ToString()}", LogType.Error);
-                    log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace}");
-
-                    docCountByType = GetDocumentCountByDataType(collection, dataType, true, userFilter);
+                    if(userFilter==null || userFilter.ElementCount == 0)
+                    {
+                        log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace} due to error in counting documents.");
+                        docCountByType = GetDocumentCountByDataType(collection, dataType, true, userFilter);
+                    }
+                    else
+                        return null;
                 }
-
 
                 if (docCountByType == 0)
                 {
@@ -250,7 +253,7 @@ namespace OnlineMongoMigrationProcessor
             BsonDocument matchCondition = BuildDataTypeCondition(dataType, userFilter);
 
             // Get the count of documents matching the filter
-            if (useEstimate)
+            if (useEstimate && (matchCondition is null || matchCondition.ElementCount == 0))
             {
                 var options = new EstimatedDocumentCountOptions { MaxTime = TimeSpan.FromSeconds(300) };
                 var count = collection.EstimatedDocumentCount(options);

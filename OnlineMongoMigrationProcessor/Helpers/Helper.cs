@@ -232,7 +232,24 @@ namespace OnlineMongoMigrationProcessor
                return Math.Max(mu.ActualDocCount, mu.EstimatedDocCount);
         }
 
+        public static (long Total, long Inserted, long Skipped, long Failed) GetProcessedTotals(MigrationUnit mu)
+        {
+            long skipped = mu.MigrationChunks?.Sum(c => c.SkippedAsDuplicateCount) ?? 0;
+            long inserted = (mu.MigrationChunks?.Sum(c => c.RestoredSuccessDocCount) ?? 0) - skipped;
+            long failed = mu.MigrationChunks?.Sum(c => c.RestoredFailedDocCount) ?? 0;
+            long total = inserted + skipped + failed;
+            return (total, inserted, skipped, failed);
+        }
 
+        public static string GetChangeStreamLag(MigrationUnit unit, bool isSyncBack)
+        {
+            DateTime timestamp = isSyncBack ? unit.SyncBackCursorUtcTimestamp : unit.CursorUtcTimestamp;
+            if (timestamp == DateTime.MinValue || unit.ResetChangeStream)
+                return "NA";
+            var lag = DateTime.UtcNow - timestamp;
+            if (lag.TotalSeconds < 0) return "Invalid";
+            return $"{(int)lag.TotalMinutes} min {(int)lag.Seconds} sec";
+        }
 
         public static List<MigrationUnit> PopulateJobCollections(string namespacesToMigrate)
         {

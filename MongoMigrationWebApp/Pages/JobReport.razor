@@ -27,7 +27,6 @@ else
     <style>
         /* Printer friendly styles */
         @@page {
-            size: A4 landscape;
             margin: 8mm;
         }
         @@media print {
@@ -43,17 +42,15 @@ else
         .small-text { font-size: .9rem; }
         .nowrap { white-space: nowrap; }
         .wrap { word-break: break-word; }
-        .table-tight td, .table-tight th { padding: .35rem .5rem; }
+        .table-tight td, .table-tight th { padding: .135rem .5rem; }
         .report-table { table-layout: fixed; width: 100%; }
         th, td { vertical-align: top; }
         .col-db { width: 18ch; }
-        .col-coll { width: 22ch; }
-        .col-off { width: 26ch; }
-        .col-cs { width: 28ch; }
-        .col-sb { width: 26ch; }
         .col-cnt { width: 26ch; }
-        .col-cmp { width: 20ch; }
-        .group-cell div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .col-cs { width: 28ch; }
+        .col-sb { width: 26ch; }        
+        .col-cmp { width: 26ch; }
+        .group-cell div {}        
         .lbl { color: #555; }
     </style>
 
@@ -73,11 +70,8 @@ else
                 <tr><td class="nowrap">Is Online</td><td>@(MigrationJob.IsOnline ? "Yes" : "No")</td></tr>
                 <tr><td class="nowrap">Is Completed</td><td>@(MigrationJob.IsCompleted ? "Yes" : "No")</td></tr>
                 <tr><td class="nowrap">Sync Back Enabled</td><td>@(MigrationJob.SyncBackEnabled ? "Yes" : "No")</td></tr>
-                <tr><td class="nowrap">Processing Sync Back</td><td>@(MigrationJob.ProcessingSyncBack ? "Yes" : "No")</td></tr>
-                <tr><td class="nowrap">Run Comparison</td><td>@(MigrationJob.RunComparison ? "Yes" : "No")</td></tr>
                 <tr><td class="nowrap">Source Endpoint</td><td class="wrap">@MigrationJob.SourceEndpoint</td></tr>
                 <tr><td class="nowrap">Target Endpoint</td><td class="wrap">@MigrationJob.TargetEndpoint</td></tr>
-                <tr><td class="nowrap">Namespaces</td><td class="wrap">@MigrationJob.NameSpaces</td></tr>
                 <tr><td class="nowrap">Collections</td><td>@(MigrationJob.MigrationUnits?.Count ?? 0)</td></tr>
             </tbody>
         </table>
@@ -87,12 +81,10 @@ else
     <table class="table table-bordered table-striped table-tight small-text report-table">
         <thead>
             <tr>
-                <th class="col-db">Database</th>
-                <th class="col-coll">Collection</th>
-                <th class="col-off">Offline Copy</th>
+                <th class="col-db">Namespace</th>
+                <th class="col-cnt">Offline Copy</th>
                 <th class="col-cs">Change Stream</th>
-                <th class="col-sb">Sync Back</th>
-                <th class="col-cnt">Counts</th>
+                <th class="col-sb">Sync Back</th>               
                 <th class="col-cmp">Comparison</th>
             </tr>
         </thead>
@@ -101,38 +93,51 @@ else
         {
             var duration = GetDuration(mu.BulkCopyStartedOn, mu.BulkCopyEndedOn);
             <tr>
-                <td>@mu.DatabaseName</td>
-                <td>@mu.CollectionName</td>
+                 <td class="group-cell">
+                    <div><span class="lbl">Database:</span> @mu.DatabaseName</div>
+                    <div><span class="lbl">Collection:</span> @mu.CollectionName</div>
+                </td>
                 <td class="group-cell">
-                    <div><span class="lbl">Start:</span> @(mu.BulkCopyStartedOn?.ToString() ?? "N/A")</div>
-                    <div><span class="lbl">End:</span> @(mu.BulkCopyEndedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Source Status:</span> @mu.SourceStatus</div>
+                    <div><span class="lbl">Started On (UTC):</span> @(mu.BulkCopyStartedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Ended On (UTC):</span> @(mu.BulkCopyEndedOn?.ToString() ?? "N/A")</div>
                     <div><span class="lbl">Duration:</span> @duration</div>
-                    <div><span class="lbl">Dump %:</span> @FormatPercent(mu.DumpPercent)</div>
-                    <div><span class="lbl">Restore %:</span> @FormatPercent(mu.RestorePercent)</div>
-                    <div><span class="lbl">Idx Migrated:</span> @mu.IndexesMigrated</div>
+                    <div><span class="lbl">Indexes Migrated:</span> @mu.IndexesMigrated</div>
+                    <div><span class="lbl">Estimated Count:</span> @FormatLong(mu.EstimatedDocCount)</div>
+                    <div><span class="lbl">Actual Count:</span> @FormatLong(mu.ActualDocCount)</div>
+                    <div><span class="lbl">Count While Copying:</span> @FormatLong(mu.SourceCountDuringCopy)</div>
+                    @{
+                        var totals = Helper.GetProcessedTotals(mu);
+                    }
+                    <div><span class="lbl">Processed Total:</span> @FormatLong(totals.Total)</div>
+                    <div><span class="lbl">Insert:</span> @FormatLong(totals.Inserted)</div>
+                    <div><span class="lbl">Duplicates (skipped):</span> @FormatLong(totals.Skipped)</div>
+                    <div><span class="lbl">Failed:</span> @FormatLong(totals.Failed)</div>
                 </td>
                 <td class="group-cell">
-                    <div><span class="lbl">Started:</span> @(mu.ChangeStreamStartedOn?.ToString() ?? "N/A")</div>
-                    <div><span class="lbl">Last Age:</span> @GetChangeStreamLag(mu, false)</div>
-                    <div><span class="lbl">Last Batch:</span> @FormatLong(mu.CSUpdatesInLastBatch)</div>
-                    <div><span class="lbl">Batch Secs:</span> @mu.CSLastBatchDurationSeconds</div>
+                        <div><span class="lbl">Started On (UTC):</span> @(mu.ChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Last Event Age:</span> @Helper.GetChangeStreamLag(mu, false)</div>
+                    <div><span class="lbl">Last Batch Count:</span> @FormatLong(mu.CSUpdatesInLastBatch)</div>
+                    <div><span class="lbl">Inserted:</span> @FormatLong(mu.CSDocsInserted) (from @FormatLong(mu.CSDInsertEvents) events)</div>
+                    <div><span class="lbl">Deleted:</span> @FormatLong(mu.CSDocsDeleted) (from @FormatLong(mu.CSDeleteEvents) events)</div>
+                    <div><span class="lbl">Updated:</span> @FormatLong(mu.CSDocsUpdated) (from @FormatLong(mu.CSUpdateEvents) events)</div>
+                    <div><span class="lbl">Duplicate Processed:</span> @FormatLong(mu.CSDuplicateDocsSkipped) skipped</div>
+                    <div><span class="lbl">Failed (with retries):</span> @FormatLong(mu.CSErrors)</div>
                 </td>
                 <td class="group-cell">
-                    <div><span class="lbl">Started:</span> @(mu.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
-                    <div><span class="lbl">Last Age:</span> @GetChangeStreamLag(mu, true)</div>
-                    <div><span class="lbl">Last Batch:</span> @FormatLong(mu.SyncBackUpdateEvents)</div>
+                        <div><span class="lbl">Started On (UTC):</span> @(mu.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Last Event Age:</span> @Helper.GetChangeStreamLag(mu, true)</div>
+                    <div><span class="lbl">Last Batch Count:</span> @FormatLong(mu.SyncBackUpdateEvents)</div>
+                    <div><span class="lbl">Inserted:</span> @FormatLong(mu.SyncBackDocsInserted) (from @FormatLong(mu.SyncBackInsertEvents) events)</div>
+                    <div><span class="lbl">Deleted:</span> @FormatLong(mu.SyncBackDocsDeleted) (from @FormatLong(mu.SyncBackDeleteEvents) events)</div>
+                    <div><span class="lbl">Updated:</span> @FormatLong(mu.SyncBackDocsUpdated) (from @FormatLong(mu.SyncBackUpdateEvents) events)</div>
+                    <div><span class="lbl">Duplicate Processed:</span> @FormatLong(mu.SyncBackDuplicateDocsSkipped) skipped</div>
+                    <div><span class="lbl">Failed (with retries):</span> @FormatLong(mu.SyncBackErrors)</div>
                 </td>
+               
                 <td class="group-cell">
-                    <div><span class="lbl">Src Status:</span> @mu.SourceStatus</div>
-                    <div><span class="lbl">Estimated:</span> @FormatLong(mu.EstimatedDocCount)</div>
-                    <div><span class="lbl">Actual:</span> @FormatLong(mu.ActualDocCount)</div>
-                    <div><span class="lbl">Src @@ Copy:</span> @FormatLong(mu.SourceCountDuringCopy)</div>
-                    <div><span class="lbl">Dump Gap:</span> @FormatLong(mu.DumpGap)</div>
-                    <div><span class="lbl">Restore Gap:</span> @FormatLong(mu.RestoreGap)</div>
-                </td>
-                <td class="group-cell">
-                    <div><span class="lbl">Compared On:</span> @(mu.ComparedOn?.ToString() ?? "N/A")</div>
-                    <div><span class="lbl">Variance:</span> @mu.VarianceCount</div>
+                    <div><span class="lbl">Compared On (UTC):</span> @(mu.ComparedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Differences:</span> @mu.VarianceCount</div>
                 </td>
             </tr>
         }
@@ -182,15 +187,7 @@ else
         return $"{(int)d.TotalHours}h {d.Minutes}m {d.Seconds}s";
     }
 
-    private static string GetChangeStreamLag(MigrationUnit unit, bool isSyncBack)
-    {
-        DateTime timestamp = isSyncBack ? unit.SyncBackCursorUtcTimestamp : unit.CursorUtcTimestamp;
-        if (timestamp == DateTime.MinValue || unit.ResetChangeStream)
-            return "NA";
-        var lag = DateTime.UtcNow - timestamp;
-        if (lag.TotalSeconds < 0) return "Invalid";
-        return $"{(int)lag.TotalMinutes} min {(int)lag.Seconds} sec";
-    }
+   
 
     private static string FormatLong(long value) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:N0}", value);
 }

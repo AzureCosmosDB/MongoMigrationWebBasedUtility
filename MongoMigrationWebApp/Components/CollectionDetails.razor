@@ -55,11 +55,11 @@
                             <tr>
                                 <td class="cd-col-label">Offline Copy</td>
                                 <td class="group">
-                                    <div><span class="lbl">Start:</span> @(MigrationUnit.BulkCopyStartedOn?.ToString() ?? "N/A")</div>
-                                    <div><span class="lbl">End:</span> @(MigrationUnit.BulkCopyEndedOn?.ToString() ?? "N/A")</div>
+                                    <div><span class="lbl">Started On (UTC):</span> @(MigrationUnit.BulkCopyStartedOn?.ToString() ?? "N/A")</div>
+                                    <div><span class="lbl">Ended On (UTC):</span> @(MigrationUnit.BulkCopyEndedOn?.ToString() ?? "N/A")</div>
                                     <div><span class="lbl">Duration:</span> @GetDuration(MigrationUnit.BulkCopyStartedOn, MigrationUnit.BulkCopyEndedOn)</div>
                                     @{
-                                        var totals = GetProcessedTotals(MigrationUnit);
+                                        var totals = Helper.GetProcessedTotals(MigrationUnit);
                                     }
                                     <div><span class="lbl">Processed Total:</span> @FormatLong(totals.Total)</div>
                                     <div><span class="lbl">Insert:</span> @FormatLong(totals.Inserted)</div>
@@ -73,7 +73,7 @@
                                 <td class="group">
                                     @if (MigrationJob?.IsOnline ?? false)
                                     {
-                                        <div><span class="lbl">Started On:</span> @(MigrationUnit.ChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">Started On (UTC):</span> @(MigrationUnit.ChangeStreamStartedOn?.ToString() ?? "N/A")</div>
                                         <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.OriginalResumeToken ?? "N/A")</div>
                                         <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.CursorUtcTimestamp</div>
                                         <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.ResumeToken ?? "N/A")</div>
@@ -82,7 +82,7 @@
                                         <div><span class="lbl">First Change Operation:</span> @MigrationUnit.ResumeTokenOperation</div>
                                         <div><span class="lbl">Inserted:</span> @FormatLong(MigrationUnit.CSDocsInserted) (from @FormatLong(MigrationUnit.CSDInsertEvents) events)</div>
                                         <div><span class="lbl">Deleted:</span> @FormatLong(MigrationUnit.CSDocsDeleted) (from @FormatLong(MigrationUnit.CSDeleteEvents) events)</div>
-                                        <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.CSDocsUpdated) (from @FormatLong(MigrationUnit.CSUpdatedEvents) events)</div>
+                                        <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.CSDocsUpdated) (from @FormatLong(MigrationUnit.CSUpdateEvents) events)</div>
                                         <div><span class="lbl">Duplicate Processed:</span> @FormatLong(MigrationUnit.CSDuplicateDocsSkipped) skipped</div>
                                         <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.CSErrors)</div>
                                     }
@@ -99,7 +99,7 @@
                                     @if ((MigrationJob?.IsOnline ?? false) && (MigrationJob?.SyncBackEnabled ?? false))
                                     {
                                         <div><span class="lbl">Resume Token:</span> @(MigrationUnit.SyncBackResumeToken ?? "N/A")</div>
-                                        <div><span class="lbl">Started On:</span> @(MigrationUnit.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">Started On (UTC):</span> @(MigrationUnit.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
                                         <div><span class="lbl">Cursor Utc Timestamp:</span> @MigrationUnit.SyncBackCursorUtcTimestamp</div>
                                         <div><span class="lbl">Inserted:</span> @FormatLong(MigrationUnit.SyncBackDocsInserted) (from @FormatLong(MigrationUnit.SyncBackInsertEvents) events)</div>
                                         <div><span class="lbl">Deleted:</span> @FormatLong(MigrationUnit.SyncBackDocsDeleted) (from @FormatLong(MigrationUnit.SyncBackDeleteEvents) events)</div>
@@ -119,7 +119,7 @@
                                 <td class="group">
                                     @if (MigrationUnit.ComparedOn.HasValue && MigrationUnit.ComparedOn != DateTime.MinValue)
                                     {
-                                        <div><span class="lbl">Hash Compared Time:</span> @MigrationUnit.ComparedOn</div>
+                                        <div><span class="lbl">Hash Compared On (UTC):</span> @MigrationUnit.ComparedOn</div>
                                         <div><span class="lbl">Differences:</span> @FormatLong(MigrationUnit.VarianceCount)</div>
                                     }
                                     else
@@ -157,14 +157,7 @@
     [Parameter]
     public EventCallback OnClose { get; set; }
 
-    private (long Total, long Inserted, long Skipped, long Failed) GetProcessedTotals(MigrationUnit mu)
-    {
-        long skipped = mu.MigrationChunks?.Sum(c => c.SkippedAsDuplicateCount) ?? 0;
-        long inserted = (mu.MigrationChunks?.Sum(c => c.RestoredSuccessDocCount) ?? 0) - skipped;
-        long failed = mu.MigrationChunks?.Sum(c => c.RestoredFailedDocCount) ?? 0;
-        long total = inserted + skipped + failed;
-        return (total, inserted, skipped, failed);
-    }
+    
 
     private static string GetDuration(DateTime? start, DateTime? end)
     {

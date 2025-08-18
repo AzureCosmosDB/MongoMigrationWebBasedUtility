@@ -252,7 +252,7 @@ namespace OnlineMongoMigrationProcessor
 
                 mu.CSDInsertEvents = 0;
                 mu.CSDeleteEvents = 0;
-                mu.CSUpdatedEvents = 0;
+                mu.CSUpdateEvents = 0;
             }
             else
             {
@@ -639,7 +639,7 @@ namespace OnlineMongoMigrationProcessor
             else if (op == ChangeStreamOperationType.Update || op == ChangeStreamOperationType.Replace)
             {
                 if (!_syncBack)
-                    mu.CSUpdatedEvents++;
+                    mu.CSUpdateEvents++;
                 else
                     mu.SyncBackUpdateEvents++;
                 
