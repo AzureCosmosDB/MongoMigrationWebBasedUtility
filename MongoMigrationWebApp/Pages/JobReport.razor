@@ -55,12 +55,12 @@ else
     </style>
 
     <div>
-        <div class="section-title">Job Details</div>
+        
         <table class="table table-borderless table-sm kv-table small-text">
             <thead>
                 <tr>
-                    <th>Property</th>
-                    <th>Value</th>
+                    <th></th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
@@ -72,7 +72,7 @@ else
                 <tr><td class="nowrap">Sync Back Enabled</td><td>@(MigrationJob.SyncBackEnabled ? "Yes" : "No")</td></tr>
                 <tr><td class="nowrap">Source Endpoint</td><td class="wrap">@MigrationJob.SourceEndpoint</td></tr>
                 <tr><td class="nowrap">Target Endpoint</td><td class="wrap">@MigrationJob.TargetEndpoint</td></tr>
-                <tr><td class="nowrap">Collections</td><td>@(MigrationJob.MigrationUnits?.Count ?? 0)</td></tr>
+                <tr><td class="nowrap">Collection Count</td><td>@(MigrationJob.MigrationUnits?.Count ?? 0)</td></tr>
             </tbody>
         </table>
     </div>
