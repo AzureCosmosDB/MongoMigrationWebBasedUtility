@@ -377,6 +377,11 @@ namespace OnlineMongoMigrationProcessor
                     mu.DumpGap = Helper.GetMigrationUnitDocCount(mu) - downloadCount;
                     mu.DumpPercent = 100;
                     mu.DumpComplete = true;
+
+                    if(!mu.BulkCopyEndedOn.HasValue || mu.BulkCopyEndedOn.Value == DateTime.MinValue)
+                        mu.BulkCopyEndedOn = DateTime.UtcNow;
+
+
                 }
             }
             else if (mu.DumpComplete && !mu.RestoreComplete && !_cts.Token.IsCancellationRequested)
