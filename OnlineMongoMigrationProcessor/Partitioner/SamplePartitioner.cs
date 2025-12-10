@@ -35,15 +35,14 @@ namespace OnlineMongoMigrationProcessor
             long docsInChunk = 0;
             int sampleCount = 0;
 
-            MaxSamples = 2000;
-            MaxSegments = 20;
 
             BsonDocument? userFilter = null;
             userFilter = MongoHelper.GetFilterDoc(migrationUnit.UserFilter);
 
+            int adjustedMaxSamples=MaxSamples;
             if (optimizeForObjectId && dataType == DataType.ObjectId)
             {
-                MaxSamples = MaxSamples * 1000;
+                adjustedMaxSamples = MaxSamples * 1000;
             }
 
             // Determine if we should skip DataType filtering
@@ -121,17 +120,17 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-                if (chunkCount > MaxSamples)
+                if (chunkCount > adjustedMaxSamples)
                 {
                     int count = 2;
                     long newCount = docCountByType / ((long)minDocsPerSegment * count);
-                    while (newCount > MaxSamples)
+                    while (newCount > adjustedMaxSamples)
                     {
                         count++;
                         newCount = docCountByType / ((long)minDocsPerSegment * count);
                     }
 
-                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {MaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Error);
+                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {adjustedMaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Error);
                     chunkCount = (int)newCount;
                     //throw new ArgumentException($"Chunk count too large for {collection.CollectionNamespace}. Retry with larger 'Chunk Size'.");
                 }
@@ -150,7 +149,7 @@ namespace OnlineMongoMigrationProcessor
 
 
                 // Calculate the total sample count
-                sampleCount = Math.Min(chunkCount * segmentCount, MaxSamples);
+                sampleCount = Math.Min(chunkCount * segmentCount, adjustedMaxSamples);
 
                 // Adjust segments per chunk based on the new sample count
                 segmentCount = Math.Max(1, sampleCount / chunkCount);
