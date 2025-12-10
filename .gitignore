@@ -9,6 +9,7 @@
 /MongoMigrationWebApp/bin
 /MongoMigrationWebApp/publish
 /OnlineMongoMigrationProcessor/bin
+/MongoMigrationWebApp/Properties/PublishProfiles
 /publish
 /.vs/ProjectEvaluation
 /.vs/CopilotSnapshots/
