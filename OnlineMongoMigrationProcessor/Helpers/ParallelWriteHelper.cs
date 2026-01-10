@@ -70,7 +70,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_logPrefix}Error calculating optimal threads, defaulting to 4. Error: {ex.Message}", LogType.Warning);
+                _log.WriteLine($"{_logPrefix}Error calculating optimal threads, defaulting to 4. Error: {ex}", LogType.Warning);
                 return 4; // Safe default
             }
         }
@@ -141,12 +141,12 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                     {
                         // CRITICAL errors must propagate to stop the entire job
-                        _log.WriteLine($"{_logPrefix}CRITICAL error in batch {batchIndex} for {collection.CollectionNamespace}: {ex.Message}", LogType.Error);
+                        _log.WriteLine($"{_logPrefix}CRITICAL error in batch {batchIndex} for {collection.CollectionNamespace}. Details: {ex}", LogType.Error);
                         throw; // Re-throw to stop the job
                     }
                     catch (Exception ex)
                     {
-                        _log.WriteLine($"{_logPrefix}Exception in batch {batchIndex} processing for {collection.CollectionNamespace}: {ex}", LogType.Error);
+                        _log.WriteLine($"{_logPrefix}Exception in batch {batchIndex} processing for {collection.CollectionNamespace}. Details: {ex}", LogType.Error);
                         
                         // Return a failed result instead of throwing to allow other batches to continue
                         return new WriteResult
@@ -155,7 +155,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             Processed = 0,
                             Failures = batch.Count,
                             Skipped = 0,
-                            Errors = new List<string> { $"Batch {batchIndex} failed: {ex.Message}" }
+                            Errors = new List<string> { $"Batch {batchIndex} failed. Details: {ex}" }
                         };
                     }
                 });
@@ -199,8 +199,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             catch (Exception ex)
             {
                 result.Success = false;
-                result.Errors.Add($"Critical error in parallel processing: {ex.Message}");
-                _log.WriteLine($"{_logPrefix}Critical error in parallel write processing for {collection.CollectionNamespace.FullName}: {ex}", LogType.Error);
+                result.Errors.Add($"Critical error in parallel processing. Details: {ex}");
+                _log.WriteLine($"{_logPrefix}Critical error in parallel write processing for {collection.CollectionNamespace.FullName}. Details: {ex}", LogType.Error);
                 throw; // Re-throw to stop the job
             }
 
@@ -574,12 +574,12 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             {
                                 int delay = CalculateRetryDelay(attempt);
                                 string errorType = GetTransientErrorType(ex);
-                                _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Error: {ex.Message}", LogType.Warning);
+                                _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Details: {ex}", LogType.Warning);
                                 await Task.Delay(delay);
                             }
                             else
                             {
-                                string errorMsg = $"CRITICAL: Unable to process insert batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts. Error: {ex.Message}";
+                                string errorMsg = $"CRITICAL: Unable to process insert batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts. Detials: {ex}";
                                 _log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
                                 result.Success = false;
                                 result.Errors.Add(errorMsg);
@@ -723,12 +723,12 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             {
                                 int delay = CalculateRetryDelay(attempt);
                                 string errorType = GetTransientErrorType(ex);
-                                _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Error: {ex.Message}", LogType.Warning);
+                                _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Details: {ex}", LogType.Warning);
                                 await Task.Delay(delay);
                             }
                             else
                             {
-                                string errorMsg = $"CRITICAL: Unable to process update batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts. Error: {ex.Message}";
+                                string errorMsg = $"CRITICAL: Unable to process update batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts. Details: {ex}";
                                 _log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
                                 result.Success = false;
                                 result.Errors.Add(errorMsg);
@@ -839,8 +839,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             {
                 result.Success = false;
                 result.Failures++;
-                result.Errors.Add($"Delete processing error: {ex.Message}");
-                _log.WriteLine($"{_logPrefix}Error processing deletes: {ex.Message}", LogType.Error);
+                result.Errors.Add($"Delete processing error. Details: {ex}");
+                _log.WriteLine($"{_logPrefix}Error processing deletes. Details: {ex}", LogType.Error);
             }
             finally
             {
@@ -947,7 +947,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                         }
                         catch (Exception dex)
                         {
-                            _log.WriteLine($"{_logPrefix} Error building delete model in {collection.CollectionNamespace.FullName}: {e.DocumentKey.ToJson()}, Error: {dex.Message}");
+                            _log.WriteLine($"{_logPrefix} Error building delete model in {collection.CollectionNamespace.FullName}: {e.DocumentKey.ToJson()}. Details: {dex}"); 
                             return null;
                         }
                     })
@@ -1042,7 +1042,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_logPrefix} Error storing {operationType} document keys for aggressive change stream: {ex.Message}", LogType.Error);
+                _log.WriteLine($"{_logPrefix} Error storing {operationType} document keys for aggressive change stream. Details: {ex}", LogType.Error);
                 return (true, 1); // Skip normal processing, 1 failure
             }
         }
@@ -1107,14 +1107,14 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     {
                         int delay = CalculateRetryDelay(attempt);
                         string errorType = GetTransientErrorType(ex);
-                        _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{maxRetries} after {delay}ms... Error: {ex.Message}", LogType.Warning);
+                        _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{maxRetries} after {delay}ms... Delays: {ex}", LogType.Warning);
                         await Task.Delay(delay);
                     }
                     else
                     {
                         _log.WriteLine($"{_logPrefix}Transient error persisted after {maxRetries} retries for {collection.CollectionNamespace.FullName}.Batch size: {models.Count} documents.", LogType.Error);
                         throw new InvalidOperationException(
-                            $"CRITICAL: Unable to process {operationName} batch for {collection.CollectionNamespace.FullName} after {maxRetries} retry attempts due to persistent errors. Error: {ex.Message}");
+                            $"CRITICAL: Unable to process {operationName} batch for {collection.CollectionNamespace.FullName} after {maxRetries} retry attempts due to persistent errors. Delays: {ex}");
                     }
                 }
             }

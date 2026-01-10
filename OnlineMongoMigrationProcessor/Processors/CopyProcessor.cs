@@ -21,15 +21,7 @@ namespace OnlineMongoMigrationProcessor
             // Constructor body can be empty or contain initialization logic if needed
         }
 
-        /// <summary>
-        /// Override to handle controlled pause for CopyProcessor
-        /// </summary>
-        public override void InitiateControlledPause()
-        {
-            MigrationJobContext.AddVerboseLog("CopyProcessor.InitiateControlledPause: called");
-            base.InitiateControlledPause();
-            _log.WriteLine("CopyProcessor: Controlled pause initiated");
-        }
+      
 
         // Custom exception handler delegate with logic to control retry flow
         private Task<TaskResult> CopyProcess_ExceptionHandler(Exception ex, int attemptCount, string processName, string dbName, string colName, int chunkIndex, int currentBackoff)

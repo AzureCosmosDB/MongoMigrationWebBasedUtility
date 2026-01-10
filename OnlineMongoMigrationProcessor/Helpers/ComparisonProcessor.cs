@@ -119,7 +119,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
             }           
             catch (Exception ex)
             {
-                log.WriteLine($"Error during comparison: {ex.Message}", LogType.Error);
+                log.WriteLine($"Error during comparison. Details: {ex}", LogType.Error);
             }
         }
 

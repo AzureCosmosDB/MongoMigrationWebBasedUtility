@@ -67,7 +67,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error storing document keys for aggressive change stream: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error storing document keys for aggressive change stream. Details: {ex}", LogType.Error);
                 return 0;
             }
         }
@@ -112,7 +112,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error removing document keys from temp collection: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error removing document keys from temp collection. Details: {ex}", LogType.Error);
                 return 0;
             }
         }
@@ -198,7 +198,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                             catch (MongoBulkWriteException<BsonDocument> ex)
                             {
                                 totalDeletedCount += ex.Result?.DeletedCount ?? 0;
-                                _log.WriteLine($"Bulk delete partially failed for {sourceDatabaseName}.{sourceCollectionName} (page {pageNumber + 1}, batch {i / deleteBatchSize + 1}): {ex.Message}", LogType.Error);
+                                _log.WriteLine($"Bulk delete partially failed for {sourceDatabaseName}.{sourceCollectionName} (page {pageNumber + 1}, batch {i / deleteBatchSize + 1}). Details: {ex}", LogType.Error);
                             }
                         }
                     }
@@ -214,7 +214,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error processing stored deletes for {sourceDatabaseName}.{sourceCollectionName}: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error processing stored deletes for {sourceDatabaseName}.{sourceCollectionName}.Details : {ex}", LogType.Error);
                 return 0;
             }
         }
@@ -316,7 +316,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error applying stored changes for {sourceDatabaseName}.{sourceCollectionName}: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error applying stored changes for {sourceDatabaseName}.{sourceCollectionName}. Details: {ex}", LogType.Error);
                 return (0, 0, 0);
             }
         }
@@ -348,7 +348,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error reading documents from source: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error reading documents from source. Details {ex}", LogType.Error);
                 return new List<BsonDocument>();
             }
         }
@@ -483,7 +483,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error cleaning up temporary collections: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error cleaning up temporary collections.Details: {ex}", LogType.Error);
                 return false;
             }
         }

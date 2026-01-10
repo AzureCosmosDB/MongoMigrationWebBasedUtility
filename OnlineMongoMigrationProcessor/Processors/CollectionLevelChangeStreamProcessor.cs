@@ -266,11 +266,11 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (Exception ex) when (ex is TimeoutException)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}TimeoutException in Task.Run for collection {collectionKey}: {ex.Message}", LogType.Debug);
+                    _log.WriteLine($"{_syncBackPrefix}TimeoutException in Task.Run for collection {collectionKey}. Details: {ex}", LogType.Debug);
                 }
                 catch (Exception ex)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Unhandled exception in Task.Run for collection {collectionKey}: {ex}", LogType.Error);
+                    _log.WriteLine($"{_syncBackPrefix}Unhandled exception in Task.Run for collection {collectionKey}. Details: {ex}", LogType.Error);
                     throw;
                 }
             });
@@ -287,7 +287,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix}Task.WhenAll threw exception: {ex.Message}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Task.WhenAll threw exception. Details: {ex}", LogType.Error);
                 LogTaskStates(tasks);
                 throw;
             }
@@ -435,7 +435,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix}Error in InitializeResumeTokensForUnsetUnitsAsync: {ex.Message}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Error in InitializeResumeTokensForUnsetUnitsAsync. Details: {ex}", LogType.Error);
             }
         }
 
@@ -461,12 +461,12 @@ namespace OnlineMongoMigrationProcessor
                 }
 				catch (TimeoutException tex)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}TimeoutException caught in SetChangeStreamOptionandWatch for {collectionKey}: {tex.Message}", LogType.Debug);
+                    _log.WriteLine($"{_syncBackPrefix}TimeoutException caught in SetChangeStreamOptionandWatch for {collectionKey}.Details: {tex}", LogType.Debug);
                     throw;
                 }
                 catch (OperationCanceledException ex)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}OperationCanceledException in SetChangeStreamOptionandWatch for {collectionKey}: {ex.Message}", LogType.Info);
+                    _log.WriteLine($"{_syncBackPrefix}OperationCanceledException in SetChangeStreamOptionandWatch for {collectionKey}.Details: {ex}", LogType.Info);
                 }
                 catch (MongoCommandException ex) when (ex.ToString().Contains("Resume of change stream was not possible"))
                 {
@@ -827,11 +827,11 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (OperationCanceledException ex)
             {
-                MigrationJobContext.AddVerboseLog("{_syncBackPrefix}OperationCanceledException in WatchCollection for {changeStreamCollection!.CollectionNamespace}: {ex.Message}");
+                MigrationJobContext.AddVerboseLog("{_syncBackPrefix}OperationCanceledException in WatchCollection for {changeStreamCollection!.CollectionNamespace}.Details: {ex}");
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix}Exception in WatchCollection for {changeStreamCollection!.CollectionNamespace}: {ex.Message}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Exception in WatchCollection for {changeStreamCollection!.CollectionNamespace}.Details: {ex}", LogType.Error);
                 throw;
             }
             finally
@@ -990,7 +990,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                     catch (Exception ex)
                     {
-                        _log.WriteLine($"{_syncBackPrefix}Exception in ProcessCursor for {collectionKey}: {ex.Message}", LogType.Error);
+                        _log.WriteLine($"{_syncBackPrefix}Exception in ProcessCursor for {collectionKey}. Details: {ex}", LogType.Error);
                         break; // Exit loop on exception, let finally block handle cleanup
                     }
 
@@ -1005,8 +1005,8 @@ namespace OnlineMongoMigrationProcessor
                         }
                         catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                         {
-                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during flush for {collectionKey}: {ex.Message}", LogType.Error);
-                            StopJob($"CRITICAL error during flush: {ex.Message}");
+                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during flush for {collectionKey}. Details: {ex}", LogType.Error);
+                            StopJob($"CRITICAL error during flush. Details: {ex}");
                             throw; // Re-throw to stop processing
                         }
 
@@ -1081,7 +1081,7 @@ namespace OnlineMongoMigrationProcessor
                         }
                         catch (Exception ex)
                         {
-                            _log.WriteLine($"{_syncBackPrefix}Exception in ProcessCursor for {collectionKey}: {ex.Message}", LogType.Error);
+                            _log.WriteLine($"{_syncBackPrefix}Exception in ProcessCursor for {collectionKey}. Details: {ex}", LogType.Error);
                             break; // Exit loop on exception, let finally block handle cleanup
                         }                            // Check if we need to flush accumulated changes to prevent memory buildup
                             if ((accumulatedChangesInColl.TotalChangesCount - flushedCount) > _config.ChangeStreamMaxDocsInBatch)
@@ -1095,8 +1095,8 @@ namespace OnlineMongoMigrationProcessor
                                 }
                                 catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                                 {
-                                    _log.WriteLine($"{_syncBackPrefix}CRITICAL error during flush for {collectionKey}: {ex.Message}", LogType.Error);
-                                    StopJob($"CRITICAL error during flush: {ex.Message}");
+                                    _log.WriteLine($"{_syncBackPrefix}CRITICAL error during flush for {collectionKey}. Details: {ex}", LogType.Error);
+                                    StopJob($"CRITICAL error during flush. Details: {ex}");
                                     throw; // Re-throw to stop processing
                                 }
                             }
@@ -1124,13 +1124,13 @@ namespace OnlineMongoMigrationProcessor
                     }
                     catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                     {
-                        _log.WriteLine($"{_syncBackPrefix}CRITICAL error during final flush for {collectionKey}: {ex.Message}", LogType.Error);
-                        StopJob($"CRITICAL error during final flush: {ex.Message}");
+                        _log.WriteLine($"{_syncBackPrefix}CRITICAL error during final flush for {collectionKey}. Details: {ex}", LogType.Error);
+                        StopJob($"CRITICAL error during final flush. Details: {ex}");
                         throw; // Re-throw to stop processing
                     }
                     catch (Exception ex)
                     {
-                        _log.WriteLine($"{_syncBackPrefix}Error during final flush for {collectionKey}: {ex.Message}", LogType.Error);
+                        _log.WriteLine($"{_syncBackPrefix}Error during final flush for {collectionKey}. Details: {ex}", LogType.Error);
                         // Don't throw non-critical errors from finally block
                     }
                 }
@@ -1163,8 +1163,8 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                 {
-                    _log.WriteLine($"{_syncBackPrefix}CRITICAL error during flush in ProcessWatchFinallyAsync for {collectionKey}: {ex.Message}", LogType.Error);
-                    StopJob($"CRITICAL error in ProcessWatchFinallyAsync: {ex.Message}");
+                    _log.WriteLine($"{_syncBackPrefix}CRITICAL error during flush in ProcessWatchFinallyAsync for {collectionKey}. Details: {ex}", LogType.Error);
+                    StopJob($"CRITICAL error in ProcessWatchFinallyAsync. Details: {ex}");
                     throw; // Re-throw to stop processing
                 }
 
@@ -1198,7 +1198,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.ShowInMonitor($"{_syncBackPrefix}ERROR processing batch for {changeStreamCollection.CollectionNamespace}: {ex.Message}");
+                _log.ShowInMonitor($"{_syncBackPrefix}ERROR processing batch for {changeStreamCollection.CollectionNamespace}. Details {ex}");
                 _log.WriteLine($"{_syncBackPrefix}Error processing changes in batch for {changeStreamCollection.CollectionNamespace}. Details: {ex}", LogType.Error);
                 // On failure, resume token is NOT updated - we will resume from the last successful checkpoint
             }

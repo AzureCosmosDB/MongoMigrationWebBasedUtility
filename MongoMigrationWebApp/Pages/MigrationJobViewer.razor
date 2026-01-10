@@ -458,7 +458,7 @@
         </h5>
         <div class="d-flex align-items-center">
             <label class="me-2 mb-0" style="font-weight: normal;">Currently Logging:</label>
-            <select class="form-select form-select-sm" style="width: auto;" @bind="SelectedLogLevel" @bind:after="OnLogLevelChanged">
+            <select class="form-select form-select-sm" style="width: auto;" value="@(CurrentlyLoadedMigrationJob?.LogLevel ?? LogType.Info)" @onchange="OnLogLevelChanged">
                 <option value="@LogType.Error">Error Only</option>
                 <option value="@LogType.Warning">Warning + Error</option>
                 <option value="@LogType.Info">Info + Warning + Error</option>
@@ -571,19 +571,6 @@ else if (@_showLogBackupFile)
 
     // Loading spinner state for collection loading
     private bool _isLoadingCollections = false;
-
-    // Log level filtering
-    private LogType SelectedLogLevel
-    {
-        get => CurrentlyLoadedMigrationJob?.LogLevel ?? LogType.Info;
-        set
-        {
-            if (CurrentlyLoadedMigrationJob != null)
-            {
-                CurrentlyLoadedMigrationJob.LogLevel = value;
-            }
-        }
-    }
 
     // Pagination and filtering properties (kept for UI binding compatibility)
     private string _filterText = string.Empty;
@@ -961,11 +948,13 @@ else if (@_showLogBackupFile)
         await InvokeAsync(StateHasChanged);
     }
 
-    private async Task OnLogLevelChanged()
+    private async Task OnLogLevelChanged(ChangeEventArgs e)
     {
-        MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob);
-
-        await InvokeAsync(StateHasChanged);
+        if (CurrentlyLoadedMigrationJob != null && Enum.TryParse<LogType>(e.Value?.ToString(), out var newLogLevel))
+        {
+            MigrationJobContext.UpdateLogLevel(newLogLevel, CurrentlyLoadedMigrationJob);
+            await InvokeAsync(StateHasChanged);
+        }
     }
     #endregion
 
@@ -1669,7 +1658,7 @@ else if (@_showLogBackupFile)
     private void PauseJobControlled()
     {
         _errorMessage = string.Empty;
-        JobManager.ControlledPauseMigration();
+        MigrationJobContext.RequestControlledPause("UI Button Click");
 
         if (MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob))
             return;

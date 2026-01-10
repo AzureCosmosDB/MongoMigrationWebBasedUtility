@@ -109,7 +109,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix}Error calling MigrationWorker.StopMigration: {ex.Message}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Error calling MigrationWorker.StopMigration. Details: {ex}", LogType.Error);
             }
         }
 
@@ -405,13 +405,13 @@ namespace OnlineMongoMigrationProcessor
             catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL") && ex.Message.Contains("persistent deadlock"))
             {
                 // Critical deadlock failure - re-throw to stop the job and prevent data loss
-                _log.WriteLine($"{_syncBackPrefix}Stopping job due to persistent deadlock that would cause data loss. Details: {ex.Message}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Stopping job due to persistent deadlock that would cause data loss. Details: {ex}", LogType.Error);
                 throw; // Re-throw to stop the entire migration job
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
             {
                 // Critical error that would cause data loss - re-throw to stop the job
-                _log.WriteLine($"{_syncBackPrefix}Stopping job due to critical error that would cause data loss. Details: {ex.Message}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Stopping job due to critical error that would cause data loss. Details: {ex}", LogType.Error);
                 throw; // Re-throw to stop the entire migration job
             }
             catch (Exception ex)
@@ -531,7 +531,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error during aggressive change stream cleanup for {mu.DatabaseName}.{mu.CollectionName}: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error during aggressive change stream cleanup for {mu.DatabaseName}.{mu.CollectionName}. Details: {ex}", LogType.Error);
 
                 // Remove from processing cache to allow retry
                 lock (_cleanupLock)
@@ -551,7 +551,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error during final aggressive change stream cleanup: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Error during final aggressive change stream cleanup. Details: {ex}", LogType.Error);
             }
 
             _log.WriteLine($"Aggressive change stream cleanup completed.");

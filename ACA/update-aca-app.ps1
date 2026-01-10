@@ -39,11 +39,24 @@ Write-Host "Step 1: Checking if Docker image exists in ACR..." -ForegroundColor 
 
 # Check if the image exists in ACR
 $ErrorActionPreference = 'Continue'
-$imageExists = az acr repository show-tags `
-    --name $AcrName `
-    --repository $AcrRepository `
-    --query "contains(@, '$ImageTag')" `
-    --output tsv 2>$null
+$imageExists = 'false'
+try {
+    $tags = az acr repository show-tags `
+        --name $AcrName `
+        --repository $AcrRepository `
+        --output json `
+        2>&1 | Where-Object { $_ -notmatch 'WARNING' -and $_ -notmatch 'not found' }
+    
+    if ($LASTEXITCODE -eq 0 -and $tags) {
+        $tagsList = $tags | ConvertFrom-Json
+        if ($tagsList -contains $ImageTag) {
+            $imageExists = 'true'
+        }
+    }
+}
+catch {
+    Write-Host "Repository not found or error checking tags. Will build image." -ForegroundColor Gray
+}
 $ErrorActionPreference = 'Stop'
 
 if ($imageExists -eq 'true') {
@@ -95,6 +108,47 @@ Write-Host "`n=== Update Complete ===" -ForegroundColor Cyan
 Write-Host "The Container App '$ContainerAppName' has been updated with image: $imageName" -ForegroundColor Green
 Write-Host "Environment variables and secrets remain unchanged." -ForegroundColor Green
 Write-Host ""
+
+# Deactivate old revisions to free up resources
+Write-Host "Cleaning up old revisions..." -ForegroundColor Yellow
+$ErrorActionPreference = 'Continue'
+
+$latestRevision = az containerapp show `
+    --name $ContainerAppName `
+    --resource-group $ResourceGroupName `
+    --query "properties.latestRevisionName" `
+    --output tsv `
+    2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' }
+
+if ($latestRevision) {
+    Write-Host "Latest revision: $latestRevision" -ForegroundColor Cyan
+    
+    # Get all active revisions
+    $allRevisions = az containerapp revision list `
+        --name $ContainerAppName `
+        --resource-group $ResourceGroupName `
+        --query "[?properties.active==``true``].name" `
+        --output tsv `
+        2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' }
+    
+    if ($allRevisions) {
+        $revisionList = $allRevisions -split "`n" | Where-Object { $_ -and $_ -ne $latestRevision }
+        
+        foreach ($oldRevision in $revisionList) {
+            if ($oldRevision.Trim()) {
+                Write-Host "  Deactivating old revision: $oldRevision" -ForegroundColor Gray
+                az containerapp revision deactivate `
+                    --name $ContainerAppName `
+                    --resource-group $ResourceGroupName `
+                    --revision $oldRevision `
+                    2>&1 | Out-Null
+            }
+        }
+        Write-Host "Old revisions deactivated successfully" -ForegroundColor Green
+    }
+}
+
+$ErrorActionPreference = 'Stop'
 
 # Step 3: Verify the new image becomes active
 Write-Host "Step 3: Verifying new image deployment..." -ForegroundColor Yellow

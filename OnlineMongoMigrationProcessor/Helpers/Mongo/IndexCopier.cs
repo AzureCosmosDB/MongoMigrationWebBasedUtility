@@ -130,7 +130,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 }
                 catch (Exception ex)
                 {
-                    log.WriteLine($"Failed to create index '{indexName}' in {collectionName}: {ex.Message}",LogType.Error);
+                    log.WriteLine($"Failed to create index '{indexName}' in {collectionName}. Details: {ex}",LogType.Error);
                     // You may want to log or handle the error appropriately
                 }
             }

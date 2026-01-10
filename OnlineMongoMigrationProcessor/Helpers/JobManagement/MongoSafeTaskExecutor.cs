@@ -41,7 +41,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
                 }
                 catch (Exception ex)
                 {
-                    logAction?.Invoke($"[EXCEPTION] {operationName} threw: {ex.GetType().Name} - {ex.Message}");
+                    logAction?.Invoke($"[EXCEPTION] {operationName} threw: {ex.GetType().Name} - Details: {ex}");
                     throw;
                 }
             }, cts.Token);
@@ -53,7 +53,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             }
             catch (Exception ex)
             {
-                logAction?.Invoke($"[WHENANY-ERROR] {operationName} race failed: {ex.Message}");
+                logAction?.Invoke($"[WHENANY-ERROR] {operationName} race failed. Details: {ex}");
                 throw;
             }
 
@@ -72,7 +72,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
                 }
                 catch (Exception ex)
                 {
-                    logAction?.Invoke($"[CANCEL-EXCEPTION] {ex.GetType().Name} - {ex.Message}");
+                    logAction?.Invoke($"[CANCEL-EXCEPTION] {ex.GetType().Name}. Details: {ex}");
                 }
 
                 // 💥 Force kill MongoClient
@@ -86,7 +86,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
                     }
                     catch (Exception ex)
                     {
-                        logAction?.Invoke($"[CLIENT-KILL-ERROR] {ex.GetType().Name} - {ex.Message}");
+                        logAction?.Invoke($"[CLIENT-KILL-ERROR] {ex.GetType().Name}. Details: {ex}");
                     }
                 }
 
@@ -105,7 +105,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             }
             catch (Exception ex)
             {
-                logAction?.Invoke($"[FAILURE] {operationName} failed after {(DateTime.UtcNow - startTime).TotalSeconds:F1}s: {ex.Message}");
+                logAction?.Invoke($"[FAILURE] {operationName} failed after {(DateTime.UtcNow - startTime).TotalSeconds:F1}s. Details: {ex}");
 
                 // on failure, kill client too
                 if (clientToKill != null)

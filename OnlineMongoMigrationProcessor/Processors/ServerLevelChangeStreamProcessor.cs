@@ -297,8 +297,8 @@ namespace OnlineMongoMigrationProcessor
                     }
                     catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                     {
-                        _log.WriteLine($"{_syncBackPrefix}CRITICAL error during BulkProcessAllChangesAsync : {ex.Message}", LogType.Error);
-                        StopJob($"CRITICAL error in BulkProcessAllChangesAsync: {ex.Message}");
+                        _log.WriteLine($"{_syncBackPrefix}CRITICAL error during BulkProcessAllChangesAsync. Details: {ex}", LogType.Error);
+                        StopJob($"CRITICAL error in BulkProcessAllChangesAsync. Details: {ex}");
                         throw; // Re-throw to stop processing
                     }
 
@@ -354,8 +354,8 @@ namespace OnlineMongoMigrationProcessor
                         }
                         catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                         {
-                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during BulkProcessAllChangesAsync : {ex.Message}", LogType.Error);
-                            StopJob($"CRITICAL error in BulkProcessAllChangesAsync: {ex.Message}");
+                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during BulkProcessAllChangesAsync. Details: {ex}", LogType.Error);
+                            StopJob($"CRITICAL error in BulkProcessAllChangesAsync. Details: {ex}");
                             throw; // Re-throw to stop processing
                         }
                     }
@@ -382,8 +382,8 @@ namespace OnlineMongoMigrationProcessor
                         }
                         catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                         {
-                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during final BulkProcessAllChangesAsync: {ex.Message}", LogType.Error);
-                            StopJob($"CRITICAL error in final BulkProcessAllChangesAsync: {ex.Message}");
+                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during final BulkProcessAllChangesAsync. Details: {ex}", LogType.Error);
+                            StopJob($"CRITICAL error in final BulkProcessAllChangesAsync. Details: {ex}");
                             throw; // Re-throw to stop processing
                         }
                     }
@@ -548,13 +548,13 @@ namespace OnlineMongoMigrationProcessor
                         }
                         catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
                         {
-                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error in BulkProcessAllChangesAsync for {collectionKey}: {ex.Message}", LogType.Error);
-                            StopJob($"CRITICAL error processing {collectionKey}: {ex.Message}");
+                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error in BulkProcessAllChangesAsync for {collectionKey}.Details: {ex}", LogType.Error);
+                            StopJob($"CRITICAL error processing {collectionKey}. Details: {ex}");
                             throw; // Re-throw to stop processing
                         }
                         catch (Exception ex)
                         {
-                            _log.WriteLine($"{_syncBackPrefix}Error processing changes for {collectionKey}: {ex.Message}", LogType.Error);
+                            _log.WriteLine($"{_syncBackPrefix}Error processing changes for {collectionKey}. Details: {ex}", LogType.Error);
                             throw; // Re-throw to ensure error is handled upstream
                         }
 

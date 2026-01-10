@@ -55,7 +55,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
         /// <summary>
         /// Resets the coordinator for a new job. Call this when starting a new migration job.
         /// </summary>
-        public static void Reset(string jobId, Log log)
+        public static void Reset(string jobId)
         {
             MigrationJobContext.AddVerboseLog($"WorkerPoolCoordinator.Reset: jobId={jobId}");
             lock (_lock)
@@ -76,8 +76,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
                 _activeDumpWorkers.Clear();
                 _activeRestoreWorkers.Clear();
                 _currentJobId = jobId;
-                
-                MigrationJobContext.AddVerboseLog($"Reset for new job {jobId}");
+
             }
         }
         

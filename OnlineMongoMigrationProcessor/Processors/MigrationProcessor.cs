@@ -52,7 +52,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             _migrationWorker = migrationWorker;
         }
 
-        public void StopProcessing(bool updateStatus = true)
+        public virtual void StopProcessing(bool updateStatus = true)
         {
             MigrationJobContext.AddVerboseLog($"MigrationProcessor.StopProcessing: updateStatus={updateStatus}");
 
@@ -76,11 +76,7 @@ namespace OnlineMongoMigrationProcessor.Processors
         /// <summary>
         /// Signals processor to stop accepting new work but complete current tasks
         /// </summary>
-        public virtual void InitiateControlledPause()
-        {
-            MigrationJobContext.ControlledPauseRequested = true;
-            _log.WriteLine("Controlled pause initiated in Migration Processor");
-        }
+
 
         protected ProcessorContext SetProcessorContext(MigrationUnit mu, string sourceConnectionString, string targetConnectionString)
         {

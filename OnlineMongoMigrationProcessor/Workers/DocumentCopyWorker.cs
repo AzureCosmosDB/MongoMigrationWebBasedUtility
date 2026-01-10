@@ -788,7 +788,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Failed to insert missing document with _id: {idValue}. Error: {ex.Message}", LogType.Error);
+                _log.WriteLine($"Failed to insert missing document with _id: {idValue}. Details: {ex}", LogType.Error);
                 Interlocked.Increment(ref _failureCount);
             }
         }

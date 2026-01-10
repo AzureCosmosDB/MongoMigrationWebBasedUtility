@@ -29,6 +29,16 @@ namespace OnlineMongoMigrationProcessor
             
         }
 
+        private void OnPendingTasksCompleted()
+        {
+            MigrationJobContext.AddVerboseLog("DumpRestoreProcessor.OnPendingTasksCompleted: all pending tasks completed");
+
+            if (MigrationJobContext.ControlledPauseRequested)
+            {
+                StopProcessing();
+            }
+        }
+
         /// <summary>
         /// Callback invoked by coordinator when a migration unit completes dump/restore.
         /// Handles post-processing like change stream setup.
@@ -105,7 +115,8 @@ namespace OnlineMongoMigrationProcessor
                     _jobId,
                     _log,
                     MongoToolsFolder,
-                    onMigrationUnitCompleted: OnMigrationUnitCompleted
+                    onMigrationUnitCompleted: OnMigrationUnitCompleted,
+                    onPendingTasksCompleted: OnPendingTasksCompleted
                 );
             }
 
@@ -126,7 +137,7 @@ namespace OnlineMongoMigrationProcessor
 
 
             // Perform initial setup required by MigrationProcessor
-            MigrationJobContext.ControlledPauseRequested = false;
+            MigrationJobContext.ResetControlledPause();
             ProcessRunning = true;
 
 
@@ -155,19 +166,17 @@ namespace OnlineMongoMigrationProcessor
             return TaskResult.Success;
         }     
 
-        public override void InitiateControlledPause()
-        {
-            base.InitiateControlledPause();
-            // Coordinator pause will be handled via MigrationJobContext.ControlledPauseRequested
-            _log.WriteLine("DumpRestoreProcessor: Controlled pause initiated");
-        }
+        
 
-        public new void StopProcessing(bool updateStatus = true)
+        public override void StopProcessing(bool updateStatus = true)
         {
             _log.WriteLine("Stopping DumpRestoreProcessor...");
             
             // Stop the coordinator timer and clear manifests
             _coordinator.StopCoordinatedProcessing();
+            
+            // Give time for any active timer callbacks to complete
+            System.Threading.Thread.Sleep(500);
             
             // Call base implementation
             base.StopProcessing(updateStatus);

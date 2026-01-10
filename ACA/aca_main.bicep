@@ -1,6 +1,9 @@
 @description('Location for all resources')
 param location string = resourceGroup().location
 
+@description('Owner tag required by Azure Policy')
+param ownerTag string
+
 @description('Name of the Container App')
 param containerAppName string
 
@@ -36,6 +39,9 @@ param memoryGB int = 32
 @description('ASP.NET Core environment setting')
 param aspNetCoreEnvironment string = 'Development'
 
+@description('Optional: Resource ID of the subnet for VNet integration (e.g., /subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name})')
+param infrastructureSubnetResourceId string = ''
+
 // Variables for dynamic workload profile selection
 var workloadProfileType = vCores <= 4 ? 'D4' : vCores <= 8 ? 'D8' : vCores <= 16 ? 'D16' : 'D32'
 var workloadProfileName = 'Dedicated'
@@ -44,6 +50,9 @@ var workloadProfileName = 'Dedicated'
 resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${containerAppName}-identity'
   location: location
+  tags: {
+    owner: ownerTag
+  }
 }
 
 // Azure Container Registry
@@ -55,6 +64,9 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   }
   properties: {
     adminUserEnabled: false
+  }
+  tags: {
+    owner: ownerTag
   }
 }
 
@@ -83,6 +95,9 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
   }
+  tags: {
+    owner: ownerTag
+  }
 }
 
 // File Share for migration data (100GB)
@@ -98,20 +113,31 @@ resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-0
 resource containerAppEnvironment 'Microsoft.App/managedEnvironments@2023-05-01' = {
   name: '${containerAppName}-env-${workloadProfileType}'
   location: location
-  properties: {
-    workloadProfiles: [
-      {
-        name: 'Consumption'
-        workloadProfileType: 'Consumption'
-      }
-      {
-        name: workloadProfileName
-        workloadProfileType: workloadProfileType
-        minimumCount: 1
-        maximumCount: 1
-      }
-    ]
+  tags: {
+    owner: ownerTag
   }
+  properties: union(
+    {
+      workloadProfiles: [
+        {
+          name: 'Consumption'
+          workloadProfileType: 'Consumption'
+        }
+        {
+          name: workloadProfileName
+          workloadProfileType: workloadProfileType
+          minimumCount: 1
+          maximumCount: 1
+        }
+      ]
+    },
+    infrastructureSubnetResourceId != '' ? {
+      vnetConfiguration: {
+        infrastructureSubnetId: infrastructureSubnetResourceId
+        internal: false
+      }
+    } : {}
+  )
 }
 
 // Storage configuration for Container Apps Environment
@@ -132,6 +158,9 @@ resource storageConfiguration 'Microsoft.App/managedEnvironments/storages@2023-0
 resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   name: containerAppName
   location: location
+  tags: {
+    owner: ownerTag
+  }
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
@@ -170,7 +199,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       containers: [
         {
           name: containerAppName
-          image: stateStoreAppID == '' ? 'nginx:latest' : '${acr.properties.loginServer}/${acrRepository}:${imageTag}'
+          image: stateStoreAppID == '' ? '${acr.properties.loginServer}/nginx:latest' : '${acr.properties.loginServer}/${acrRepository}:${imageTag}'
           resources: {
             cpu: vCores
             memory: '${memoryGB}Gi'

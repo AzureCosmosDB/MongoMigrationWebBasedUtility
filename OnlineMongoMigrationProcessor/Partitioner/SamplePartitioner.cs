@@ -79,7 +79,7 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (Exception ex)
                 {
-                    log.WriteLine($"Exception occurred while counting documents in {collection.CollectionNamespace}. Details: {ex.Message}", LogType.Warning);//don't show call stack
+                    log.WriteLine($"Exception occurred while counting documents in {collection.CollectionNamespace}. Details: {ex}", LogType.Warning);//don't show call stack
                     if (userFilter == null || userFilter.ElementCount == 0)
                     {
                         log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace} due to error in counting documents.");

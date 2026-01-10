@@ -55,10 +55,12 @@ For a streamlined deployment experience, use the provided PowerShell script:
 cd c:\Work\GitHub\repos\MongoMigrationWebBasedUtility
 
 # Minimal deployment (auto-generates ACR, Storage, StateStoreAppID, and AcrRepository)
+# NOTE: ContainerAppName must use lowercase letters, numbers, and hyphens only (no underscores)
 .\deploy-to-aca.ps1 `
   -ResourceGroupName "MongoMigrationRGTest" `
   -ContainerAppName "mongomigration" `
-  -Location "eastus"
+  -Location "eastus" `
+  -OwnerTag "yourname@company.com"
 
 # Full deployment with custom names and existing resources
 .\deploy-to-aca.ps1 `
@@ -69,7 +71,16 @@ cd c:\Work\GitHub\repos\MongoMigrationWebBasedUtility
   -StorageAccountName "mongomigstg" `
   -StateStoreAppID "aca_server1" `
   -Location "eastus" `
-  -ImageTag "latest"
+  -ImageTag "latest" `
+  -OwnerTag "yourname@company.com"
+
+# Deployment with VNet integration (Environment must be created with VNet from day one)
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "MongoMigrationRGTest" `
+  -ContainerAppName "mongomigration" `
+  -Location "eastus" `
+  -OwnerTag "yourname@company.com" `
+  -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
 ```
 
 **Using Existing Azure Resources:**
@@ -148,7 +159,7 @@ Deploy the Bicep template to create all required resources:
 az deployment group create `
   --resource-group <resource-group-name> `
   --template-file aca_main.bicep `
-  --parameters containerAppName=<container-app-name> acrName=<acr-name>
+  --parameters containerAppName=<container-app-name> acrName=<acr-name> ownerTag="yourname@company.com"
 ```
 
 This will create:
@@ -187,7 +198,7 @@ $connString = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.Intero
 az deployment group create `
   --resource-group <resource-group-name> `
   --template-file aca_main.bicep `
-  --parameters containerAppName=<container-app-name> acrName=<acr-name> stateStoreAppID=<your-app-id> stateStoreConnectionString="`"$connString`"" aspNetCoreEnvironment=Development imageTag=latest
+  --parameters containerAppName=<container-app-name> acrName=<acr-name> ownerTag="yourname@company.com" stateStoreAppID=<your-app-id> stateStoreConnectionString="`"$connString`"" aspNetCoreEnvironment=Development imageTag=latest
 
 # Clear the variable from memory
 Remove-Variable connString, secureConnString
@@ -198,10 +209,11 @@ Remove-Variable connString, secureConnString
 ### Required Parameters
 
 | Parameter | Description | Example |
-|-----------|-------------|---------|------
+|-----------|-------------|---------|
 | `ResourceGroupName` | Name of the Azure resource group | `MongoMigrationRG` |
 | `ContainerAppName` | Name of the Container App | `mongomigration` |
 | `Location` | Azure region (must support Container Apps) | `eastus` |
+| `OwnerTag` | Owner tag required by Azure Policy | `yourname@company.com` |
 
 ### Optional Parameters
 
@@ -214,6 +226,38 @@ Remove-Variable connString, secureConnString
 | `ImageTag` | string | `latest` | Docker image tag to deploy. Script checks if image exists before building. |
 | `VCores` | int | `8` (range: 1-32) | Number of vCores for the container. |
 | `MemoryGB` | int | `32` (range: 2-64) | Memory in GB for the container. |
+| `InfrastructureSubnetResourceId` | string | `""` (empty) | Resource ID of the subnet for VNet integration. **Must be provided at environment creation time**. See [VNet Integration](#vnet-integration) section. |
+
+## Naming Constraints
+
+**Important**: Azure resources have specific naming requirements:
+
+- **Container App Name** (`ContainerAppName`):
+  - Must use lowercase letters, numbers, and hyphens only
+  - ❌ **No underscores allowed** (e.g., `my_app` is invalid)
+  - ✅ Use hyphens instead (e.g., `my-app` is valid)
+  - Used to generate environment name: `{ContainerAppName}-env-{profile}`
+
+- **Storage Account Name** (auto-generated or explicit):
+  - Must be 3-24 characters
+  - Lowercase letters and numbers only
+  - No special characters (hyphens, underscores, etc.)
+  - Auto-generation removes hyphens from ContainerAppName
+
+- **ACR Name** (auto-generated or explicit):
+  - Alphanumeric characters only
+  - Must be globally unique
+
+**Example Valid Names:**
+```powershell
+# ✅ Valid
+-ContainerAppName "mongomigration-prod"        # Generates env: mongomigration-prod-env-D8
+-ContainerAppName "mongo-mig-app-01"           # Generates env: mongo-mig-app-01-env-D16
+
+# ❌ Invalid
+-ContainerAppName "mongo_migration"            # Underscore not allowed
+-ContainerAppName "MongoMigration"             # Uppercase not recommended
+```
 
 ## Resource Configurations
 
@@ -300,46 +344,112 @@ Azure Container Apps with Dedicated Plan provides configurable high-performance 
   -MemoryGB 64 `
   -ImageTag "v1.0"
 
+# With VNet integration for enhanced security
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "rg-mongomig-perf" `
+  -ContainerAppName "mongomigration-perf" `
+  -AcrName "sharedproductionacr" `
+  -AcrRepository "mongomig-perf" `
+  -StorageAccountName "sharedprodstg" `
+  -StateStoreAppID "perf-migration-01" `
+  -Location "eastus" `
+  -VCores 32 `
+  -MemoryGB 64 `
+  -ImageTag "v1.0" `
+  -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
+
 # Script will:
 # - Use existing ACR "sharedproductionacr" (no creation needed)
 # - Store image in "mongomig-perf" repository within the ACR
 # - Use existing storage account "sharedprodstg" (no creation needed)
 # - Check if image v1.0 exists; if yes, skip build and deploy directly
+# - Create environment with VNet integration (if subnet provided)
 ```
+
+## VNet Integration
+
+### Overview
+
+Azure Container Apps supports VNet integration for enhanced security and network isolation. **Critical limitations:**
+
+⚠️ **VNet integration must be configured at environment creation time**  
+⚠️ **You CANNOT add VNet to an existing Container Apps Environment**  
+⚠️ **VNet integration is at the Environment level, not per Container App**
+
+If you need VNet integration, the environment must be created with the VNet from day one. To change VNet settings later, you must delete and recreate the entire environment.
+
+### Prerequisites for VNet Integration
+
+1. **Existing Azure Virtual Network (VNet)** with available address space
+2. **Dedicated Subnet for Container Apps**:
+   - Recommended size: **/23 or larger** (512+ addresses)
+   - Must be delegated to `Microsoft.App/environments`
+   - Should not be used by other services
+   - Must have sufficient address space for the environment and all apps
+3. **Subnet Resource ID** in the format:
+   ```
+   /subscriptions/{subscription-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}
+   ```
+
+### Deploying with VNet Integration
+
+Use the `-InfrastructureSubnetResourceId` parameter during initial deployment:
+
+```powershell
+# Deploy with VNet integration
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "MongoMigrationRG" `
+  -ContainerAppName "mongomigration-prod" `
+  -Location "eastus" `
+  -VCores 16 `
+  -MemoryGB 64 `
+  -InfrastructureSubnetResourceId "/subscriptions/220fc532-6091-423c-8ba0-66c2397d591b/resourceGroups/MyRG/providers/Microsoft.Network/virtualNetworks/my-vnet/subnets/aca-subnet"
+```
+
+**What happens:**
+- Container Apps Environment is created with VNet integration enabled
+- The infrastructure subnet is used for environment networking
+- Apps can communicate privately within the VNet
+- Public ingress is still enabled by default (can be restricted separately)
+
+### Getting Subnet Resource ID
+
+```powershell
+# List all subnets in a VNet
+az network vnet subnet list `
+  --resource-group "MyRG" `
+  --vnet-name "my-vnet" `
+  --query "[].{Name:name, Id:id}" `
+  --output table
+
+# Get specific subnet ID
+az network vnet subnet show `
+  --resource-group "MyRG" `
+  --vnet-name "my-vnet" `
+  --name "aca-subnet" `
+  --query "id" `
+  --output tsv
+```
+
+### Important Notes
+
+- **Cannot modify VNet after creation**: If you need to change VNet settings, you must delete and recreate the environment
+- **All apps share the VNet**: Every Container App in the environment uses the same VNet integration
+- **Ingress control**: VNet integration alone doesn't restrict access. Configure ingress settings separately:
+  - **External**: Accessible from the internet (default)
+  - **Internal**: Only accessible within the VNet
+- **Private endpoints**: You can still configure private endpoints for ACR, Storage, and DocumentDB separately (see below)
 
 ## Network Security (Optional)
 
-### Setting Up Private Endpoints and VNET Integration
+### Setting Up Private Endpoints
 
-For enhanced security, you can configure private endpoints and VNET integration using the Azure Portal to restrict access to your Container App and associated resources.
+For enhanced security, configure private endpoints for your Azure resources to keep traffic within the Azure backbone network. This is separate from VNet integration and can be done after deployment.
 
-#### Prerequisites for Private Networking
-- An existing Azure Virtual Network (VNet) with available address space
-- Subnet dedicated for Container Apps (recommended: /23 or larger)
+#### Prerequisites for Private Endpoints
+- An existing Azure Virtual Network (VNet)
 - Subnet for private endpoints (recommended: /28 or larger)
-
-#### Step 1: Configure Container Apps Environment with VNET Integration
-
-1. **Navigate to Container Apps Environment** in Azure Portal
-   - Go to your Container Apps Environment resource
-   - Select **Networking** from the left menu
-
-2. **Enable VNET Integration** (if not already enabled)
-   - Click **Change VNET configuration**
-   - Select **Use my own virtual network**
-   - Choose your existing VNet or create a new one
-   - Select or create a subnet for the Container Apps Environment
-     - Recommended subnet size: /23 (512 addresses)
-     - This subnet will be delegated to `Microsoft.App/environments`
-   - Click **Save**
-
-3. **Configure Ingress Settings**
-   - Go to your Container App resource
-   - Select **Ingress** from the left menu
-   - Under **Ingress traffic**, select:
-     - **Limited to Container Apps Environment** for private-only access
-     - **Accepting traffic from anywhere** for public access (default)
-   - Click **Save**
+- Container Apps Environment with VNet integration (recommended but not required)
 
 #### Step 2: Set Up Private Endpoint for Azure Container Registry (ACR)
 
@@ -569,6 +679,29 @@ The update script will:
 - ✅ Intelligent image reuse - skips rebuild if image already exists
 - ✅ Simpler command with fewer parameters required
 
+### Updating Secrets (Connection Strings)
+
+If you need to update the StateStore connection string after initial deployment:
+
+Update via Azure Portal
+
+1. Navigate to your Container App in the Azure Portal
+2. Under **Settings**, click **Secrets**
+3. Find and edit the secret (e.g., `statestore-connection`)
+4. Paste your new MongoDB connection string
+5. Click **Save**
+6. Run the update script to restart the app with new secrets:
+
+
+Restart the app to pick up new secrets
+
+```
+.\update-aca-app.ps1 `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>"
+```
+
 ### Update with Full Redeployment
 
 Deploy updated configuration with all parameters (use this when you need to change environment variables or infrastructure):
@@ -647,6 +780,224 @@ $uniqueAcrName = "mongomigacr$(Get-Random -Minimum 1000 -Maximum 9999)"
 **Error**: VNet or subnet configuration problems
 
 **Solution**: Ensure the region supports Container Apps networking features.
+
+#### 4. Slow Performance with VNet Integration
+**Symptom**: Application runs slowly after enabling VNet integration, especially when connecting to MongoDB/Cosmos DB with Private Endpoint
+
+**Common Causes & Solutions**:
+
+1. **Private DNS Zone Not Linked to VNet**
+   - **Problem**: Container App cannot resolve MongoDB private endpoint hostname
+   - **Check**: `az network private-dns link vnet list --resource-group <rg> --zone-name privatelink.mongocluster.cosmos.azure.com --output table`
+   - **Fix**: Link the DNS zone to your VNet:
+   ```powershell
+   az network private-dns link vnet create `
+     --resource-group <rg> `
+     --zone-name privatelink.mongocluster.cosmos.azure.com `
+     --name <vnet-name>-link `
+     --virtual-network <vnet-name> `
+     --registration-enabled false
+   ```
+
+2. **DNS Resolution Delays**
+   - **Problem**: Azure DNS through VNet can be slower than public DNS
+   - **Check**: Monitor application logs for connection timeouts
+   - **Solution**: Increase connection timeouts in your MongoDB connection string
+   - **Alternative**: Consider using Azure Private DNS Resolver for better performance
+
+3. **NSG Rules Blocking Traffic**
+   - **Problem**: Network Security Group rules may be blocking or slowing down traffic
+   - **Check Outbound Rules**: `az network nsg show --ids <nsg-id> --query "securityRules[?direction=='Outbound']"`
+   - **Solution**: Ensure NSG allows outbound traffic to MongoDB (port 27017/10255) and doesn't have excessive deny rules
+
+4. **Missing Service Endpoints**
+   - **Problem**: Traffic routing through public internet instead of Azure backbone
+   - **Check**: `az network vnet subnet show --ids <subnet-id> --query "serviceEndpoints"`
+   - **Consider**: Adding Microsoft.AzureCosmosDB service endpoint to the subnet (though Private Endpoint is preferred)
+
+5. **Connection String Issues**
+   - **Problem**: Using public endpoint URL instead of private endpoint URL
+   - **Check**: Verify your StateStore connection string uses the private endpoint hostname
+   - **Fix**: Update the connection string to use `*.mongocluster.cosmos.azure.com` (private) not `*.mongo.cosmos.azure.com` (public)
+
+**Verification Commands**:
+```powershell
+# Check VNet integration
+az containerapp env show --name <env-name> --resource-group <rg> --query "properties.vnetConfiguration"
+
+# Check DNS zone links
+az network private-dns link vnet list --resource-group <rg> --zone-name privatelink.mongocluster.cosmos.azure.com --output table
+
+# Restart the app after DNS fixes
+az containerapp revision restart --name <app-name> --resource-group <rg> --revision <revision-name>
+
+# Compare performance with non-VNet deployment
+# Deploy without VNet first, test performance, then add VNet to isolate the issue
+```
+
+### DNS Resolution Issues with VNet Integration
+
+When using VNet integration with Container Apps, DNS resolution is critical for connecting to both private endpoints and public endpoints. Incorrect DNS configuration can cause connection failures.
+
+#### Problem: Private DNS Zone Intercepting Public Endpoint Queries
+
+**Symptom**: Application fails to connect to public MongoDB endpoints (e.g., `fc-xxxxx.mongocluster.cosmos.azure.com`) with DNS resolution errors or timeouts.
+
+**Root Cause**: When a Private DNS zone for `privatelink.mongocluster.cosmos.azure.com` is linked to your VNet, it intercepts **ALL** queries for `*.mongocluster.cosmos.azure.com` domains, including public endpoints. If the public endpoint hostname isn't in the Private DNS zone, resolution fails.
+
+**Example Error**:
+```
+System.Net.Dns.GetHostAddresses failed
+A timeout occurred after 30000ms selecting a server
+State: "Disconnected", Type: "Unknown", HeartbeatException
+```
+
+#### Scenarios and Solutions
+
+**Scenario 1: Using Private Endpoint MongoDB Only**
+- **Solution**: Link the Private DNS zone to your VNet (this is the correct setup)
+```powershell
+# Link Private DNS zone to VNet
+az network private-dns link vnet create `
+  --resource-group <dns-zone-rg> `
+  --zone-name privatelink.mongocluster.cosmos.azure.com `
+  --name <vnet-name>-link `
+  --virtual-network /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet} `
+  --registration-enabled false
+```
+**Scenario 2: Using Both Private and Public MongoDB Endpoints**
+- **Challenge**: Private DNS zone intercepts all `*.mongocluster.cosmos.azure.com` queries
+- **Solution Option A**: Keep Private DNS linked and add A records for public endpoints
+```powershell
+# First, resolve the public endpoint's IP from outside the VNet
+nslookup fc-xxxxx.mongocluster.cosmos.azure.com
+
+# Add A record to Private DNS zone pointing to public IP
+az network private-dns record-set a add-record `
+  --resource-group <dns-zone-rg> `
+  --zone-name privatelink.mongocluster.cosmos.azure.com `
+  --record-set-name fc-xxxxx-000 `
+  --ipv4-address <public-ip>
+```
+- **Solution Option B**: Use Custom DNS Servers with conditional forwarding
+- **Solution Option C** (Recommended): Migrate all MongoDB instances to private endpoints for consistency
+
+#### Diagnostic Commands
+
+**Check if Private DNS zone is linked to your VNet:**
+```powershell
+# List all Private DNS zones
+az network private-dns zone list `
+  --query "[?contains(name, 'mongocluster')].{name:name, resourceGroup:resourceGroup}" `
+  --output table
+
+# Check which VNets are linked to the DNS zone
+az network private-dns link vnet list `
+  --resource-group <dns-zone-rg> `
+  --zone-name privatelink.mongocluster.cosmos.azure.com `
+  --query "[].{name:name, vnetName:virtualNetwork.id}" `
+  --output table
+```
+
+**Check DNS records in the Private DNS zone:**
+```powershell
+# List A records
+az network private-dns record-set a list `
+  --resource-group <dns-zone-rg> `
+  --zone-name privatelink.mongocluster.cosmos.azure.com `
+  --output table
+```
+
+**Test DNS resolution from Container App:**
+```powershell
+# View application logs for DNS errors
+az containerapp logs show `
+  --name <app-name> `
+  --resource-group <rg> `
+  --tail 50 `
+  --follow false `
+  | Select-String -Pattern "DNS|GetHostAddresses|timeout"
+
+# Note: You cannot directly nslookup from Container Apps, but logs will show DNS resolution failures
+```
+
+**Check NSG rules that might affect DNS (port 53):**
+```powershell
+# List NSG rules
+az network nsg rule list `
+  --resource-group <rg> `
+  --nsg-name <nsg-name> `
+  --query "[?direction=='Outbound'].{priority:priority, name:name, access:access, protocol:protocol, destPorts:destinationPortRange}" `
+  --output table
+```
+
+#### Best Practices
+
+1. **Plan DNS Strategy Before Deployment**
+   - Decide: Private endpoints only, public only, or mixed
+   - Configure Private DNS zones accordingly before deploying Container Apps
+
+2. **Use Consistent Endpoint Types**
+   - **Recommended**: All MongoDB instances use private endpoints
+   - **Avoid**: Mixing private and public endpoints (adds DNS complexity)
+
+3. **Document Your DNS Configuration**
+   - Record which Private DNS zones are linked to which VNets
+   - Track which MongoDB instances use private vs. public endpoints
+
+4. **Test Connectivity After VNet Changes**
+   - After linking/unlinking DNS zones, restart Container App revisions
+   - Monitor logs for connection errors immediately after changes
+
+5. **Monitor DNS Resolution**
+   - Set up alerts for connection timeouts
+   - Review Container App logs regularly for DNS-related errors
+
+6. **Handle Multiple Private DNS Zones**
+   - If you have multiple resource groups with the same Private DNS zone name, ensure only the correct one is linked to your VNet
+   - Use descriptive link names: `<vnet-name>-<purpose>-link`
+
+#### Recovery Steps
+
+If your application suddenly stops connecting after VNet or DNS changes:
+
+1. **Identify the issue:**
+   ```powershell
+   # Check recent logs for errors
+   az containerapp logs show --name <app-name> --resource-group <rg> --tail 100
+   ```
+
+2. **Verify DNS zone links:**
+   ```powershell
+   # Check all linked VNets
+   az network private-dns link vnet list `
+     --resource-group <dns-zone-rg> `
+     --zone-name privatelink.mongocluster.cosmos.azure.com
+   ```
+
+3. **Apply the fix** (link or unlink based on your scenario)
+
+4. **Restart the application:**
+   ```powershell
+   # Get current revision
+   $revision = az containerapp revision list `
+     --name <app-name> `
+     --resource-group <rg> `
+     --query '[0].name' `
+     -o tsv
+
+   # Restart
+   az containerapp revision restart `
+     --name <app-name> `
+     --resource-group <rg> `
+     --revision $revision
+   ```
+
+5. **Verify connectivity:**
+   ```powershell
+   # Monitor logs for successful connections
+   az containerapp logs show --name <app-name> --resource-group <rg> --follow
+   ```
 
 ### View Container App Logs
 ```powershell

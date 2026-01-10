@@ -155,7 +155,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                         }
                         catch (Exception ex)
                         {
-                            _log.WriteLine($"Error killing process {processId}: {Helper.RedactPii(ex.Message)}", LogType.Error);
+                            _log.WriteLine($"Error killing process {processId}: {Helper.RedactPii(ex.ToString())}", LogType.Error);
                         }
 
                         onProcessEnded?.Invoke(processId);
@@ -178,7 +178,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error executing {processType}: {Helper.RedactPii(ex.Message)}", LogType.Error);
+                _log.WriteLine($"Error executing {processType}: {Helper.RedactPii(ex.ToString())}", LogType.Error);
                 return false;
             }
         }

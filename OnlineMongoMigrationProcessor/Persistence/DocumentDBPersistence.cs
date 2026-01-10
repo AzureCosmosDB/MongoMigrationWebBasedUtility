@@ -71,7 +71,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 }
                 catch (Exception ex)
                 {
-                    throw new InvalidOperationException($"Failed to initialize DocumentDBPersistence: {ex.Message}", ex);
+                    throw new InvalidOperationException($"Failed to initialize DocumentDBPersistence. Details: {ex}", ex);
                 }
             }
         }
@@ -145,7 +145,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error upserting document {id}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error upserting document {id}. Details: {ex}", "DocumentDBPersistence.txt");
                 return false;
             }
         }
@@ -185,7 +185,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error reading document {id}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error reading document {id}.Details: {ex}", "DocumentDBPersistence.txt");
                 return null;
             }
         }
@@ -244,7 +244,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error deleting document {id}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error deleting document {id}.Details: {ex}", "DocumentDBPersistence.txt");
                 return false;
             }
         }
@@ -268,7 +268,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error listing document IDs: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error listing document IDs. Details: {ex}", "DocumentDBPersistence.txt");
                 return new List<string>();
             }
         }
@@ -341,7 +341,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                             catch (Exception docEx)
                             {
                                 // Log individual document parsing errors but continue
-                                Helper.LogToFile($"[DocumentDBPersistence] Error parsing log document: {docEx.Message}", "DocumentDBPersistence.txt");
+                                Helper.LogToFile($"[DocumentDBPersistence] Error parsing log document.Details: {docEx}", "DocumentDBPersistence.txt");
                             }
                         }
                     }
@@ -351,7 +351,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error downloading paginated logs for {id}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error downloading paginated logs for {id}. Details: {ex}", "DocumentDBPersistence.txt");
                 return Array.Empty<byte>();
             }
         }
@@ -454,7 +454,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error downloading logs for {Id}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error downloading logs for {Id}.Details: {ex}", "DocumentDBPersistence.txt");
             }
             return Array.Empty<byte>();
         }
@@ -509,7 +509,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error reading logs for job {id}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error reading logs for job {id}.Details:  {ex}", "DocumentDBPersistence.txt");
             }
 
             return new LogBucket();
@@ -542,7 +542,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error pushing log entry for job {jobId}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error pushing log entry for job {jobId}. Details: {ex}", "DocumentDBPersistence.txt");
             }
         }
 
@@ -568,7 +568,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DocumentDBPersistence] Error deleting logs for job {jobId}: {ex.Message}", "DocumentDBPersistence.txt");
+                Helper.LogToFile($"[DocumentDBPersistence] Error deleting logs for job {jobId}.Details:  {ex}", "DocumentDBPersistence.txt");
                 return -1;
             }
         }

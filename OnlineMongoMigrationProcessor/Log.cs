@@ -105,8 +105,8 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 // Filter based on minimum log level - only log if the message type is at or below the minimum level
-                // Lower numeric values = more severe (Error=0, Info=1, Debug=2, Verbose=3)
-                if (_currentId==string.Empty ||( CurrentlyActiveJob != null && logType > CurrentlyActiveJob.LogLevel))
+                // Lower numeric values = more severe (Error=0, Message=1, Warning=2, Info=3, Debug=4, Verbose=5)
+                if (_currentId==string.Empty ||( CurrentlyActiveJob != null && (int)logType > (int)CurrentlyActiveJob.LogLevel))
                 {
                     return; // Skip this log entry
                 }
@@ -135,13 +135,14 @@ namespace OnlineMongoMigrationProcessor
                     }
 
                     //persits to file
-                    MigrationJobContext.Store.PushLogEntry(_currentId, logObj);
+                    MigrationJobContext.Store.PushLogEntry(_currentId, logObj);                    
                 }
-                
+
+
             }
-            catch
+            catch(Exception ex) 
             {
-                // Optionally log or ignore
+                Console.WriteLine($"[CRITICAL] Log write failed: {message} | Error: {ex}");
             }
         }
         public void Dispose()

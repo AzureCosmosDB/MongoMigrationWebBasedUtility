@@ -61,7 +61,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 }
                 catch (Exception ex)
                 {
-                    throw new InvalidOperationException($"Failed to initialize DiskPersistence: {ex.Message}", ex);
+                    throw new InvalidOperationException($"Failed to initialize DiskPersistence. Details: {ex}", ex);
                 }
             }
         }
@@ -174,7 +174,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DiskPersistence] Error upserting document {id}: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"[DiskPersistence] Error upserting document {id}. Details: {ex}", "DiskPersistence.txt");
                 return false;
             }
         }
@@ -208,7 +208,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DiskPersistence] Error reading document {id}: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"[DiskPersistence] Error reading document {id}. Details: {ex}", "DiskPersistence.txt");
                 return null;
             }
         }
@@ -280,7 +280,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DiskPersistence] Error deleting document/folder {id}: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"[DiskPersistence] Error deleting document/folder {id}. Details: {ex}", "DiskPersistence.txt");
                 return false;
             }
         }
@@ -316,7 +316,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DiskPersistence] Error listing document IDs: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"[DiskPersistence] Error listing document IDs. Details: {ex}", "DiskPersistence.txt");
                 return new List<string>();
             }
         }
@@ -479,7 +479,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"Error reading paginated logs: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"Error reading paginated logs. Details: {ex}", "DiskPersistence.txt");
             }
 
             // Format logs
@@ -609,7 +609,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                     }
                     catch (Exception ex)
                     {
-                        Helper.LogToFile($"Failed to write log entry: {ex.Message}", "DiskPersistence.txt");
+                        Helper.LogToFile($"Failed to write log entry. Details: {ex}", "DiskPersistence.txt");
 
                         // Continue writing other logs
                     }
@@ -620,7 +620,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"Error writing binary log: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"Error writing binary log. Details: {ex}", "DiskPersistence.txt");
                 throw;
             }
         }
@@ -705,7 +705,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"Error parsing binary log file: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"Error parsing binary log file. Details: {ex}", "DiskPersistence.txt");
             }
 
             return logBucket;
@@ -752,7 +752,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"Exception while reading log entry: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"Exception while reading log entry. Details: {ex}", "DiskPersistence.txt");
                 return null;
             }
         }
@@ -813,7 +813,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             }
             catch (Exception ex)
             {
-                Helper.LogToFile($"[DiskPersistence] Error deleting logs for job {jobId}: {ex.Message}", "DiskPersistence.txt");
+                Helper.LogToFile($"[DiskPersistence] Error deleting logs for job {jobId}. Details: {ex}", "DiskPersistence.txt");
                 return -1;
             }
         }

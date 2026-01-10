@@ -127,11 +127,11 @@
                     <!-- Advanced Tab Fields -->
                     <div class="mb-3">
                         <label for="logLevel" class="form-label" title="Set the minimum log level for this migration job. Lower levels include more detailed logging.">Log Level</label>
-                        <select id="LogLevel" class="form-select" @bind="logLevel">
+                        <select id="LogLevel" class="form-select" @bind="logLevel" disabled="@(!NewMode)">
                             <option value="@LogType.Error">Error</option>
                             <option value="@LogType.Warning">Warning</option>
                             <option value="@LogType.Info">Info</option>
-                            <option value="@LogType.Verbose">Debug</option>
+                            <option value="@LogType.Debug">Debug</option>
                             <option value="@LogType.Verbose">Verbose</option>
                         </select>
                     </div>
