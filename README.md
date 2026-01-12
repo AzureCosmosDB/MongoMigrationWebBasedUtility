@@ -86,7 +86,7 @@ The MongoDB Migration Web-Based Utility can be deployed to Azure using two diffe
 - ✅ Standard web application hosting
 - ✅ Ideal for migrations under 24 hours
 
-**[📖 Deploy to Azure Web App Guide](WebApp/DeployToWebApp_README.md)**
+**[📖 Deploy to Azure Web App Guide](WebApp/README.md)**
 
 ### Option 2: Azure Container Apps (ACA)
 
@@ -98,7 +98,7 @@ The MongoDB Migration Web-Based Utility can be deployed to Azure using two diffe
 - ✅ Enterprise networking with VNet integration
 - ✅ Ideal for migrations over 24 hours
 
-**[📖 Deploy to Azure Container Apps Guide](ACA/DeployToACA_README.md)**
+**[📖 Deploy to Azure Container Apps Guide](ACA/README.md)**
 
 ### Choosing the Right Deployment
 
@@ -128,7 +128,7 @@ The MongoDB Migration Web-Based Utility can be deployed to Azure using two diffe
 - ✅ Deploy on existing Windows Server infrastructure
 - ✅ Full IIS-based hosting with .NET 9
 
-**[📖 Deploy to On-Premises Windows Server Guide](OnPremise/DeployToOnPremise_README.md)**
+**[📖 Deploy to On-Premises Windows Server Guide](OnPremise/README.md)**
 
 ## How to Use
 
