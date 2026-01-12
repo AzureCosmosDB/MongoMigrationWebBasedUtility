@@ -1240,7 +1240,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     return TaskResult.Canceled;
                 }
             }
-
+            _activeJobId = string.Empty;
             _log.WriteLine("MigrateJobCollections completed - all activities finished", LogType.Debug);
             return TaskResult.Success;
         }

@@ -171,9 +171,10 @@ namespace OnlineMongoMigrationProcessor
         public override void StopProcessing(bool updateStatus = true)
         {
             _log.WriteLine("Stopping DumpRestoreProcessor...");
-            
+
             // Stop the coordinator timer and clear manifests
-            _coordinator.StopCoordinatedProcessing();
+            if (_coordinator!=null)
+              _coordinator.StopCoordinatedProcessing();
             
             // Give time for any active timer callbacks to complete
             System.Threading.Thread.Sleep(500);
