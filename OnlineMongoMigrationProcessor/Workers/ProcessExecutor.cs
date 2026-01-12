@@ -100,7 +100,17 @@ namespace OnlineMongoMigrationProcessor.Workers
                     {
                         errorBuffer.AppendLine(args.Data);
                         ProcessConsoleOutput(args.Data, processType, mu, chunk, chunkIndex, basePercent, contribFactor, targetCount);
-                    }
+
+                        string lowerData = args.Data.ToLower();
+                        if (lowerData.Contains("failed to connect") || lowerData.Contains("error parsing") || lowerData.Contains("failed:"))
+                        {
+                            _log.WriteLine($"Error during {processType} for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]: {Helper.RedactPii(args.Data)}", LogType.Error);
+                        }
+                        else
+                        {
+                            MigrationJobContext.AddVerboseLog($"{processType} Log: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] {Helper.RedactPii(args.Data)}");
+                        }
+                    }                    
                 };
 
                 _process.Start();
