@@ -23,6 +23,7 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
   - [Choosing the Right Deployment](#choosing-the-right-deployment)
 - [On-Premises Deployment](#on-premises-deployment)
 - [How to Use](#how-to-use)
+  - [Schema Migration Tool](#schema-migration-tool)
   - [Add a New Job](#add-a-new-job)
   - [Migration modes](#migration-modes)
   - [Get List of Collections](#get-list-of-collections)
@@ -30,14 +31,12 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
   - [Update Web App Settings](#update-web-app-settings)
   - [Remove a Job](#remove-a-job)
   - [Download Job Details](#download-job-details)
-- [Job options and behaviors](#job-options-and-behaviors)
-- [Collections input formats](#collections-input-formats)
-  - [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format)
-- [How To Guide](#how-to-guide)
   - [Dynamic Scaling of MongoDump/Restore Workers](#dynamic-scaling-of-mongodumprestore-workers)
   - [Difference Between Immediate Pause and Controlled Pause](#difference-between-immediate-pause-and-controlled-pause)
   - [Multiple Partitioners for ObjectId and Benefits of Selecting DataType for _id](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id)
-- [Settings (gear icon)](#settings-gear-icon)
+- [Job options and behaviors](#job-options-and-behaviors)
+- [Collections input formats](#collections-input-formats)
+  - [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format)
 - [Job lifecycle controls in Job Viewer](#job-lifecycle-controls-in-job-viewer)
 - [RU-optimized copy (Cosmos DB source)](#ru-optimized-copy-cosmos-db-source)
 - [Security and data handling](#security-and-data-handling)
@@ -133,21 +132,66 @@ The MongoDB Migration Web-Based Utility can be deployed to Azure using two diffe
 
 ## How to Use
 
+### Schema Migration Tool
+
+Before migrating your data, it's essential to prepare your target Azure DocumentDB environment with the proper schema structure. The **Schema Migration Tool** (located in the `/SchemaMigration` folder) automates this critical preparation step.
+
+#### What It Does
+
+The Schema Migration Tool analyzes your source MongoDB collections and intelligently transforms them for optimal performance on Azure DocumentDB. It handles:
+
+- **Collection Creation**: Automatically creates target collections with appropriate configurations
+- **Index Migration**: Transfers and optimizes indexes from source to target, including:
+  - Simple and compound indexes
+  - Unique indexes
+  - TTL (Time-To-Live) indexes
+  - Partial filter indexes
+- **Shard Key Migration**: Optionally migrates sharding configurations for distributed collections
+- **Index Optimization**: Identifies and removes redundant compound indexes to improve performance
+- **Collection Colocation**: Groups related collections together for better query performance
+
+#### Why Schema Migration Must Be Performed First
+
+Running the Schema Migration Tool **before** data migration is crucial for several reasons:
+
+1. **Performance Optimization**: Creating indexes after data is loaded can be extremely time-consuming and resource-intensive. Pre-creating indexes ensures optimal write performance during bulk data migration.
+
+2. **Schema Compatibility**: Azure DocumentDB may have different schema requirements or optimizations compared to your source MongoDB. The tool ensures your target schema is properly configured before data arrives.
+
+3. **Sharding Configuration**: If your collections are sharded, the shard key must be defined before any data is written to the collection. You cannot add or modify shard keys after data insertion.
+
+#### Quick Start
+
+```bash
+cd SchemaMigration
+python main.py --config-file <config.json> --source-uri <source_connection_string> --dest-uri <target_connection_string>
+```
+
+**[📖 Complete Schema Migration Guide](SchemaMigration/README.md)**
+
+#### Recommended Workflow
+
+1. ✅ **Schema Migration**: Run the Schema Migration Tool to prepare your Azure DocumentDB environment
+2. ✅ **Verify Schema**: Confirm all collections, indexes, and shard keys are correctly created
+3. ✅ **Data Migration**: Use the main Migration Web App to copy your data
+4. ✅ **Validate**: Verify data integrity and application compatibility
+
+> **Important**: When running data migration after schema migration, ensure you enable **Append Mode** in the Migration Web App. This preserves the collections, indexes, and shard keys created by the Schema Migration Tool. Without Append Mode, the data migration tool may drop and recreate collections, losing your optimized schema configuration.
+
 ### Add a New Job
 
-1. Go to the home page: `https://<WebAppName>.azurewebsites.net` and click **New Job**.  
+1. Go to the home page. Click **New Job**.  
 2. In the **New Job Details** pop-up, enter all required information.  
 3. Refer to [Collections input formats](#collections-input-formats) to learn multiple ways to input collection list for migration. If necessary, use the [list collection steps](#get-list-of-collections) to create a comma-separated list of collection names.  
 4. Choose the migration tool: either **Mongo Dump/Restore** or **Mongo Driver**.  
 5. Select the desired [migration mode](#migration-modes).
-1. Select **Post Migration Sync Back** to enable syncing back to the source after migration, this helps reduce risk by allowing a rollback to the original server if needed.
 1. Select **Append Mode** to preserve existing collection(s) on the target without deleting them.  
 1. Select **Skip Indexes** to prevent the tool from copying indexes from the source.
 1. Once all fields are filled, select **OK**.  
 1. The job will automatically start if no other jobs are running.  
 
 
-**Note:** For the Mongo Dump/Restore option, the Web App will download the mongo-tools from the URL specified in the Web App settings. Ensure that the Web App has access to this URL. If the Web App does not have internet access, you can download the mongo-tools zip file to your development machine, then copy it to the wwwroot folder inside the published folder before compressing it. Afterward, update the URL in the Web App settings to point to the Web App’s URL (e.g., https://<WebAppName>.azurewebsites.net/<zipfilename.zip>).
+**Note for Azure Web App deployments:** For the Mongo Dump/Restore option, the Web App will download the mongo-tools from the URL specified in the Web App settings. Ensure that the Web App has access to this URL. If the Web App does not have internet access, you can download the mongo-tools zip file to your development machine, then copy it to the wwwroot folder inside the published folder before compressing it. Afterward, update the URL in the Web App settings to point to the Web App's URL (e.g., https://<WebAppName>.azurewebsites.net/<zipfilename.zip>). This note does not apply to Azure Container Apps (ACA) deployments, where mongo-tools are pre-installed in the container image.
 
 
 ### Migration modes
@@ -274,8 +318,57 @@ This is different from "Time Since Last Change" which shows when the last actual
 
 
 ### Update Web App Settings
-1. From the home page  
-2. Select the **gear icon** to open the settings page.  
+
+These settings are persisted per app instance and affect all jobs:
+
+- Mongo tools download URL
+    - HTTPS ZIP URL to mongo-tools used by Dump/Restore. If your app has no internet egress, upload the ZIP alongside your app content and point this URL to your app’s public URL of the file.
+    - Must start with https:// and end with .zip
+
+- Binary format utilized for the _id
+    - Use when your source uses binary GUIDs for _id.
+
+- Chunk size (MB) for mongodump
+    - Range: 2–5120. Affects download-and-upload batching for Dump/Restore.
+
+- Mongo driver page size
+    - Range: 50–40000. Controls batch size for driver-based bulk reads/writes.
+
+- Change stream max docs per batch
+    - Range: 100–10000. Larger batches reduce overhead but increase memory/latency.
+
+- Change stream batch duration (max/min, seconds)
+    - Max range: 20–3600; Min range: 10–600; Min must be less than Max. Controls how long change processors run per batch window.
+
+- Max collections per change stream batch
+    - Range: 1–30. Concurrency limit when processing multiple collections.
+
+- Sample size for hash comparison
+    - Range: 5–2000. Used by the “Run Hash Check” feature to spot-check document parity.
+
+- ObjectId Partitioner
+    - Choose the partitioning method for ObjectId-based collections:
+      - **Use Sample Command**: Uses MongoDB's $sample command (best for small collections)
+      - **Use Time Boundaries**: Time-based boundaries using ObjectId timestamps (recommended for most workloads)
+      - **Use Adjusted Time Boundaries**: Time-based boundaries adjusted by actual record counts (best for balanced chunks)
+      - **Use Pagination**: Pagination-based boundaries for equal-sized chunks (deterministic)
+    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for detailed explanations.
+
+- CA certificate file for source server (.pem)
+    - Paste/upload the PEM (CA chain) if your source requires a custom CA to establish TLS.
+
+Advanced notes:
+- App setting `AllowMongoDump` (see `MongoMigrationWebApp/appsettings.json`) toggles whether the “MongoDump and MongoRestore” option is available in the UI.
+- The app’s working folder defaults to the system temp path, or to `%ResourceDrive%\home\` when present (e.g., on Azure App Service). It stores job state under `migrationjobs` and logs under `migrationlogs`.
+
+## Job lifecycle controls in Job Viewer
+
+- **Resume Job**: Resume with updated or existing connection strings.
+- **Pause Job**: Safely pause the running job.
+- **Cut Over**: For online jobs, enabled when change stream lag reaches zero for all collections. You can choose Cut Over with or without Sync Back.
+- **Update Collections**: Add/remove collections on a paused job. Removing a collection discards its migration and change stream state.
+- **Reset Change Stream**: For selected collections, reset the checkpoint to reprocess from the beginning. Useful if you suspect missed events.
+- **Run Hash Check**: Randomly samples documents and compares hashes between source and target to detect mismatches. Controlled by the Settings sample size.
 
 ### Remove a Job
 1. From the home page  
@@ -284,76 +377,6 @@ This is different from "Time Since Last Change" which shows when the last actual
 ### Download Job Details
 1. From the home page  
 2. Select the **download icon** next to the job title to download the job details as JSON. This may be used for debugging purposes. 
-
-## Job options and behaviors
-
-When creating or resuming a job, you can tailor behavior via these options:
-
-- Migration tool
-    - MongoDump and MongoRestore: Uses mongo-tools. Best for moving from self-hosted or Atlas to Cosmos DB. Requires access to Mongo Tools ZIP URL configured in Settings.
-    - MongoDB Driver: Uses the driver for bulk copy and change stream catch-up.
-    - MongoDB Driver (Cosmos DB RU read optimized): Optimized for Cosmos DB Mongo vCore as source. Skips index creation and uses RU-friendly read patterns. Filters on collections are not supported for this mode.
-
-- Migration mode
-    - Offline: Snapshot-only copy. Job completes automatically when copy finishes.
-    - Online: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
-
-- Append Mode
-    - If ON: Keeps existing target data and appends new documents. No collection drop. Good for incremental top-ups.
-    - If OFF: Target collections are overwritten. A confirmation checkbox is required to proceed.
-
-- Skip Indexes
-    - If ON: Skips index creation on target (data only). Forced ON for RU-optimized copy. You can create indexes separately before migration.
-
-- Change Stream Modes
-    - Delayed: Start change stream processing after all collections are completed. This mode is ideal when migrating a large number of collections.
-    - Immediate: Start change stream processing immediately as each collection is processed.
-    - Aggressive: Use aggressive change stream processing when the oplog is small or the write rate is very high. Avoid this mode if a large number of collections need to be migrated.
-
-- Post Migration Sync Back
-    - For online jobs, after Cut Over you can enable syncing from target back to source. This reduces rollback risk. UI shows Time Since Sync Back once active.
-
-- All collections use ObjectId for the _id field
-    - If ON: Automatically applies `"DataTypeFor_Id": "ObjectId"` to all collections in the job, enabling ObjectId-specific optimizations.
-    - Benefits: Faster partitioning (6x speedup), optimized chunk boundaries, leverages timestamp-based partitioning strategies.
-    - If OFF: Each collection's _id type is auto-detected, or you can specify DataTypeFor_Id individually via JSON format.
-    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for performance details.
-
-- Simulation Mode (No Writes to Target)
-    - Runs a dry-run where reads occur but no writes are performed on target. Useful for validation and sizing.
-
-## Collections input formats
-
-You can specify collections in two ways:
-
-1) CSV list
-- Example: `db1.col1,db1.col2,db2.colA`
-- Order matters. Larger collections should appear first to reduce overall time.
-- 
-2) CSV list with wildcards
-- Example: `db1.*,*.users,*.*`
-- If the collection count is large consider splitting it into multiple jobs.
-
-3) JSON list with optional filters
-- Use the [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format):
-
-Notes:
-- Filters must be valid MongoDB query JSON (as a string). Only supports basic operators (`eq`,`lt`,`lte`,`gt`,`gte`,`in`) on root fields. They apply to both bulk copy and change stream.
-- Specify DataTypeFor_Id if the collection contains only a single data type for the _id field. Supported values are: ObjectId, Int, Int64, Decimal128, Date, BinData, String, and Object.
-- RU-optimized copy does not support filters or DataTypeFor_Id ; provide only DatabaseName and CollectionName.
-- System collections are not supported.
-
-### CollectionInfoFormat JSON Format
-
- ```JSON
-[
-    { "CollectionName": "Customers", "DatabaseName": "SalesDB", "Filter": "{ \"status\": \"active\"}" },
-    { "CollectionName": "Orders", "DatabaseName": "SalesDB", "Filter": "{ \"orderDate\": { \"$gte\": { \"$date\": \"2024-01-01T00:00:00Z\" } } }" },
-    { "CollectionName": "Products", "DatabaseName": "InventoryDB", "DataTypeFor_Id": "ObjectId" }
-]
-```
-
-## How To Guide
 
 ### Dynamic Scaling of MongoDump/Restore Workers
 
@@ -425,7 +448,7 @@ The migration tool offers two pause mechanisms with different behaviors:
 **Behavior**:
 - Cancellation token is immediately triggered
 - All active workers check the cancellation token and exit as soon as possible
-- Currently executing `mongodump`/`mongorestore` processes are **killed immediately**
+- Currently executing processes are **killed immediately**
 - In-progress chunks may be left incomplete
 - Job state is saved with partial progress
 
@@ -437,7 +460,7 @@ The migration tool offers two pause mechanisms with different behaviors:
 
 **Resume Behavior**:
 - Job resumes from the last saved state
-- Incomplete chunks are retried from the beginning
+- Incomplete chunks are retried from the beginning (Note: Processing incomplete chunks is time-consuming as duplicate records prevent batch transactions and make the process extremely slow)
 - Change streams resume from last saved token
 
 #### Controlled Pause (Graceful Stop)
@@ -447,19 +470,11 @@ The migration tool offers two pause mechanisms with different behaviors:
 **Behavior**:
 - Sets `_controlledPauseRequested` flag to true
 - Active workers **complete their current chunks** before exiting
-- No new chunks are dequeued from the work queue
-- `mongodump`/`mongorestore` processes finish naturally
+- No new tasks are queued
+- Existing processes finish naturally
 - All progress is saved cleanly
 - When dump completes during controlled pause, **restore does NOT auto-start**
 
-**Log Messages**:
-```
-DumpRestoreProcessor: Controlled pause - no new chunks will be queued
-Dump worker 1: Controlled pause active - exiting
-Dump worker 2: Controlled pause active - exiting
-All dump chunks completed during controlled pause
-{dbName}.{colName} dump complete, but controlled pause active - restore will not start automatically
-```
 
 **When to Use**:
 - Planned maintenance window approaching
@@ -486,21 +501,6 @@ All dump chunks completed during controlled pause
 | **Resume Efficiency** | Some chunks retry | Maximum efficiency |
 | **Use Case** | Emergency | Planned pause |
 
-#### Best Practices
-
-**For Controlled Pause**:
-1. Allow 1-2 minutes for workers to complete current chunks
-2. Monitor logs to confirm all workers have exited cleanly
-3. Verify job status shows "Paused" before closing browser
-
-**For Immediate Pause**:
-1. Use when time is critical
-2. Expect some chunks to be reprocessed on resume
-3. Check for any killed process remnants if issues persist
-
-**Note**: Both pause types respect the job lifecycle. On resume, the job continues from its saved state. For online migrations, change streams automatically resume from the last saved token.
-
----
 
 ### Multiple Partitioners for ObjectId and Benefits of Selecting DataType for _id
 
@@ -721,60 +721,75 @@ The tool automatically calculates optimal chunk count based on:
 
 **Result**: Balanced parallelism without creating too many tiny chunks or too few large chunks.
 
----
 
-## Settings (gear icon) 
 
-These settings are persisted per app instance and affect all jobs:
+## Job options and behaviors
 
-- Mongo tools download URL
-    - HTTPS ZIP URL to mongo-tools used by Dump/Restore. If your app has no internet egress, upload the ZIP alongside your app content and point this URL to your app’s public URL of the file.
-    - Must start with https:// and end with .zip
+When creating or resuming a job, you can tailor behavior via these options:
 
-- Binary format utilized for the _id
-    - Use when your source uses binary GUIDs for _id.
+- Migration tool
+    - MongoDump and MongoRestore: Uses mongo-tools. Best for moving from self-hosted or Atlas to Cosmos DB. Requires access to Mongo Tools ZIP URL configured in Settings.
+    - MongoDB Driver: Uses the driver for bulk copy and change stream catch-up.
+    - MongoDB Driver (Cosmos DB RU read optimized): Optimized for Cosmos DB Mongo vCore as source. Skips index creation and uses RU-friendly read patterns. Filters on collections are not supported for this mode.
 
-- Chunk size (MB) for mongodump
-    - Range: 2–5120. Affects download-and-upload batching for Dump/Restore.
+- Migration mode
+    - Offline: Snapshot-only copy. Job completes automatically when copy finishes.
+    - Online: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
 
-- Mongo driver page size
-    - Range: 50–40000. Controls batch size for driver-based bulk reads/writes.
+- Append Mode
+    - If ON: Keeps existing target data and appends new documents. No collection drop. Good for incremental top-ups.
+    - If OFF: Target collections are overwritten. A confirmation checkbox is required to proceed.
 
-- Change stream max docs per batch
-    - Range: 100–10000. Larger batches reduce overhead but increase memory/latency.
+- Skip Indexes
+    - If ON: Skips index creation on target (data only). Forced ON for RU-optimized copy. You can create indexes separately before migration.
 
-- Change stream batch duration (max/min, seconds)
-    - Max range: 20–3600; Min range: 10–600; Min must be less than Max. Controls how long change processors run per batch window.
+- Change Stream Modes
+    - Delayed: Start change stream processing after all collections are completed. This mode is ideal when migrating a large number of collections.
+    - Immediate: Start change stream processing immediately as each collection is processed.
+    - Aggressive: Use aggressive change stream processing when the oplog is small or the write rate is very high. Avoid this mode if a large number of collections need to be migrated.
 
-- Max collections per change stream batch
-    - Range: 1–30. Concurrency limit when processing multiple collections.
+- Post Migration Sync Back
+    - For online jobs, after Cut Over you can enable syncing from target back to source. This reduces rollback risk. UI shows Time Since Sync Back once active.
 
-- Sample size for hash comparison
-    - Range: 5–2000. Used by the “Run Hash Check” feature to spot-check document parity.
-- ObjectId Partitioner
-    - Choose the partitioning method for ObjectId-based collections:
-      - **Use Sample Command**: Uses MongoDB's $sample command (best for small collections)
-      - **Use Time Boundaries**: Time-based boundaries using ObjectId timestamps (recommended for most workloads)
-      - **Use Adjusted Time Boundaries**: Time-based boundaries adjusted by actual record counts (best for balanced chunks)
-      - **Use Pagination**: Pagination-based boundaries for equal-sized chunks (deterministic)
-    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for detailed explanations.
+- All collections use ObjectId for the _id field
+    - If ON: Automatically applies `"DataTypeFor_Id": "ObjectId"` to all collections in the job, enabling ObjectId-specific optimizations.
+    - Benefits: Faster partitioning (6x speedup), optimized chunk boundaries, leverages timestamp-based partitioning strategies.
+    - If OFF: Each collection's _id type is auto-detected, or you can specify DataTypeFor_Id individually via JSON format.
+    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for performance details.
 
-- CA certificate file for source server (.pem)
-    - Paste/upload the PEM (CA chain) if your source requires a custom CA to establish TLS.
+- Simulation Mode (No Writes to Target)
+    - Runs a dry-run where reads occur but no writes are performed on target. Useful for validation and sizing.
 
-Advanced notes:
-- App setting `AllowMongoDump` (see `MongoMigrationWebApp/appsettings.json`) toggles whether the “MongoDump and MongoRestore” option is available in the UI.
-- The app’s working folder defaults to the system temp path, or to `%ResourceDrive%\home\` when present (e.g., on Azure App Service). It stores job state under `migrationjobs` and logs under `migrationlogs`.
+## Collections input formats
 
-## Job lifecycle controls in Job Viewer
+You can specify collections in two ways:
 
-- **Resume Job**: Resume with updated or existing connection strings.
-- **Pause Job**: Safely pause the running job.
-- **Cut Over**: For online jobs, enabled when change stream lag reaches zero for all collections. You can choose Cut Over with or without Sync Back.
-- **Update Collections**: Add/remove collections on a paused job. Removing a collection discards its migration and change stream state.
-- **Reset Change Stream**: For selected collections, reset the checkpoint to reprocess from the beginning. Useful if you suspect missed events.
-- **Run Hash Check**: Randomly samples documents and compares hashes between source and target to detect mismatches. Controlled by the Settings sample size.
+1) CSV list
+- Example: `db1.col1,db1.col2,db2.colA`
+- Order matters. Larger collections should appear first to reduce overall time.
+- 
+2) CSV list with wildcards
+- Example: `db1.*,*.users,*.*`
+- If the collection count is large consider splitting it into multiple jobs.
 
+3) JSON list with optional filters
+- Use the [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format):
+
+Notes:
+- Filters must be valid MongoDB query JSON (as a string). Only supports basic operators (`eq`,`lt`,`lte`,`gt`,`gte`,`in`) on root fields. They apply to both bulk copy and change stream.
+- Specify DataTypeFor_Id if the collection contains only a single data type for the _id field. Supported values are: ObjectId, Int, Int64, Decimal128, Date, BinData, String, and Object.
+- RU-optimized copy does not support filters or DataTypeFor_Id ; provide only DatabaseName and CollectionName.
+- System collections are not supported.
+
+### CollectionInfoFormat JSON Format
+
+ ```JSON
+[
+    { "CollectionName": "Customers", "DatabaseName": "SalesDB", "Filter": "{ \"status\": \"active\"}" },
+    { "CollectionName": "Orders", "DatabaseName": "SalesDB", "Filter": "{ \"orderDate\": { \"$gte\": { \"$date\": \"2024-01-01T00:00:00Z\" } } }" },
+    { "CollectionName": "Products", "DatabaseName": "InventoryDB", "DataTypeFor_Id": "ObjectId" }
+]
+```
 
 ## RU-optimized copy (Cosmos DB source)
 
@@ -787,10 +802,6 @@ Advanced notes:
 - Consider deploying behind VNet integration and/or Private Endpoint (see earlier sections) to restrict access.
 - **Entra ID Authentication (Optional)**: You can configure Entra ID-based authentication for your Azure Web App to ensure only valid users can access the migration tool. This adds an additional layer of security by requiring users to authenticate with their organizational credentials. For configuration details, see [Azure App Service Authentication](https://learn.microsoft.com/en-us/azure/static-web-apps/authentication-authorization).
 
-## Logs, backup, and recovery
-
-- Logs: Each job writes under `migrationlogs`. From Job Viewer you can download the current log or a backup if corruption is detected.
-- Job state: Persisted under `migrationjobs\list.json` with rotating backups every few minutes. Use the “Recover Jobs” button on Home to restore from the best available backup snapshot. This stops any running jobs and replaces the in-memory list with the recovered state.
 
 ## Performance tips
 
@@ -801,6 +812,6 @@ Advanced notes:
 
 ## Troubleshooting
 
-- “Unable to load job details” on Home: Use “Recover Jobs” to restore the latest healthy snapshot.
 - Change stream lag not decreasing: Confirm the job is running, source writes exist, and consider increasing plan size or reducing concurrent collections.
 - RU-optimized copy stalls: Validate source is Cosmos DB Mongo vCore, ensure no partition split warnings, and verify target write capacity.
+- **ACA deployment - App not loading**: If the application is not loading in Azure Container Apps deployment, open the browser console using F12 (Developer Tools). If you see an error stating "statestore connection is invalid", update the connection string following the steps provided in the [ACA README](ACA/README.md).
