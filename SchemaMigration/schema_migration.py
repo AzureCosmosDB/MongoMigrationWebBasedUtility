@@ -89,8 +89,6 @@ class SchemaMigration:
 
             print("-- Migrating indexes for collection")
             for index_keys, index_options in index_list:
-                if self._is_ts_ttl_index(index_keys, index_options):
-                    raise ValueError(f"Cannot migrate TTL index on _ts field for collection {collection_name}.")
                 print(f"---- Creating index: {index_keys} with options: {index_options}")
                 dest_collection.create_index(index_keys, **index_options)
 
@@ -115,17 +113,6 @@ class SchemaMigration:
         except Exception:
             # Collection is not sharded
             return None
-
-    def _is_ts_ttl_index(self, index_keys: List[Tuple], index_options: dict) -> bool:
-        """
-        Check if the given index is a TTL (Time-To-Live) index on _ts field.
-
-        :param index: The index to check.
-        :return: True if the index is a TTL index, False otherwise.
-        """
-        if 'expireAfterSeconds' in index_options and any('_ts' ==  index_key[0] for index_key in index_keys):
-            return True
-        return False
 
     def _optimize_compound_indexes(self, index_list: List[Tuple]) -> List[Tuple]:
         """
