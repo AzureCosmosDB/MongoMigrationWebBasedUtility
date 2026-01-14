@@ -589,7 +589,7 @@ namespace OnlineMongoMigrationProcessor
                 !MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun && 
                 MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode != ChangeStreamMode.Aggressive)
             {
-                _log.WriteLine($"{_syncBackPrefix}Auto-replaying first change for {collectionKey} - ResumeDocId: {mu.ResumeDocumentId}, Operation: {mu.ResumeTokenOperation}", LogType.Debug);
+                _log.WriteLine($"{_syncBackPrefix}Auto-replaying first change for {collectionKey} - ResumeDocKey: {mu.ResumeDocumentKey}, Operation: {mu.ResumeTokenOperation}", LogType.Debug);
                 
                 if (targetCollection == null)
                 {
@@ -601,7 +601,9 @@ namespace OnlineMongoMigrationProcessor
                 var replaySourceDb = replaySourceClient.GetDatabase(mu.DatabaseName);
                 var replaySourceCollection = replaySourceDb.GetCollection<BsonDocument>(mu.CollectionName);
                 
-                if (AutoReplayFirstChangeInResumeToken(mu.ResumeDocumentId, mu.ResumeTokenOperation, replaySourceCollection, targetCollection!, mu))
+                // Use ResumeDocumentKey (full DocumentKey with shard key) instead of ResumeDocumentId
+                var documentKey = mu.ResumeDocumentKey ?? mu.ResumeDocumentId; // Fallback for backward compatibility
+                if (AutoReplayFirstChangeInResumeToken(documentKey, mu.ResumeTokenOperation, replaySourceCollection, targetCollection!, mu))
                 {
                     mu.InitialDocumenReplayed = true;
                     MigrationJobContext.SaveMigrationUnit(mu, false);
@@ -1205,20 +1207,20 @@ namespace OnlineMongoMigrationProcessor
         }
 
         // This method retrieves the event associated with the ResumeToken
-        private bool AutoReplayFirstChangeInResumeToken(string? documentId, ChangeStreamOperationType opType, IMongoCollection<BsonDocument> sourceCollection, IMongoCollection<BsonDocument> targetCollection, MigrationUnit mu)
+        private bool AutoReplayFirstChangeInResumeToken(string? documentKey, ChangeStreamOperationType opType, IMongoCollection<BsonDocument> sourceCollection, IMongoCollection<BsonDocument> targetCollection, MigrationUnit mu)
         {
-            MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}CollectionLevelChangeStreamProcessor.AutoReplayFirstChangeInResumeToken: documentId={documentId}, opType={opType}, collection={sourceCollection.CollectionNamespace}");
-            if (documentId == null || string.IsNullOrEmpty(documentId))
+            MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}CollectionLevelChangeStreamProcessor.AutoReplayFirstChangeInResumeToken: documentKey={documentKey}, opType={opType}, collection={sourceCollection.CollectionNamespace}");
+            if (documentKey == null || string.IsNullOrEmpty(documentKey))
             {
                 _log.WriteLine($"{_syncBackPrefix}Auto replay is empty for {sourceCollection.CollectionNamespace}.", LogType.Debug);
                 return true; // Skip if no document ID is provided
             }
             else
             {
-                _log.ShowInMonitor($"{_syncBackPrefix}Auto replay for {opType} operation with _id {documentId} in {sourceCollection.CollectionNamespace}.");
+                _log.ShowInMonitor($"{_syncBackPrefix}Auto replay for {opType} operation with document key {documentKey} in {sourceCollection.CollectionNamespace}.");
             }
 
-            var bsonDoc = BsonDocument.Parse(documentId);
+            var bsonDoc = BsonDocument.Parse(documentKey);
             var filter = MongoHelper.BuildFilterFromDocumentKey(bsonDoc);
             var result = sourceCollection.Find(filter).FirstOrDefault(); // Retrieve the document for the resume token
 
@@ -1230,7 +1232,7 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Insert:
                         if (result == null || result.IsBsonNull)
                         {
-                            _log.WriteLine($"{_syncBackPrefix}No document found for insert operation with _id {documentId} in {sourceCollection.CollectionNamespace}. Skipping insert.", LogType.Warning);
+                            _log.WriteLine($"{_syncBackPrefix}No document found for insert operation with document key {documentKey} in {sourceCollection.CollectionNamespace}. Skipping insert.", LogType.Warning);
                             return true; // Skip if no document found
                         }
                         targetCollection.InsertOne(result);
@@ -1240,11 +1242,11 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Replace:
                         if (result == null || result.IsBsonNull)
                         {
-                            _log.WriteLine($"{_syncBackPrefix}Processing {opType} operation for {sourceCollection.CollectionNamespace} with _id {documentId}. No document found on source, deleting it from target.", LogType.Info);
-                            var deleteTTLFilter = MongoHelper.BuildFilterFromDocumentKey(bsonDoc);
+                            _log.WriteLine($"{_syncBackPrefix}Processing {opType} operation for {sourceCollection.CollectionNamespace} with document key {documentKey}. No document found on source, deleting it from target.", LogType.Info);
                             try
                             {
-                                targetCollection.DeleteOne(deleteTTLFilter);
+                                // Use DocumentKey-based filter for sharded collections
+                                targetCollection.DeleteOne(filter);
                                 IncrementDocCounter(mu, ChangeStreamOperationType.Delete);
                             }
                             catch
@@ -1253,13 +1255,14 @@ namespace OnlineMongoMigrationProcessor
                         }
                         else
                         {
+                            // Use DocumentKey-based filter for sharded collections with upsert
                             targetCollection.ReplaceOne(filter, result, new ReplaceOptions { IsUpsert = true });
                             IncrementDocCounter(mu, opType);
                             return true;
                         }
                     case ChangeStreamOperationType.Delete:
-                        var deleteFilter = Builders<BsonDocument>.Filter.Eq("_id", documentId);
-                        targetCollection.DeleteOne(deleteFilter);
+                        // Use DocumentKey-based filter for sharded collections
+                        targetCollection.DeleteOne(filter);
                         IncrementDocCounter(mu, opType);
                         return true;
                     default:
@@ -1274,7 +1277,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"{_syncBackPrefix}Error processing operation {opType} on {sourceCollection.CollectionNamespace} with _id {documentId}. Details: {ex}", LogType.Error);
+                _log.WriteLine($"{_syncBackPrefix}Error processing operation {opType} on {sourceCollection.CollectionNamespace} with document key {documentKey}. Details: {ex}", LogType.Error);
                 return false; // Return false to indicate failure in processing
             }
         }

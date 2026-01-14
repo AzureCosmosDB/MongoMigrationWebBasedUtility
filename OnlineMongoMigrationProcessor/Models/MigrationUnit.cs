@@ -98,7 +98,9 @@ namespace OnlineMongoMigrationProcessor
         public bool InitialDocumenReplayed { get; set; } = false;
         public ChangeStreamOperationType ResumeTokenOperation { get; set; }
 
+        [Obsolete("Use ResumeDocumentKey instead - this only contains _id, not full shard key")]
         public string? ResumeDocumentId { get; set; }
+        public string? ResumeDocumentKey { get; set; }
         public DateTime? BulkCopyStartedOn { get; set; }
         public DateTime? BulkCopyEndedOn { get; set; }
         public bool TargetCreated { get; set; }

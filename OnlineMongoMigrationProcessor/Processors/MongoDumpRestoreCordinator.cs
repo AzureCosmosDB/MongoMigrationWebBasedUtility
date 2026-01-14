@@ -736,6 +736,13 @@ namespace OnlineMongoMigrationProcessor
                         var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                         _log?.WriteLine($"[ProcessPendingDumps] Spawning dump worker for {mu?.DatabaseName}.{mu?.CollectionName}[{context.ChunkIndex}] (worker {spawned}/{availableWorkers})", LogType.Debug);                        // Spawn worker task
                         var cancellationToken = _processCts?.Token ?? CancellationToken.None;
+
+                        //Updating BulkCopyStartedOn timestamp, set it before the first dump starts
+                        if (!mu.BulkCopyStartedOn.HasValue || mu.BulkCopyStartedOn == DateTime.MinValue)
+                            mu.BulkCopyStartedOn = DateTime.UtcNow;
+
+                        MigrationJobContext.SaveMigrationUnit(mu, true);
+
                         _ = Task.Run(async () => await ProcessChunkForDownload(context), cancellationToken);
                     }
                     else

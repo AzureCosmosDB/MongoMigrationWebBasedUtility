@@ -98,7 +98,9 @@ namespace OnlineMongoMigrationProcessor
         public string? OriginalResumeToken { get; set; }
         public bool InitialDocumenReplayed { get; set; } = false;
         public ChangeStreamOperationType ResumeTokenOperation { get; set; }
+        [Obsolete("Use ResumeDocumentKey instead - this only contains _id, not full shard key")]
         public string? ResumeDocumentId { get; set; }
+        public string? ResumeDocumentKey { get; set; }
         public string? ResumeCollectionKey { get; set; } // CollectionKey (database.collection) for auto replay
         public DateTime? ChangeStreamStartedOn { get; set; }
         public DateTime CursorUtcTimestamp { get; set; }
@@ -108,7 +110,9 @@ namespace OnlineMongoMigrationProcessor
         public string? SyncBackOriginalResumeToken { get; set; }
         public bool SyncBackInitialDocumenReplayed { get; set; } = false;
         public ChangeStreamOperationType SyncBackResumeTokenOperation { get; set; }
+        [Obsolete("Use SyncBackResumeDocumentKey instead - this only contains _id, not full shard key")]
         public string? SyncBackResumeDocumentId { get; set; }
+        public string? SyncBackResumeDocumentKey { get; set; }
         public string? SyncBackResumeCollectionKey { get; set; } // CollectionKey (database.collection) for sync back auto replay
         public DateTime? SyncBackChangeStreamStartedOn { get; set; }
         public DateTime SyncBackCursorUtcTimestamp { get; set; }

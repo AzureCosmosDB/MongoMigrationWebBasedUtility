@@ -160,6 +160,19 @@ Before running the assessment, ensure that the client machine meets the followin
     python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string>
     ```
 
+    **Optional: Enable verbose mode** for detailed logging of the migration process:
+
+    ```cmd
+    python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string> --verbose
+    ```
+
+    The `--verbose` flag provides detailed output showing:
+    - Connection status to source and destination databases
+    - Configuration parsing details (include/exclude patterns, collections found)
+    - Step-by-step migration progress (drop, create, colocation, shard keys, indexes)
+    - Detailed decision-making logic (e.g., why certain indexes are optimized or skipped)
+    - Success/failure status for each operation
+
 This process will generate an Azure DocumentDB-optimized schema with index and sharding recommendations based on your workload.
 
 
@@ -171,3 +184,13 @@ This process will generate an Azure DocumentDB-optimized schema with index and s
 | **drop_if_exists** | Specifies whether collections with the same name in the target should be dropped and recreated. If `True`, existing collections are removed before migration; if `False`, they remain unchanged. **Default:** `False`. |
 | **optimize_compound_indexes** | Controls whether compound indexes should be optimized. If `True`, the script identifies redundant indexes and excludes them from migration; if `False`, all indexes are migrated as-is. **Default:** `False`. |
 | **co_locate_with** | Specifies the name of a reference collection from the same database to colocate with. When specified, the target collection will be colocated with the reference collection for improved query performance. The reference collection must exist in the same database before colocation is applied, or an error will be thrown. This option is useful for optimizing queries that join or access related collections together. **Default:** `None`. |
+
+### Command Line Options
+
+| **Option** | **Required** | **Description** |
+|-----------|-------------|---------------|
+| **--config-file** | Yes | Path to the JSON configuration file that defines collections to migrate and their migration settings. |
+| **--source-uri** | Yes | MongoDB connection string for the source database (e.g., `mongodb://localhost:27017`). |
+| **--dest-uri** | Yes | MongoDB/DocumentDB connection string for the destination database. |
+| **--verbose** | No | Enable verbose output mode. When set, displays detailed logging of all operations including connection status, configuration parsing, collection enumeration, and step-by-step migration progress. Useful for debugging and monitoring long-running migrations. |
+

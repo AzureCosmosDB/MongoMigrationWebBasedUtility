@@ -860,7 +860,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                                 // Use common function for collection-level resume token setting
                                 SetResumeTokenProperties(mu, change, forced, syncBack,log);
 
-                                MigrationJobContext.AddVerboseLog($"Collection-level resume token set for {mu.DatabaseName}.{mu.CollectionName} - Operation: {mu.ResumeTokenOperation}, DocumentId: {mu.ResumeDocumentId}");
+                                MigrationJobContext.AddVerboseLog($"Collection-level resume token set for {mu.DatabaseName}.{mu.CollectionName} - Operation: {mu.ResumeTokenOperation}, DocumentKey: {mu.ResumeDocumentKey}");
 
                                 // Exit immediately after first change detected
                                 return;
@@ -1423,7 +1423,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 }
                   
                 job.ResumeTokenOperation = operationType;
-                job.ResumeDocumentId = documentKeyJson;
+                job.ResumeDocumentId = documentKeyJson; // Deprecated - kept for backward compatibility
+                job.ResumeDocumentKey = documentKeyJson;
 
 
                 if (muInServerMode != null)
@@ -1459,7 +1460,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
 
                 mu.ResumeTokenOperation = operationType;
-                mu.ResumeDocumentId = documentKeyJson;
+                mu.ResumeDocumentId = documentKeyJson; // Deprecated - kept for backward compatibility
+                mu.ResumeDocumentKey = documentKeyJson;
 
                 // Clear the reset flag after successfully resetting the change stream
                 // This prevents duplicate "Resetting change stream resume token" log messages
