@@ -1111,7 +1111,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
 
 
-                foreach (MigrationUnit mub in units)
+                foreach (var mub in units)
                 {
                     var mu= MigrationJobContext.GetMigrationUnit(mub.Id);
 
@@ -1614,7 +1614,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _log.WriteLine($"MigrateJobCollections completed with result: {result}", LogType.Debug);
                 if (result == TaskResult.Success)
                 {
-                    if (!Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
+                    if (!Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob) && Helper.IsOfflineJobCompleted(MigrationJobContext.CurrentlyActiveJob))
                     {
                         if (!MigrationJobContext.ControlledPauseRequested)
                         {

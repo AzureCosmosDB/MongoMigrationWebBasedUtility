@@ -73,7 +73,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 ReadBinary = false;
                 MongoToolsDownloadUrl = "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.10.0.zip";
-                ChunkSizeInMb = 5120;
+                ChunkSizeInMb = 512;
 				MongoCopyPageSize = 500;
 				ChangeStreamMaxDocsInBatch = 10000;
                 ChangeStreamBatchDuration = 120;

@@ -175,7 +175,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 // Don't mark as completed if this is a controlled pause
                 if (!MigrationJobContext.ControlledPauseRequested)
                 {
-                    _log.WriteLine($"Job {MigrationJobContext.CurrentlyActiveJob.Id} Completed");
+                    _log.WriteLine($"Job {MigrationJobContext.CurrentlyActiveJob.Id} Completed from StopOfflineOrInvokeChangeStreams");
                     MigrationJobContext.CurrentlyActiveJob.IsCompleted = true;
                     MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
                 }

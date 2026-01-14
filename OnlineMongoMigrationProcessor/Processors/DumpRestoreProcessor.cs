@@ -122,14 +122,6 @@ namespace OnlineMongoMigrationProcessor
 
         }
 
-        private void PrepareDumpProcess(MigrationUnit mu)
-        {
-            // starting the regular dump and restore process
-            if (!mu.BulkCopyStartedOn.HasValue || mu.BulkCopyStartedOn == DateTime.MinValue)
-                mu.BulkCopyStartedOn = DateTime.UtcNow;
-
-            MigrationJobContext.SaveMigrationUnit(mu, true);            
-        }
 
         public override async Task<TaskResult> StartProcessAsync(string migrationUnitId, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
@@ -151,7 +143,7 @@ namespace OnlineMongoMigrationProcessor
             }
 
             var ctx = SetProcessorContext(mu, sourceConnectionString, targetConnectionString);
-            PrepareDumpProcess(mu);                                
+                             
 
             //initialize coordinator if not already done
             InitializeCoordinator();

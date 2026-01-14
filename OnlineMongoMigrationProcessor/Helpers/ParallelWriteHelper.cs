@@ -25,6 +25,10 @@ namespace OnlineMongoMigrationProcessor.Helpers
         private const int MAX_RETRIES = 10;
         private const int INITIAL_RETRY_DELAY_MS = 500;
         private const int MAX_RETRY_DELAY_MS = 300000; // 5 minutes max delay
+        
+        // Cache filter builder function per collection to avoid repeated DocumentKey scanning
+        private readonly ConcurrentDictionary<string, Func<BsonDocument, FilterDefinition<BsonDocument>>> _filterBuilderCache 
+            = new ConcurrentDictionary<string, Func<BsonDocument, FilterDefinition<BsonDocument>>>();
 
         public ParallelWriteHelper(Log log, string logPrefix = "")
         {
@@ -33,6 +37,39 @@ namespace OnlineMongoMigrationProcessor.Helpers
             _logPrefix = logPrefix;
             _maxThreads = CalculateOptimalThreadCount();
 
+        }
+
+        /// <summary>
+        /// Get cached filter builder for a collection based on its DocumentKey structure
+        /// </summary>
+        private Func<BsonDocument, FilterDefinition<BsonDocument>> GetFilterBuilder(string collectionNamespace, BsonDocument documentKey)
+        {
+            return _filterBuilderCache.GetOrAdd(collectionNamespace, _ =>
+            {
+                var fieldNames = documentKey.Names.ToArray();
+                MigrationJobContext.AddVerboseLog($"{_logPrefix}Cached filter builder for {collectionNamespace} with fields: [{string.Join(", ", fieldNames)}]");
+                
+                // Create optimized filter builder based on field count
+                if (fieldNames.Length == 1)
+                {
+                    // Single field optimization (most common - non-sharded)
+                    var fieldName = fieldNames[0];
+                    return (docKey) => Builders<BsonDocument>.Filter.Eq(fieldName, docKey[fieldName]);
+                }
+                else
+                {
+                    // Multiple fields - compound filter for sharded collections
+                    return (docKey) =>
+                    {
+                        var filters = new List<FilterDefinition<BsonDocument>>(fieldNames.Length);
+                        foreach (var fieldName in fieldNames)
+                        {
+                            filters.Add(Builders<BsonDocument>.Filter.Eq(fieldName, docKey[fieldName]));
+                        }
+                        return Builders<BsonDocument>.Filter.And(filters);
+                    };
+                }
+            });
         }
 
         /// <summary>
@@ -665,10 +702,21 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
 
 
+                // Get cached filter builder for this collection
+                string collectionNamespace = collection.CollectionNamespace.FullName;
+                Func<BsonDocument, FilterDefinition<BsonDocument>> buildFilter = null;
+                
                 var updateModels = groupedUpdates
                     .Select(e =>
                     {
-                        var filter = Builders<BsonDocument>.Filter.Eq("_id", e.DocumentKey["_id"]);
+                        // Get cached filter builder on first iteration
+                        if (buildFilter == null)
+                        {
+                            buildFilter = GetFilterBuilder(collectionNamespace, e.DocumentKey);
+                        }
+                        
+                        // Build filter using cached builder function
+                        var filter = buildFilter(e.DocumentKey);
                         return new ReplaceOneModel<BsonDocument>(filter, e.FullDocument) { IsUpsert = true };
                     })
                     .ToList();
@@ -920,6 +968,11 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 {
                     continue; // Skip normal delete processing, move to next batch
                 }
+                
+                // Get cached filter builder for this collection
+                string collectionNamespace = collection.CollectionNamespace.FullName;
+                Func<BsonDocument, FilterDefinition<BsonDocument>> buildFilter = null;
+                
                 // Normal delete processing
                 var deleteModels = deduplicatedDeletes
                     .Select(e =>
@@ -942,7 +995,14 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             if (id.IsObjectId)
                                 id = id.AsObjectId;
 
-                            var filter = MongoHelper.BuildFilterFromDocumentKey(e.DocumentKey);
+                            // Get cached filter builder on first iteration
+                            if (buildFilter == null)
+                            {
+                                buildFilter = GetFilterBuilder(collectionNamespace, e.DocumentKey);
+                            }
+                            
+                            // Build filter using cached builder function
+                            var filter = buildFilter(e.DocumentKey);
                             return new DeleteOneModel<BsonDocument>(filter);
                         }
                         catch (Exception dex)

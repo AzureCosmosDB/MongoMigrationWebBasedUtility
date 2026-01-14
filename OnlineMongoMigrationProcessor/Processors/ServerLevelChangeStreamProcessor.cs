@@ -85,6 +85,7 @@ namespace OnlineMongoMigrationProcessor
                     {
                         //await Task.Delay(60 * 1000, cancellationToken);
                         await WatchServerLevelChangeStream(cancellationToken);
+                        SetAllCollectionsCSLastChecked();
                     }
                     else
                     {
@@ -374,6 +375,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 try
                 {
+                    
                     if (_accumulatedChangesPerCollection != null)
                     {
                         try
@@ -401,6 +403,18 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.CurrentlyActiveJob.SyncBackOriginalResumeToken = latestResumeToken;
             MigrationJobContext.CurrentlyActiveJob.SyncBackCursorUtcTimestamp = latestTimestamp;
+            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+        }
+
+        private void SetAllCollectionsCSLastChecked()
+        {
+            foreach (var mub in MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics)
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(mub.Id);
+                mu.CSLastChecked = DateTime.UtcNow;
+                MigrationJobContext.SaveMigrationUnit(mu, true);
+            }
+            MigrationJobContext.CurrentlyActiveJob.CSLastChecked = DateTime.UtcNow;
             MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
@@ -568,11 +582,11 @@ namespace OnlineMongoMigrationProcessor
         // Server-level equivalent of AutoReplayFirstChangeInResumeToken
         private bool AutoReplayFirstChangeInResumeToken()
         {
-            string documentId = GetResumeDocumentId();
+            string documentKey = GetResumeDocumentKey();
             ChangeStreamOperationType operationType = GetResumeTokenOperation();
             string collectionKey = GetResumeCollectionKey();
 
-            if (string.IsNullOrEmpty(documentId))
+            if (string.IsNullOrEmpty(documentKey))
             {
                 _log.WriteLine($"Auto replay is empty for server-level change stream.");
                 return true; // Skip if no document ID is provided
@@ -584,9 +598,9 @@ namespace OnlineMongoMigrationProcessor
                 return true; // Skip if no collection key is provided
             }
 
-            _log.WriteLine($"Auto replay for {operationType} operation with document key {documentId} in collection {collectionKey} for server-level change stream.");
+            _log.WriteLine($"Auto replay for {operationType} operation with document key {documentKey} in collection {collectionKey} for server-level change stream.");
 
-            var bsonDoc = BsonDocument.Parse(documentId);
+            var bsonDoc = BsonDocument.Parse(documentKey);
             var filter = MongoHelper.BuildFilterFromDocumentKey(bsonDoc);
 
             // Validate that the collection key is in our migration units
@@ -650,7 +664,7 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Insert:
                         if (result == null || result.IsBsonNull)
                         {
-                            _log.WriteLine($"No document found for insert operation with document key {documentId} in {collectionKey}. Skipping insert.");
+                            _log.WriteLine($"No document found for insert operation with document key {documentKey} in {collectionKey}. Skipping insert.");
                             return true;
                         }
                         targetCollection.InsertOne(result);
@@ -661,9 +675,10 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Replace:
                         if (result == null || result.IsBsonNull)
                         {
-                            _log.WriteLine($"Processing {operationType} operation for {collectionKey} with document key {documentId}. No document found on source, deleting it from target.");
+                            _log.WriteLine($"Processing {operationType} operation for {collectionKey} with document key {documentKey}. No document found on source, deleting it from target.");
                             try
                             {
+                                // Use DocumentKey-based filter for sharded collections
                                 targetCollection.DeleteOne(filter);
                                 IncrementDocCounter(migrationUnit, ChangeStreamOperationType.Delete);
                             }
@@ -672,12 +687,14 @@ namespace OnlineMongoMigrationProcessor
                         }
                         else
                         {
+                            // Use DocumentKey-based filter for sharded collections with upsert
                             targetCollection.ReplaceOne(filter, result, new ReplaceOptions { IsUpsert = true });
                             IncrementDocCounter(migrationUnit, operationType);
                             return true;
                         }
 
                     case ChangeStreamOperationType.Delete:
+                        // Use DocumentKey-based filter for sharded collections
                         targetCollection.DeleteOne(filter);
                         IncrementDocCounter(migrationUnit, operationType);
                         return true;
@@ -694,7 +711,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log.WriteLine($"Error processing operation {operationType} in server-level auto replay with document key {documentId}. Details: {ex}", LogType.Error);
+                _log.WriteLine($"Error processing operation {operationType} in server-level auto replay with document key {documentKey}. Details: {ex}", LogType.Error);
                 return false;
             }
         }
@@ -838,15 +855,19 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private string GetResumeDocumentId()
+        private string GetResumeDocumentKey()
         {
             if (!_syncBack)
             {
-                return MigrationJobContext.CurrentlyActiveJob.ResumeDocumentId ?? string.Empty;
+                return MigrationJobContext.CurrentlyActiveJob.ResumeDocumentKey 
+                    ?? MigrationJobContext.CurrentlyActiveJob.ResumeDocumentId // Fallback for backward compatibility
+                    ?? string.Empty;
             }
             else
             {
-                return MigrationJobContext. CurrentlyActiveJob.SyncBackResumeDocumentId ?? string.Empty;
+                return MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentKey 
+                    ?? MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentId // Fallback for backward compatibility
+                    ?? string.Empty;
             }
         }
 
@@ -872,7 +893,8 @@ namespace OnlineMongoMigrationProcessor
                     MigrationJobContext.CurrentlyActiveJob.OriginalResumeToken = resumeToken;
                 }
                 MigrationJobContext.CurrentlyActiveJob.ResumeTokenOperation = operationType;
-                MigrationJobContext.CurrentlyActiveJob.ResumeDocumentId = documentId;
+                MigrationJobContext.CurrentlyActiveJob.ResumeDocumentId = documentId; // Deprecated - kept for backward compatibility
+                MigrationJobContext.CurrentlyActiveJob.ResumeDocumentKey = documentId;
                 MigrationJobContext.CurrentlyActiveJob.ResumeCollectionKey = collectionKey;
             }
             else
@@ -883,7 +905,8 @@ namespace OnlineMongoMigrationProcessor
                     MigrationJobContext.CurrentlyActiveJob.SyncBackOriginalResumeToken = resumeToken;
                 }
                 MigrationJobContext.CurrentlyActiveJob.SyncBackResumeTokenOperation = operationType;
-                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentId = documentId;
+                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentId = documentId; // Deprecated - kept for backward compatibility
+                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentKey = documentId;
                 MigrationJobContext.CurrentlyActiveJob.SyncBackResumeCollectionKey = collectionKey;
             }
         }
