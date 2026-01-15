@@ -131,7 +131,8 @@ namespace OnlineMongoMigrationProcessor
                     null,
                     30,
                     _syncBack,
-                    token);
+                    token,
+                    true);
             }
             catch (Exception ex)
             {

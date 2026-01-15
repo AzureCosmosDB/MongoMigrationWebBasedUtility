@@ -736,7 +736,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                                 if (!isSimulatedRun)
                                 {
                                     var writeResult = await collection.BulkWriteAsync(updateModels, new BulkWriteOptions { IsOrdered = false });
-                                    updateCount = writeResult.ModifiedCount + writeResult.Upserts.Count;
+                                    updateCount = writeResult.ModifiedCount + writeResult.Upserts.Count + writeResult.MatchedCount;
                                 }
                                 else
                                 {

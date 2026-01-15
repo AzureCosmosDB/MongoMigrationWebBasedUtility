@@ -147,7 +147,7 @@
     <ManageCollections MigrationJob="@CurrentlyLoadedMigrationJob" MigrationUnits="@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob)" SourceConnectionString="@MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id]" OnCollectionsUpdated="@OnCollectionsUpdated" />
 }
 
-@if (_resetChangeStreamDialogOpen && CurrentlyLoadedMigrationJob != null)
+@if (_resetChangeStreamDialogOpen && CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.ChangeStreamLevel==OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Collection && CurrentlyLoadedMigrationJob.JobType!= OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
 {
     <ResetChangeStream MigrationUnits="@((@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob) ?? new List<MigrationUnit>()).Where(mu => Helper.IsMigrationUnitValid(mu)).ToList())" OnCollectionsUpdated="@OnCSReset" />
 }

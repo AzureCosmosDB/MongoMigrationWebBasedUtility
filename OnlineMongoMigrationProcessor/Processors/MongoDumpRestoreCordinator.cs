@@ -71,6 +71,7 @@ namespace OnlineMongoMigrationProcessor
         // Thread-safe locks
         private readonly object _pidLock = new object();
         private readonly object _timerLock = new object();
+        private readonly object _diskSpaceCheckLock = new object();
 
         // Coordinated processing infrastructure (shared across all migration units)
         private readonly ConcurrentDictionary<string, DumpRestoreProcessContext> _downloadManifest = new();
@@ -85,6 +86,8 @@ namespace OnlineMongoMigrationProcessor
         private PendingTasksCompletedHandler? _onPendingTasksCompleted;
 
         private bool _processNewTasks = true;
+
+        private DateTime _downLoadPausedTill = DateTime.MinValue;
 
         // Work item class for chunk processing
         private class ChunkWorkItem : IComparable<ChunkWorkItem>
@@ -222,6 +225,7 @@ namespace OnlineMongoMigrationProcessor
 
                 // Update current value in context for UI monitoring
                 MigrationJobContext.CurrentlyActiveJob.CurrentDumpWorkers = validatedCount;
+                MigrationJobContext.CurrentlyActiveJob.MaxParallelDumpProcesses = validatedCount;
 
                 _log?.WriteLine($"Dump workers adjusted to {validatedCount}");
             }
@@ -250,6 +254,7 @@ namespace OnlineMongoMigrationProcessor
 
                 // Update current value in context for UI monitoring
                 MigrationJobContext.CurrentlyActiveJob.CurrentRestoreWorkers = validatedCount;
+                MigrationJobContext.CurrentlyActiveJob.MaxParallelRestoreProcesses = validatedCount;
 
                 _log?.WriteLine($"Restore workers adjusted to {validatedCount}");
             }
@@ -387,6 +392,8 @@ namespace OnlineMongoMigrationProcessor
                     _jobId = null;
                     _log = null;
                     _mongoToolsFolder = null;
+
+                    _downLoadPausedTill=DateTime.MinValue;
 
                     _log?.WriteLine("MongoDumpRestoreCordinator reset complete", LogType.Info);
                 }
@@ -724,6 +731,13 @@ namespace OnlineMongoMigrationProcessor
                         _log?.WriteLine("[ProcessPendingDumps] Controlled pause detected - skipping dump processing", LogType.Debug);
                         return;
                     }
+
+                    if (!HasSufficientDiskSpace())
+                    {
+                        //skip processing for now, will retry later
+                        return;
+                    }
+
                     // Try to acquire a worker slot
                     if (_dumpPool.TryAcquire())
                     {
@@ -760,6 +774,37 @@ namespace OnlineMongoMigrationProcessor
             catch (Exception ex)
             {
                 _log?.WriteLine($"Error processing pending dumps: {Helper.RedactPii(ex.ToString())}", LogType.Error);
+            }
+        }
+
+        private bool HasSufficientDiskSpace()
+        {
+            lock (_diskSpaceCheckLock)
+            {
+                //check if current time is less than paused till
+                if (_downLoadPausedTill > DateTime.Now)
+                    return false;
+
+                string folder = Helper.GetWorkingFolder();
+                MigrationSettings config = new MigrationSettings();
+                config.Load();
+               
+
+                //checking if there are too many downloads or disk full. Caused by limited uploads.
+                bool continueDownlods;
+                double pendingUploadsGB = 0;
+                double freeSpaceGB = 0;
+                
+                continueDownlods = Helper.CanProceedWithDownloads(folder, config.ChunkSizeInMb * 2, out pendingUploadsGB, out freeSpaceGB);
+
+                if (!continueDownlods)
+                {
+                    _log.WriteLine($"Disk space is running low, with only {freeSpaceGB}GB available. Free up disk space by deleting unwanted jobs. Will recheck in 15 minutes...", LogType.Warning);
+                    _downLoadPausedTill = DateTime.Now.AddMinutes(15);
+
+                }
+
+                return continueDownlods;
             }
         }
 
@@ -864,6 +909,8 @@ namespace OnlineMongoMigrationProcessor
                 _dumpPool?.Release();
                 return;
             }
+
+            
 
             string dbName = mu.DatabaseName;
             string colName = mu.CollectionName;

@@ -6,6 +6,7 @@ using OnlineMongoMigrationProcessor.Helpers.Mongo;
 using OnlineMongoMigrationProcessor.Models;
 using OnlineMongoMigrationProcessor.Workers;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -20,6 +21,7 @@ namespace OnlineMongoMigrationProcessor
     {
         
         private MongoClient _changeStreamMongoClient;
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _flushLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
 
         public CollectionLevelChangeStreamProcessor(Log log, MongoClient sourceClient, MongoClient targetClient, ActiveMigrationUnitsCache muCache, MigrationSettings config, bool syncBack = false, MigrationWorker? migrationWorker = null)
             : base(log, sourceClient, targetClient, muCache, config, syncBack, migrationWorker)
@@ -420,7 +422,8 @@ namespace OnlineMongoMigrationProcessor
                                 mu,
                                 30,
                                 _syncBack,
-                                token);
+                                token,
+                                true);
                         }
                         catch (Exception ex)
                         {
@@ -662,39 +665,52 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.FlushPendingChangesAsync: collection={mu.DatabaseName}.{mu.CollectionName}, totalChanges={accumulatedChangesInColl.TotalChangesCount}, isFinalFlush={isFinalFlush}");
             
-            // Flush accumulated changes - convert Dictionary.Values to List for BulkProcessChangesAsync
-            await BulkProcessChangesAsync(
-                mu,
-                targetCollection,
-                insertEvents: accumulatedChangesInColl.DocsToBeInserted.Values.ToList(),
-                updateEvents: accumulatedChangesInColl.DocsToBeUpdated.Values.ToList(),
-                deleteEvents: accumulatedChangesInColl.DocsToBeDeleted.Values.ToList(),
-                accumulatedChangesInColl: accumulatedChangesInColl,
-                batchSize: 500);
-
-            // Update resume token after successful flush
-            if (!string.IsNullOrEmpty(accumulatedChangesInColl.LatestResumeToken))
+            // Get or create a semaphore for this migration unit
+            var flushLock = _flushLocks.GetOrAdd(mu.Id, _ => new SemaphoreSlim(1, 1));
+            
+            // Acquire the lock to ensure only one flush operation per migration unit at a time
+            await flushLock.WaitAsync();
+            try
             {
-                var (currentTimestamp, currentResumeToken, _, _) = GetResumeParameters(mu);
-                string collectionNamespace = $"{mu.DatabaseName}.{mu.CollectionName}";
-                
-                // We don't allow going backwards in time
-                if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp >= TimeSpan.FromSeconds(0))
-                {
-                    SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
-                    MigrationJobContext.SaveMigrationUnit(mu, true);
-                }
-                else
-                {
-                    _log.WriteLine($"Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken} for {collectionNamespace}", LogType.Error);
-                    throw new Exception($"{_syncBackPrefix} Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}");
-                }
-                
-                _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
-            }
+                // Flush accumulated changes - convert Dictionary.Values to List for BulkProcessChangesAsync
+                await BulkProcessChangesAsync(
+                    mu,
+                    targetCollection,
+                    insertEvents: accumulatedChangesInColl.DocsToBeInserted.Values.ToList(),
+                    updateEvents: accumulatedChangesInColl.DocsToBeUpdated.Values.ToList(),
+                    deleteEvents: accumulatedChangesInColl.DocsToBeDeleted.Values.ToList(),
+                    accumulatedChangesInColl: accumulatedChangesInColl,
+                    batchSize: 500);
 
-            // Clear collections to free memory
-            accumulatedChangesInColl.Reset(isFinalFlush);
+                // Update resume token after successful flush
+                if (!string.IsNullOrEmpty(accumulatedChangesInColl.LatestResumeToken))
+                {
+                    var (currentTimestamp, currentResumeToken, _, _) = GetResumeParameters(mu);
+                    string collectionNamespace = $"{mu.DatabaseName}.{mu.CollectionName}";
+                    
+                    // We don't allow going backwards in time
+                    if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp >= TimeSpan.FromSeconds(0))
+                    {
+                        SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
+                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                    }
+                    else
+                    {
+                        _log.WriteLine($"Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken} for {collectionNamespace}", LogType.Error);
+                        throw new Exception($"{_syncBackPrefix} Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}");
+                    }
+                    
+                    _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
+                }
+
+                // Clear collections to free memory
+                accumulatedChangesInColl.Reset(isFinalFlush);
+            }
+            finally
+            {
+                // Always release the lock
+                flushLock.Release();
+            }
         }
 
         
