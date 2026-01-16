@@ -367,7 +367,9 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             catch(Exception ex)
             {
                 MigrationJobContext.AddVerboseLog($"Exception in GetDocumentCount. Details:{ex}");
-                throw(ex);
+#pragma warning disable CA2200 // Rethrow to preserve stack details
+                throw (ex);
+#pragma warning restore CA2200 // Rethrow to preserve stack details
             }
         }
 

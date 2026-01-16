@@ -62,6 +62,78 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             };
         }
 
+        /// <summary>
+        /// Tries to get the document count with retry logic for timeout handling.
+        /// </summary>
+        /// <param name="filter">The filter to apply (BsonDocument)</param>
+        /// <param name="maxRetries">Maximum number of retry attempts (default: 3)</param>
+        /// <returns>Tuple of (count, timedOut) - if timedOut is true, count is -1</returns>
+        private async Task<(long count, bool timedOut)> TryGetCountWithRetryAsync(BsonDocument filter, int maxRetries = 3)
+        {
+            return await TryGetCountWithRetryAsync((FilterDefinition<BsonDocument>)filter, maxRetries);
+        }
+
+        /// <summary>
+        /// Tries to get the document count with retry logic for timeout handling.
+        /// </summary>
+        /// <param name="filter">The filter to apply (FilterDefinition)</param>
+        /// <param name="maxRetries">Maximum number of retry attempts (default: 3)</param>
+        /// <returns>Tuple of (count, timedOut) - if timedOut is true, count is -1</returns>
+        private async Task<(long count, bool timedOut)> TryGetCountWithRetryAsync(FilterDefinition<BsonDocument> filter, int maxRetries = 3)
+        {
+            MigrationJobContext.AddVerboseLog($"TryGetCountWithRetryAsync: maxRetries={maxRetries}");
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
+                    var count = await _collection.CountAsync(filter, cancellationToken: cts.Token);
+                    return (count, false);
+                }
+                catch (OperationCanceledException)
+                {
+                    MigrationJobContext.AddVerboseLog($"CountAsync attempt {attempt}/{maxRetries} timed out");
+                }
+                catch (MongoExecutionTimeoutException)
+                {
+                    MigrationJobContext.AddVerboseLog($"CountAsync attempt {attempt}/{maxRetries} timed out (MongoExecutionTimeoutException)");
+                }
+            }
+
+            MigrationJobContext.AddVerboseLog($"CountAsync timed out after {maxRetries} retries");
+            return (-1, true);
+        }
+
+        /// <summary>
+        /// Generates boundaries by splitting the ObjectId range when count cannot be obtained.
+        /// </summary>
+        private async Task<List<BsonValue>> GenerateBoundariesFromObjectIdRangeAsync(int count, BsonDocument filter, int maxRecordsPerRange)
+        {
+            MigrationJobContext.AddVerboseLog($"GenerateBoundariesFromObjectIdRangeAsync: count={count}, maxRecordsPerRange={maxRecordsPerRange}");
+
+            var range = await GetObjectIdRangeAsync(filter);
+
+            // Use SplitLargeRange with estimated large count to force splitting into 'count' chunks
+            long estimatedCount = (long)count * maxRecordsPerRange;
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
+            var splitBoundaries = await SplitLargeRange(
+                range.MinId,
+                range.MaxId,
+                estimatedCount,
+                filter,
+                maxRecordsPerRange,
+                cts.Token);
+
+            // Add the end boundary if not already included
+            if (splitBoundaries.Count > 0 && !splitBoundaries.Last().Equals(range.MaxId))
+            {
+                splitBoundaries.Add(range.MaxId);
+            }
+
+            return splitBoundaries;
+        }
 
         /// <summary>
         /// Generates time-based equidistant ObjectIds, then validates and adjusts ranges to ensure 
@@ -71,14 +143,20 @@ namespace OnlineMongoMigrationProcessor.Partitioner
         {
             MigrationJobContext.AddVerboseLog($"MongoObjectIdSampler.GenerateEquidistantObjectIdsAsync: count={count}, ObjectIdPartitioner={settings.ObjectIdPartitioner}");
             const int MIN_RECORDS_PER_RANGE = 1000;
-            const int MAX_RECORDS_PER_RANGE = 1000000;
-            
+            const int MAX_RECORDS_PER_RANGE = 25000000;
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
+            // Try to get total count with retry logic
+            var (totalCount, countTimedOut) = await TryGetCountWithRetryAsync(filter);
 
-            // Get total count first
-            var totalCount = await _collection.CountAsync(filter, cancellationToken: cts.Token);
+            // If count timed out, fall back to splitting based on ObjectId range
+            if (countTimedOut)
+            {
+                return await GenerateBoundariesFromObjectIdRangeAsync(count, filter, MAX_RECORDS_PER_RANGE);
+            }
 
+            // Create a cancellation token for the remaining operations
+            using var operationCts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
+                        
             // Return empty list if total records < 1K
             if (totalCount < MIN_RECORDS_PER_RANGE)
             {
@@ -89,21 +167,21 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             if (settings.ObjectIdPartitioner == PartitionerType.UsePagination)
             {
                 long pageSize = totalCount / count;
-                return await GeneratePaginationBasedBoundaries(filter, totalCount, pageSize, cts.Token);
-            }
+                return await GeneratePaginationBasedBoundaries(filter, totalCount, pageSize, operationCts.Token);
+            }            
 
             // Generate initial time-based equidistant boundaries
-            var timeBased = await GenerateTimeBasedBoundaries(count, filter, cts.Token);
+            var timeBased = await GenerateTimeBasedBoundaries(count, filter, operationCts.Token);
 
             if (timeBased.Count < 2)
             {
                 return timeBased;
             }
-
+            
             if (settings.ObjectIdPartitioner == PartitionerType.UseAdjustedTimeBoundaries)
             {
                 // Validate and adjust ranges based on actual record counts
-                var adjusted = await ValidateAndAdjustRanges(timeBased, filter, totalCount, MIN_RECORDS_PER_RANGE, MAX_RECORDS_PER_RANGE, cts.Token);
+                var adjusted = await ValidateAndAdjustRanges(timeBased, filter, totalCount, MIN_RECORDS_PER_RANGE, MAX_RECORDS_PER_RANGE, operationCts.Token);
                 return adjusted;
             }
             else
@@ -252,8 +330,38 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                     Builders<BsonDocument>.Filter.Lt("_id", endId)
                 );
                 
-                var count = await _collection.CountAsync(rangeFilter, cancellationToken: cancellationToken);
-                rangeStats.Add((startId, endId, count));
+                var (count, timedOut) = await TryGetCountWithRetryAsync(rangeFilter);
+                if (timedOut)
+                {
+                    // If count timed out, split the range as it's likely too large
+                    MigrationJobContext.AddVerboseLog($"Range {i} count timed out, splitting range into smaller chunks");
+                    
+                    // Estimate a large count to trigger splitting into multiple sub-ranges
+                    long estimatedLargeCount = maxRecords * 10;
+                    var splitBoundaries = await SplitLargeRange(
+                        startId,
+                        endId,
+                        estimatedLargeCount,
+                        filter,
+                        maxRecords,
+                        cancellationToken);
+                    
+                    // Add each split as a separate range stat with estimated counts
+                    long estimatedCountPerSplit = estimatedLargeCount / splitBoundaries.Count;
+                    for (int j = 0; j < splitBoundaries.Count - 1; j++)
+                    {
+                        rangeStats.Add((splitBoundaries[j], splitBoundaries[j + 1], estimatedCountPerSplit));
+                    }
+                    // Add the last segment to endId
+                    if (splitBoundaries.Count > 0)
+                    {
+                        rangeStats.Add((splitBoundaries[splitBoundaries.Count - 1], endId, estimatedCountPerSplit));
+                    }
+                }
+                else
+                {
+                    rangeStats.Add((startId, endId, count));
+                }
             }
 
             // Step 2: Merge small ranges and split large ranges
@@ -365,6 +473,104 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 result.Add(new ObjectId(nextBytes));
             }
 
+            return result;
+        }
+
+        /// <summary>
+        /// Splits an ObjectId chunk into smaller sub-chunks by generating intermediate boundaries.
+        /// Uses BigInteger arithmetic to evenly divide the ObjectId range.
+        /// </summary>
+        /// <param name="originalChunk">The original chunk to split</param>
+        /// <param name="splitCount">Number of sub-chunks to create (default: 10)</param>
+        /// <returns>List of new MigrationChunk objects representing the sub-chunks</returns>
+        public static List<MigrationChunk> SplitObjectIdChunkIntoSubChunks(MigrationChunk originalChunk, int splitCount = 10)
+        {
+            MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunks: Gte={originalChunk.Gte}, Lt={originalChunk.Lt}, splitCount={splitCount}");
+
+            if (originalChunk.DataType != DataType.ObjectId)
+            {
+                return new List<MigrationChunk> { originalChunk };
+            }
+
+            var subChunks = new List<MigrationChunk>();
+
+            try
+            {
+                // Parse the ObjectId bounds
+                var startOid = ObjectId.Parse(originalChunk.Gte!);
+                var endOid = ObjectId.Parse(originalChunk.Lt!);
+
+                // Generate intermediate boundaries using BigInteger arithmetic
+                var boundaries = GenerateObjectIdBoundaries(startOid, endOid, splitCount);
+
+                // Create sub-chunks from boundaries
+                for (int i = 0; i < boundaries.Count - 1; i++)
+                {
+                    var subChunk = new MigrationChunk(
+                        boundaries[i].ToString(),
+                        boundaries[i + 1].ToString(),
+                        DataType.ObjectId,
+                        false,
+                        false
+                    );
+                    subChunks.Add(subChunk);
+                }
+            }
+            catch (Exception)
+            {
+                return new List<MigrationChunk> { originalChunk };
+            }
+
+            return subChunks;
+        }
+
+        /// <summary>
+        /// Generates evenly distributed ObjectId boundaries between start and end.
+        /// </summary>
+        /// <param name="startOid">Starting ObjectId</param>
+        /// <param name="endOid">Ending ObjectId</param>
+        /// <param name="count">Number of segments to create</param>
+        /// <returns>List of ObjectId boundaries (count + 1 elements)</returns>
+        public static List<ObjectId> GenerateObjectIdBoundaries(ObjectId startOid, ObjectId endOid, int count)
+        {
+            var result = new List<ObjectId> { startOid };
+
+            if (count <= 1)
+            {
+                result.Add(endOid);
+                return result;
+            }
+
+            // Convert ObjectIds to BigInteger for arithmetic
+            var minBytes = startOid.ToByteArray();
+            var maxBytes = endOid.ToByteArray();
+
+            var minInt = new BigInteger(minBytes, isUnsigned: true, isBigEndian: true);
+            var maxInt = new BigInteger(maxBytes, isUnsigned: true, isBigEndian: true);
+            var step = (maxInt - minInt) / count;
+
+            // Generate intermediate boundaries
+            for (int i = 1; i < count; i++)
+            {
+                var nextInt = minInt + (step * i);
+                var nextBytes = nextInt.ToByteArray(isUnsigned: true, isBigEndian: true);
+
+                // Ensure exactly 12 bytes for ObjectId
+                if (nextBytes.Length < 12)
+                {
+                    var padded = new byte[12];
+                    Array.Copy(nextBytes, 0, padded, 12 - nextBytes.Length, nextBytes.Length);
+                    nextBytes = padded;
+                }
+                else if (nextBytes.Length > 12)
+                {
+                    nextBytes = nextBytes[^12..];
+                }
+
+                result.Add(new ObjectId(nextBytes));
+            }
+
+            result.Add(endOid);
             return result;
         }
 

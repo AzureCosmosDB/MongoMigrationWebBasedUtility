@@ -1061,18 +1061,27 @@ az storage share show `
   --output tsv
 
 # Update the Container App environment variable to reflect the new quota
-# This creates a new revision that will read the updated quota value
 az containerapp update `
   --name <containerAppName> `
   --resource-group <resource-group-name> `
   --set-env-vars STORAGE_QUOTA_GB=200
+
+# Then run the update script to create a new revision and activate the changes
+.\update-aca-app.ps1 `
+  -ResourceGroupName "MongoMigrationRGTest" `
+  -ContainerAppName "mongomigration" `
+  -AcrName "sharedacr" `
+  -AcrRepository "myapp" `
+  -ImageTag "v1.1"
 ```
+
+> ⚠️ **Warning**: Only perform this operation when **no migration job is running**. Restarting the Container App will interrupt any active migration processes. Check the application's job status page before proceeding.
 
 **Notes**:
 - The default deployment creates a 100GB Azure File Share
 - You can increase up to 100TB (102,400 GB) for standard storage accounts
 - **The file share change takes effect immediately** - the mounted volume automatically reflects the new capacity
-- **Updating the environment variable creates a new revision** - the Container App will restart with the updated `STORAGE_QUOTA_GB` value
+- **Run `update-aca-app.ps1` after updating the environment variable** - this creates and activates a new revision with the updated `STORAGE_QUOTA_GB` value
 - Your application can read this value using `Environment.GetEnvironmentVariable("STORAGE_QUOTA_GB")`
 - Pricing is based on provisioned size, not used space - see [Azure Files Pricing](https://azure.microsoft.com/pricing/details/storage/files/)
 - Monitor disk usage through the application's monitoring interface to plan capacity increases

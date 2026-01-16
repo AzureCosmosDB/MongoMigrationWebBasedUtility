@@ -6,6 +6,7 @@ using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Helpers.JobManagement;
 using OnlineMongoMigrationProcessor.Helpers.Mongo;
 using OnlineMongoMigrationProcessor.Models;
+using OnlineMongoMigrationProcessor.Partitioner;
 using OnlineMongoMigrationProcessor.Processors;
 using OnlineMongoMigrationProcessor.Workers;
 using System;
@@ -15,6 +16,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
@@ -578,6 +580,58 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
+        /// <summary>
+        /// Prepares the download manifest for specific chunk indices of a migration unit
+        /// </summary>
+        private void UpdateDownloadList(MigrationUnit mu, string sourceConnectionString, string targetConnectionString, int startIndex, int count)
+        {
+            try
+            {
+                int addedCount = 0;
+                int endIndex = Math.Min(startIndex + count, mu.MigrationChunks.Count);
+                for (int i = startIndex; i < endIndex; i++)
+                {
+                    var chunk = mu.MigrationChunks[i];
+
+                    // Only add if not downloaded and not already in manifest
+                    if (chunk.IsDownloaded != true)
+                    {
+                        string contextId = $"{mu.Id}_{i}";
+
+                        if (!_downloadManifest.ContainsKey(contextId))
+                        {
+                            var context = new DumpRestoreProcessContext
+                            {
+                                Id = contextId,
+                                MigrationUnitId = mu.Id,
+                                ChunkIndex = i,
+                                State = ProcessState.Pending,
+                                QueuedAt = DateTime.UtcNow,
+                                RetryCount = 0,
+                                SourceConnectionString = sourceConnectionString,
+                                TargetConnectionString = targetConnectionString
+                            };
+
+                            if (_downloadManifest.TryAdd(contextId, context))
+                            {
+                                _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName}[{i}] added to download manifest", LogType.Debug);
+                                addedCount++;
+                            }
+                        }
+                    }
+                }
+
+                if (addedCount > 0)
+                {
+                    _log?.WriteLine($"Added {addedCount} chunks to download manifest for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"Error updating download list for {mu.DatabaseName}.{mu.CollectionName}: {Helper.RedactPii(ex.ToString())}", LogType.Error);
+            }
+        }
+
 
         private string GetDumpFilePath(MigrationUnit mu, int chunkIndex, bool overwrite = false)
         {
@@ -674,7 +728,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 _log?.WriteLine($"Error preparing restore list for {mu.DatabaseName}.{mu.CollectionName}: {Helper.RedactPii(ex.ToString())}", LogType.Error);
             }
-        }
+        }        
 
         /// <summary>
         /// Processes pending dump contexts using available workers
@@ -936,6 +990,7 @@ namespace OnlineMongoMigrationProcessor
                     mu,
                     chunkIndex,
                     context.SourceConnectionString,
+                    context.TargetConnectionString,
                     dbName,
                     colName
                 );
@@ -1003,6 +1058,7 @@ namespace OnlineMongoMigrationProcessor
             MigrationUnit mu,
             int chunkIndex,
             string sourceConnectionString,
+            string targetConnectionString,
             string dbName,
             string colName)
         {
@@ -1023,7 +1079,7 @@ namespace OnlineMongoMigrationProcessor
 
 
             // Build query and get doc count
-            var queryResult = await BuildDumpQueryAsync(mu, chunkIndex, args, sourceConnectionString);
+            var queryResult = await BuildDumpQueryAsync(mu, chunkIndex, args, sourceConnectionString, targetConnectionString);
 
             return (queryResult.args, queryResult.docCount);
         }
@@ -1040,17 +1096,15 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.ExecuteDumpProcessAsync: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}, docCount={docCount}");
             // Calculate progress factors
-            double initialPercent = ((double)100 / mu.MigrationChunks.Count) * chunkIndex;
-            double contributionFactor = 1.0 / mu.MigrationChunks.Count;
+            //double initialPercent = ((double)100 / mu.MigrationChunks.Count) * chunkIndex;
+            //double contributionFactor = 1.0 / mu.MigrationChunks.Count;
 
             // Execute dump process
             var processExecutor = new ProcessExecutor(_log);
             bool success = await Task.Run(() => processExecutor.Execute(
                 mu,
                 mu.MigrationChunks[chunkIndex],
-                chunkIndex,
-                initialPercent,
-                contributionFactor,
+                chunkIndex,                
                 docCount,
                 $"{_mongoToolsFolder}mongodump",
                 args,
@@ -1108,14 +1162,14 @@ namespace OnlineMongoMigrationProcessor
         /// <summary>
         /// Builds the dump query and returns document count and updated arguments
         /// </summary>
-        private async Task<(long docCount, string args)> BuildDumpQueryAsync(MigrationUnit mu, int chunkIndex, string baseArgs, string sourceConnectionString)
+        private async Task<(long docCount, string args)> BuildDumpQueryAsync(MigrationUnit mu, int chunkIndex, string baseArgs, string sourceConnectionString, string targetConnectionString)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.BuildDumpQueryAsync: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}");
             try
             {
                 if (mu.MigrationChunks.Count > 1)
                 {
-                    return await BuildMultiChunkDumpQueryAsync(mu, chunkIndex, baseArgs, sourceConnectionString);
+                    return await BuildMultiChunkDumpQueryAsync(mu, chunkIndex, baseArgs, sourceConnectionString, targetConnectionString);
                 }
                 else if (mu.MigrationChunks.Count == 1 && !string.IsNullOrEmpty(mu.UserFilter))
                 {
@@ -1136,11 +1190,237 @@ namespace OnlineMongoMigrationProcessor
         /// <summary>
         /// Builds dump query for multi-chunk scenario with chunk bounds
         /// </summary>
+        /// <summary>
+        /// Attempts to get document count with retry logic.
+        /// </summary>
+        /// <param name="collection">The MongoDB collection</param>
+        /// <param name="gte">Greater than or equal bound</param>
+        /// <param name="lt">Less than bound</param>
+        /// <param name="dataType">The data type of the _id field</param>
+        /// <param name="userFilterDoc">Optional user filter</param>
+        /// <param name="skipDataTypeFilter">Whether to skip data type filtering</param>
+        /// <param name="maxRetries">Maximum number of retry attempts (default: 3)</param>
+        /// <returns>Tuple of (success, docCount) - if success is false, docCount is -1</returns>
+        private (bool success, long docCount) TryGetDocumentCountWithRetry(
+            IMongoCollection<BsonDocument> collection,
+            BsonValue gte,
+            BsonValue lt,
+            DataType dataType,
+            BsonDocument? userFilterDoc,
+            bool skipDataTypeFilter,
+            int maxRetries = 3)
+        {
+            MigrationJobContext.AddVerboseLog($"TryGetDocumentCountWithRetry: collection={collection.CollectionNamespace}, maxRetries={maxRetries}");
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            {
+                try
+                {
+                    _log?.WriteLine($"GetDocumentCount attempt {attempt}/{maxRetries} for {collection.CollectionNamespace}", LogType.Debug);
+                    long count = MongoHelper.GetDocumentCount(
+                        collection,
+                        gte,
+                        lt,
+                        dataType,
+                        userFilterDoc,
+                        skipDataTypeFilter
+                    );
+                    return (true, count);
+                }
+                catch (MongoExecutionTimeoutException ex)
+                {
+                    _log?.WriteLine($"GetDocumentCount timeout on attempt {attempt}/{maxRetries}: {Helper.RedactPii(ex.Message)}", LogType.Warning);
+                    if (attempt == maxRetries)
+                    {
+                        _log?.WriteLine($"GetDocumentCount failed after {maxRetries} attempts due to timeout", LogType.Warning);
+                        return (false, -1);
+                    }
+                }
+                catch (TimeoutException ex)
+                {
+                    _log?.WriteLine($"GetDocumentCount timeout on attempt {attempt}/{maxRetries}: {Helper.RedactPii(ex.Message)}", LogType.Warning);
+                    if (attempt == maxRetries)
+                    {
+                        _log?.WriteLine($"GetDocumentCount failed after {maxRetries} attempts due to timeout", LogType.Warning);
+                        return (false, -1);
+                    }
+                }
+                catch (Exception ex) when (ex.Message.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
+                                           ex.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase))
+                {
+                    _log?.WriteLine($"GetDocumentCount timeout on attempt {attempt}/{maxRetries}: {Helper.RedactPii(ex.Message)}", LogType.Warning);
+                    if (attempt == maxRetries)
+                    {
+                        _log?.WriteLine($"GetDocumentCount failed after {maxRetries} attempts due to timeout", LogType.Warning);
+                        return (false, -1);
+                    }
+                }
+            }
+
+            return (false, -1);
+        }
+
+        /// <summary>
+        /// Replaces a chunk at the specified index with multiple sub-chunks in the MigrationChunks array.
+        /// </summary>
+        /// <param name="mu">The migration unit</param>
+        /// <param name="chunkIndex">Index of the chunk to replace</param>
+        /// <param name="subChunks">List of sub-chunks to insert</param>
+        /// <returns>The number of new chunks added (subChunks.Count - 1)</returns>
+        private int ReplaceChunkWithSubChunks(MigrationUnit mu, int chunkIndex, List<MigrationChunk> subChunks)
+        {
+            MigrationJobContext.AddVerboseLog($"ReplaceChunkWithSubChunks: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}, subChunkCount={subChunks.Count}");
+
+            if (subChunks.Count <= 1)
+            {
+                return 0; // No replacement needed
+            }
+
+            // Preserve the original chunk's ID for the first sub-chunk
+            var originalChunk = mu.MigrationChunks[chunkIndex];
+            var originalId = originalChunk.Id;
+
+            // Find the maximum existing ID to avoid duplicates
+            int maxExistingId = 0;
+            foreach (var chunk in mu.MigrationChunks)
+            {
+                if (int.TryParse(chunk.Id, out int chunkIdNum) && chunkIdNum > maxExistingId)
+                {
+                    maxExistingId = chunkIdNum;
+                }
+            }
+
+            // Update the original chunk in-place with the first sub-chunk's values (retains original ID)
+            originalChunk.Gte = subChunks[0].Gte;
+            originalChunk.Lt = subChunks[0].Lt;
+            originalChunk.DataType = subChunks[0].DataType;
+            originalChunk.IsDownloaded = subChunks[0].IsDownloaded;
+            originalChunk.IsUploaded = subChunks[0].IsUploaded;
+
+            // Assign IDs to remaining sub-chunks and add them to the end
+            int nextId = maxExistingId + 1;
+            for (int i = 1; i < subChunks.Count; i++)
+            {
+                subChunks[i].Id = nextId.ToString();
+                mu.MigrationChunks.Add(subChunks[i]);
+                nextId++;
+            }
+
+            _log?.WriteLine($"Updated chunk at index {chunkIndex} and added {subChunks.Count - 1} new sub-chunks to {mu.DatabaseName}.{mu.CollectionName}", LogType.Info);
+
+            return subChunks.Count - 1;
+        }
+
+        /// <summary>
+        /// Handles count timeout by splitting ObjectId chunks into smaller sub-chunks and retrying.
+        /// </summary>
+        /// <param name="mu">The migration unit</param>
+        /// <param name="chunkIndex">Index of the chunk that timed out</param>
+        /// <param name="sourceCollection">The source MongoDB collection</param>
+        /// <param name="userFilterDoc">Optional user filter document</param>
+        /// <param name="sourceConnectionString">Source connection string for PrepareDownloadList</param>
+        /// <param name="targetConnectionString">Target connection string for PrepareDownloadList</param>
+        /// <returns>Tuple containing (docCount, gte bound, lt bound, query string)</returns>
+        private (long docCount, BsonValue gte, BsonValue lt, string query) HandleCountTimeoutWithChunkSplit(
+            MigrationUnit mu,
+            int chunkIndex,
+            IMongoCollection<BsonDocument> sourceCollection,
+            BsonDocument? userFilterDoc,
+            string sourceConnectionString,
+            string targetConnectionString,
+            bool isTimeout)
+        {
+            MigrationJobContext.AddVerboseLog($"HandleCountTimeoutWithChunkSplit: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}");
+
+            long docCount = 0;
+            BsonValue gte;
+            BsonValue lt;
+            string query;
+
+            // Check if chunk is ObjectId type and can be split
+            if (mu.MigrationChunks[chunkIndex].DataType == DataType.ObjectId)
+            {
+                if(isTimeout)
+                    _log?.WriteLine($"Count timed out for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]. Splitting it into smaller sub-chunks.", LogType.Info);
+                else
+                    _log?.WriteLine($"{mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] is too large. Splitting it into smaller sub-chunks.", LogType.Info);
+
+                var originalChunk = mu.MigrationChunks[chunkIndex];
+                var subChunks = MongoObjectIdSampler.SplitObjectIdChunkIntoSubChunks(originalChunk, 10);
+
+                if (subChunks.Count > 1)
+                {
+                    int addedChunks = ReplaceChunkWithSubChunks(mu, chunkIndex, subChunks);
+
+                    // Update the tracker's TotalChunks to account for newly added sub-chunks
+                    if (addedChunks > 0 && _activeMigrationUnits.TryGetValue(mu.Id, out var tracker))
+                    {
+                        tracker.TotalChunks += addedChunks;
+                        _log?.WriteLine($"Updated tracker TotalChunks to {tracker.TotalChunks} for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                    }
+
+                    // Save the migration unit with updated chunks
+                    MigrationJobContext.SaveMigrationUnit(mu, true);
+
+                    // Add the newly created sub-chunks to manifests (they are at the end of the list)
+                    // The first sub-chunk updated the original chunk in-place and will be processed in the current iteration
+                    if (subChunks.Count > 1)
+                    {
+                        int newChunksStartIndex = mu.MigrationChunks.Count - (subChunks.Count - 1);
+                        UpdateDownloadList(mu, sourceConnectionString, targetConnectionString, newChunksStartIndex, subChunks.Count - 1);
+                    }
+
+                    // Re-process the first sub-chunk (updated in-place at the same index)
+                    var bounds = SamplePartitioner.GetChunkBounds(
+                        mu.MigrationChunks[chunkIndex].Gte!,
+                        mu.MigrationChunks[chunkIndex].Lt!,
+                        mu.MigrationChunks[chunkIndex].DataType
+                    );
+                    gte = bounds.gte;
+                    lt = bounds.lt;
+                    query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc, mu);
+
+                    // Try count again on the smaller sub-chunk
+                    var (retrySuccess, retryCount) = TryGetDocumentCountWithRetry(
+                        sourceCollection,
+                        gte,
+                        lt,
+                        mu.MigrationChunks[chunkIndex].DataType,
+                        userFilterDoc,
+                        mu.DataTypeFor_Id.HasValue
+                    );
+
+                    docCount = retrySuccess ? retryCount : 0;
+                }
+                else
+                {
+                    // Could not split ObjectId chunk - this should not happen unless the chunk bounds are invalid
+                    var errorMessage = $"Failed to split ObjectId chunk for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]. " +
+                                       $"Gte={mu.MigrationChunks[chunkIndex].Gte}, Lt={mu.MigrationChunks[chunkIndex].Lt}. " +
+                                       "GetDocumentCount timed out and chunk could not be split into smaller ranges.";
+                    _log?.WriteLine(errorMessage, LogType.Error);
+                    throw new InvalidOperationException(errorMessage);
+                }
+            }
+            else
+            {
+                // Count failed but chunk is not ObjectId type, cannot split - throw exception
+                var errorMessage = $"GetDocumentCount timed out for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] " +
+                                   $"with DataType={mu.MigrationChunks[chunkIndex].DataType}. " +
+                                   "Cannot split non-ObjectId chunks to reduce query scope.";
+                _log?.WriteLine(errorMessage, LogType.Error);
+                throw new InvalidOperationException(errorMessage);
+            }
+
+            return (docCount, gte, lt, query);
+        }
+
         private async Task<(long docCount, string args)> BuildMultiChunkDumpQueryAsync(
             MigrationUnit mu,
             int chunkIndex,
             string baseArgs,
-            string sourceConnectionString)
+            string sourceConnectionString,
+            string targetConnectionString)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.BuildMultiChunkDumpQueryAsync: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}");
             // Get chunk bounds
@@ -1155,10 +1435,12 @@ namespace OnlineMongoMigrationProcessor
             // Get source collection
             var sourceCollection = GetSourceCollection(sourceConnectionString, mu.DatabaseName, mu.CollectionName);
 
-            // Build query and get count
+            // Build query and get count with retry logic
             BsonDocument? userFilterDoc = MongoHelper.GetFilterDoc(mu.UserFilter);
             string query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc, mu);
-            long docCount = MongoHelper.GetDocumentCount(
+
+            // Try to get document count with retry
+            var (countSuccess, docCount) = TryGetDocumentCountWithRetry(
                 sourceCollection,
                 gte,
                 lt,
@@ -1166,6 +1448,16 @@ namespace OnlineMongoMigrationProcessor
                 userFilterDoc,
                 mu.DataTypeFor_Id.HasValue
             );
+
+            // Handle timeout by splitting chunk if needed
+            if (!countSuccess || docCount > 25000000)
+            {
+                var result = HandleCountTimeoutWithChunkSplit(mu, chunkIndex, sourceCollection, userFilterDoc, sourceConnectionString, targetConnectionString,!countSuccess);
+                docCount = result.docCount;
+                gte = result.gte;
+                lt = result.lt;
+                query = result.query;
+            }
 
             mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
             _log?.WriteLine($"Count for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] is {docCount}", LogType.Debug);
@@ -1354,9 +1646,9 @@ namespace OnlineMongoMigrationProcessor
             int chunkIndex = context.ChunkIndex;
 
             // Calculate progress
-            double initialPercent = ((double)100 / mu.MigrationChunks.Count) * chunkIndex;
-            double contributionFactor = (double)mu.MigrationChunks[chunkIndex].DumpQueryDocCount / Helper.GetMigrationUnitDocCount(mu);
-            if (mu.MigrationChunks.Count == 1) contributionFactor = 1;
+            //double initialPercent = ((double)100 / mu.MigrationChunks.Count) * chunkIndex;
+            //double contributionFactor = (double)mu.MigrationChunks[chunkIndex].DumpQueryDocCount / Helper.GetMigrationUnitDocCount(mu);
+            //if (mu.MigrationChunks.Count == 1) contributionFactor = 1;
 
             // Simulate successful restore
             mu.MigrationChunks[chunkIndex].RestoredSuccessDocCount = mu.MigrationChunks[chunkIndex].DumpQueryDocCount;
@@ -1364,8 +1656,8 @@ namespace OnlineMongoMigrationProcessor
             mu.MigrationChunks[chunkIndex].IsUploaded = true;
 
             // Update progress
-            double progress = initialPercent + (contributionFactor * 100);
-            mu.RestorePercent = Math.Min(progress, 100);
+            //double progress = initialPercent + (contributionFactor * 100);
+            mu.RestorePercent = 100;
 
             _log?.WriteLine($"Simulation mode: Chunk {chunkIndex} restore simulated - {mu.RestorePercent:F2}% complete");
 
@@ -1474,18 +1766,16 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.ExecuteRestoreProcessAsync: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}, docCount={docCount}");
             // Calculate progress factors
-            double initialPercent = ((double)100 / mu.MigrationChunks.Count) * chunkIndex;
-            double contributionFactor = (double)mu.MigrationChunks[chunkIndex].DumpQueryDocCount / Helper.GetMigrationUnitDocCount(mu);
-            if (mu.MigrationChunks.Count == 1) contributionFactor = 1;
+            //double initialPercent = ((double)100 / mu.MigrationChunks.Count) * chunkIndex;
+            //double contributionFactor = (double)mu.MigrationChunks[chunkIndex].DumpQueryDocCount / Helper.GetMigrationUnitDocCount(mu);
+            //if (mu.MigrationChunks.Count == 1) contributionFactor = 1;
 
             // Execute restore process
             var processExecutor = new ProcessExecutor(_log);
             bool success = await Task.Run(() => processExecutor.Execute(
                 mu,
                 mu.MigrationChunks[chunkIndex],
-                chunkIndex,
-                initialPercent,
-                contributionFactor,
+                chunkIndex,                
                 docCount,
                 $"{_mongoToolsFolder}mongorestore",
                 args,
