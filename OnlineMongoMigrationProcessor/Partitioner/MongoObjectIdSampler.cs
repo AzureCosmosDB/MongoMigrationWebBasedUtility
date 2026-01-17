@@ -36,47 +36,24 @@ namespace OnlineMongoMigrationProcessor.Partitioner
         private async Task<ObjectIdRange> GetObjectIdRangeAsync(BsonDocument? filter)
         {
             MigrationJobContext.AddVerboseLog($"MongoObjectIdSampler.GetObjectIdRangeAsync");
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
 
-            // Smallest ObjectId
-            var minDoc = await _collection
-                .Find(filter)
-                .Sort(Builders<BsonDocument>.Sort.Ascending("_id"))
-                .Limit(1)
-                .FirstOrDefaultAsync(cts.Token);
+            var minId = await GetMinObjectIdAsync(_collection, _timeoutSeconds);
+            var maxId = await GetMaxObjectIdAsync(_collection, _timeoutSeconds);
 
-            // Largest ObjectId
-            var maxDoc = await _collection
-                .Find(FilterDefinition<BsonDocument>.Empty)
-                .Sort(Builders<BsonDocument>.Sort.Descending("_id"))
-                .Limit(1)
-                .FirstOrDefaultAsync(cts.Token);
-
-            if (minDoc == null || maxDoc == null)
+            if (!minId.HasValue || !maxId.HasValue)
                 throw new InvalidOperationException("Collection is empty or inaccessible.");
 
             return new ObjectIdRange
             {
-                MinId = minDoc["_id"].AsObjectId,
-                MaxId = maxDoc["_id"].AsObjectId
+                MinId = minId.Value,
+                MaxId = maxId.Value
             };
         }
 
         /// <summary>
         /// Tries to get the document count with retry logic for timeout handling.
         /// </summary>
-        /// <param name="filter">The filter to apply (BsonDocument)</param>
-        /// <param name="maxRetries">Maximum number of retry attempts (default: 3)</param>
-        /// <returns>Tuple of (count, timedOut) - if timedOut is true, count is -1</returns>
-        private async Task<(long count, bool timedOut)> TryGetCountWithRetryAsync(BsonDocument filter, int maxRetries = 3)
-        {
-            return await TryGetCountWithRetryAsync((FilterDefinition<BsonDocument>)filter, maxRetries);
-        }
-
-        /// <summary>
-        /// Tries to get the document count with retry logic for timeout handling.
-        /// </summary>
-        /// <param name="filter">The filter to apply (FilterDefinition)</param>
+        /// <param name="filter">The filter to apply</param>
         /// <param name="maxRetries">Maximum number of retry attempts (default: 3)</param>
         /// <returns>Tuple of (count, timedOut) - if timedOut is true, count is -1</returns>
         private async Task<(long count, bool timedOut)> TryGetCountWithRetryAsync(FilterDefinition<BsonDocument> filter, int maxRetries = 3)
@@ -477,51 +454,147 @@ namespace OnlineMongoMigrationProcessor.Partitioner
         }
 
         /// <summary>
+        /// Gets the minimum ObjectId from a collection.
+        /// </summary>
+        /// <param name="collection">The MongoDB collection to query</param>
+        /// <param name="timeoutSeconds">Timeout in seconds for the operation</param>
+        /// <returns>The minimum ObjectId, or null if not found</returns>
+        public static async Task<ObjectId?> GetMinObjectIdAsync(
+            IMongoCollection<BsonDocument> collection,
+            int timeoutSeconds = 60)
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var minDoc = await collection
+                .Find(FilterDefinition<BsonDocument>.Empty)
+                .Sort(Builders<BsonDocument>.Sort.Ascending("_id"))
+                .Limit(1)
+                .FirstOrDefaultAsync(cts.Token);
+
+            if (minDoc == null || !minDoc.Contains("_id") || !minDoc["_id"].IsObjectId)
+            {
+                return null;
+            }
+            return minDoc["_id"].AsObjectId;
+        }
+
+        /// <summary>
+        /// Gets the maximum ObjectId from a collection.
+        /// </summary>
+        /// <param name="collection">The MongoDB collection to query</param>
+        /// <param name="timeoutSeconds">Timeout in seconds for the operation</param>
+        /// <returns>The maximum ObjectId, or null if not found</returns>
+        public static async Task<ObjectId?> GetMaxObjectIdAsync(
+            IMongoCollection<BsonDocument> collection,
+            int timeoutSeconds = 60)
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var maxDoc = await collection
+                .Find(FilterDefinition<BsonDocument>.Empty)
+                .Sort(Builders<BsonDocument>.Sort.Descending("_id"))
+                .Limit(1)
+                .FirstOrDefaultAsync(cts.Token);
+
+            if (maxDoc == null || !maxDoc.Contains("_id") || !maxDoc["_id"].IsObjectId)
+            {
+                return null;
+            }
+            return maxDoc["_id"].AsObjectId;
+        }
+
+        /// <summary>
+        /// Creates MigrationChunk sub-chunks from ObjectId boundaries.
+        /// </summary>
+        /// <param name="boundaries">List of ObjectId boundaries</param>
+        /// <returns>List of MigrationChunk objects</returns>
+        private static List<MigrationChunk> CreateSubChunksFromBoundaries(List<ObjectId> boundaries)
+        {
+            var subChunks = new List<MigrationChunk>();
+            for (int i = 0; i < boundaries.Count - 1; i++)
+            {
+                var subChunk = new MigrationChunk(
+                    boundaries[i].ToString(),
+                    boundaries[i + 1].ToString(),
+                    DataType.ObjectId,
+                    false,
+                    false
+                );
+                subChunks.Add(subChunk);
+            }
+            return subChunks;
+        }
+
+        /// <summary>
         /// Splits an ObjectId chunk into smaller sub-chunks by generating intermediate boundaries.
         /// Uses BigInteger arithmetic to evenly divide the ObjectId range.
+        /// When Gte or Lt is empty, queries the collection to get the actual min/max ObjectId.
         /// </summary>
         /// <param name="originalChunk">The original chunk to split</param>
+        /// <param name="collection">The MongoDB collection to query for min/max ObjectId when bounds are empty</param>
         /// <param name="splitCount">Number of sub-chunks to create (default: 10)</param>
+        /// <param name="timeoutSeconds">Timeout in seconds for MongoDB operations (default: 60)</param>
         /// <returns>List of new MigrationChunk objects representing the sub-chunks</returns>
-        public static List<MigrationChunk> SplitObjectIdChunkIntoSubChunks(MigrationChunk originalChunk, int splitCount = 10)
+        public static async Task<List<MigrationChunk>> SplitObjectIdChunkIntoSubChunksAsync(
+            MigrationChunk originalChunk,
+            IMongoCollection<BsonDocument> collection,
+            int splitCount = 10,
+            int timeoutSeconds = 60)
         {
-            MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunks: Gte={originalChunk.Gte}, Lt={originalChunk.Lt}, splitCount={splitCount}");
+            MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Gte={originalChunk.Gte}, Lt={originalChunk.Lt}, splitCount={splitCount}");
 
             if (originalChunk.DataType != DataType.ObjectId)
             {
                 return new List<MigrationChunk> { originalChunk };
             }
 
-            var subChunks = new List<MigrationChunk>();
-
             try
             {
-                // Parse the ObjectId bounds
-                var startOid = ObjectId.Parse(originalChunk.Gte!);
-                var endOid = ObjectId.Parse(originalChunk.Lt!);
-
-                // Generate intermediate boundaries using BigInteger arithmetic
-                var boundaries = GenerateObjectIdBoundaries(startOid, endOid, splitCount);
-
-                // Create sub-chunks from boundaries
-                for (int i = 0; i < boundaries.Count - 1; i++)
+                // Resolve start ObjectId
+                ObjectId startOid;
+                if (string.IsNullOrEmpty(originalChunk.Gte))
                 {
-                    var subChunk = new MigrationChunk(
-                        boundaries[i].ToString(),
-                        boundaries[i + 1].ToString(),
-                        DataType.ObjectId,
-                        false,
-                        false
-                    );
-                    subChunks.Add(subChunk);
+                    MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Gte is empty, querying collection for minimum ObjectId");
+                    var minOid = await GetMinObjectIdAsync(collection, timeoutSeconds);
+                    if (!minOid.HasValue)
+                    {
+                        MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Could not get minimum ObjectId from collection");
+                        return new List<MigrationChunk> { originalChunk };
+                    }
+                    startOid = minOid.Value;
+                    MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Retrieved minimum ObjectId: {startOid}");
                 }
+                else
+                {
+                    startOid = ObjectId.Parse(originalChunk.Gte);
+                }
+
+                // Resolve end ObjectId
+                ObjectId endOid;
+                if (string.IsNullOrEmpty(originalChunk.Lt))
+                {
+                    MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Lt is empty, querying collection for maximum ObjectId");
+                    var maxOid = await GetMaxObjectIdAsync(collection, timeoutSeconds);
+                    if (!maxOid.HasValue)
+                    {
+                        MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Could not get maximum ObjectId from collection");
+                        return new List<MigrationChunk> { originalChunk };
+                    }
+                    endOid = maxOid.Value;
+                    MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Retrieved maximum ObjectId: {endOid}");
+                }
+                else
+                {
+                    endOid = ObjectId.Parse(originalChunk.Lt);
+                }
+
+                // Generate boundaries and create sub-chunks
+                var boundaries = GenerateObjectIdBoundaries(startOid, endOid, splitCount);
+                return CreateSubChunksFromBoundaries(boundaries);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Exception occurred: {ex.Message}");
                 return new List<MigrationChunk> { originalChunk };
             }
-
-            return subChunks;
         }
 
         /// <summary>

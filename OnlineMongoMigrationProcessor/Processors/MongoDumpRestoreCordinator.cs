@@ -1321,7 +1321,7 @@ namespace OnlineMongoMigrationProcessor
         /// <param name="sourceConnectionString">Source connection string for PrepareDownloadList</param>
         /// <param name="targetConnectionString">Target connection string for PrepareDownloadList</param>
         /// <returns>Tuple containing (docCount, gte bound, lt bound, query string)</returns>
-        private (long docCount, BsonValue gte, BsonValue lt, string query) HandleCountTimeoutWithChunkSplit(
+        private async Task<(long docCount, BsonValue gte, BsonValue lt, string query)> HandleCountTimeoutWithChunkSplitAsync(
             MigrationUnit mu,
             int chunkIndex,
             IMongoCollection<BsonDocument> sourceCollection,
@@ -1330,7 +1330,7 @@ namespace OnlineMongoMigrationProcessor
             string targetConnectionString,
             bool isTimeout)
         {
-            MigrationJobContext.AddVerboseLog($"HandleCountTimeoutWithChunkSplit: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}");
+            MigrationJobContext.AddVerboseLog($"HandleCountTimeoutWithChunkSplitAsync: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}");
 
             long docCount = 0;
             BsonValue gte;
@@ -1346,7 +1346,9 @@ namespace OnlineMongoMigrationProcessor
                     _log?.WriteLine($"{mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] is too large. Splitting it into smaller sub-chunks.", LogType.Info);
 
                 var originalChunk = mu.MigrationChunks[chunkIndex];
-                var subChunks = MongoObjectIdSampler.SplitObjectIdChunkIntoSubChunks(originalChunk, 10);
+                
+                // Use async version that can query collection for min/max ObjectId when bounds are empty
+                var subChunks = await MongoObjectIdSampler.SplitObjectIdChunkIntoSubChunksAsync(originalChunk, sourceCollection, 10);
 
                 if (subChunks.Count > 1)
                 {
@@ -1452,7 +1454,7 @@ namespace OnlineMongoMigrationProcessor
             // Handle timeout by splitting chunk if needed
             if (!countSuccess || docCount > 25000000)
             {
-                var result = HandleCountTimeoutWithChunkSplit(mu, chunkIndex, sourceCollection, userFilterDoc, sourceConnectionString, targetConnectionString,!countSuccess);
+                var result = await HandleCountTimeoutWithChunkSplitAsync(mu, chunkIndex, sourceCollection, userFilterDoc, sourceConnectionString, targetConnectionString,!countSuccess);
                 docCount = result.docCount;
                 gte = result.gte;
                 lt = result.lt;
