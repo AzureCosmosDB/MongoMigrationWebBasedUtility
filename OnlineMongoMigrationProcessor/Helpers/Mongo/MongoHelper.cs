@@ -5,6 +5,7 @@ using MongoDB.Driver.Core.Clusters;
 using MongoDB.Driver.GeoJsonObjectModel.Serializers;
 using Newtonsoft.Json.Linq;
 using OnlineMongoMigrationProcessor.Context;
+using OnlineMongoMigrationProcessor.Helpers.JobManagement;
 using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections.Generic;
@@ -999,18 +1000,70 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
         }
 
-        public static async Task<(long CollectionSizeBytes, long DocumentCount)> GetCollectionStatsAsync(MongoClient client, string databaseName, string collectionName)
+        public static async Task<(long CollectionSizeBytes, long DocumentCount)> GetCollectionStatsAsync(MongoClient client, string databaseName, string collectionName, CancellationToken cancellationToken = default, int timeoutSeconds = 10, int maxAttempts = 5)
         {
             MigrationJobContext.AddVerboseLog($"Getting collection stats for {databaseName}.{collectionName}");
 
             var database = client.GetDatabase(databaseName);
-            var collection = database.GetCollection<BsonDocument>(collectionName);
-
             var statsCommand = new BsonDocument { { "collStats", collectionName } };
-            var stats = await database.RunCommandAsync<BsonDocument>(statsCommand);
-            long totalCollectionSizeBytes = stats.Contains("storageSize") ? stats["storageSize"].ToInt64() : stats["size"].ToInt64();
+            
+            long totalCollectionSizeBytes = 0;
+            long documentCount = 0;
+            var log = new Log();
+            
+            TaskResult result = await new RetryHelper().ExecuteTask(
+                async () =>
+                {
+                    var stats = await ExecuteCollStatsCommandAsync(
+                        database, statsCommand, databaseName, collectionName,
+                        timeoutSeconds, cancellationToken
+                    );
+                    totalCollectionSizeBytes = stats.CollectionSizeBytes;
+                    documentCount = stats.DocumentCount;
+                    return TaskResult.Success;
+                },
+                (ex, attemptCount, currentBackoff) => CollectionStats_ExceptionHandler(
+                    ex, attemptCount,
+                    $"GetCollectionStats for {databaseName}.{collectionName}", currentBackoff,
+                    cancellationToken
+                ),
+                log,
+                maxTries: maxAttempts,
+                initialDelayMs: 2000
+            );
+            
+            if (result != TaskResult.Success)
+            {
+                throw new Exception($"Failed to get collection stats for {databaseName}.{collectionName} after {maxAttempts} attempts");
+            }
 
+            return (totalCollectionSizeBytes, documentCount);
+        }
+
+        private static async Task<(long CollectionSizeBytes, long DocumentCount)> ExecuteCollStatsCommandAsync(
+            IMongoDatabase database, BsonDocument statsCommand,
+            string databaseName, string collectionName,
+            int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+            
+            MigrationJobContext.AddVerboseLog($"Executing collStats command for {databaseName}.{collectionName} with {timeoutSeconds}s timeout");
+            
+            BsonDocument stats;
+            try
+            {
+                stats = await database.RunCommandAsync<BsonDocument>(statsCommand, cancellationToken: linkedCts.Token);
+                MigrationJobContext.AddVerboseLog($"collStats command completed for {databaseName}.{collectionName}");
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException($"GetCollectionStatsAsync timed out after {timeoutSeconds} seconds for {databaseName}.{collectionName}");
+            }
+            
+            long totalCollectionSizeBytes = stats.Contains("storageSize") ? stats["storageSize"].ToInt64() : stats["size"].ToInt64();
             long documentCount;
+
             if (stats["count"].IsInt32)
             {
                 documentCount = stats["count"].ToInt32();
@@ -1023,8 +1076,30 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             {
                 throw new InvalidOperationException("Unexpected data type for document count.");
             }
+            
+            return (totalCollectionSizeBytes, documentCount);
+        }
 
-            return new (totalCollectionSizeBytes, documentCount);
+        private static Task<TaskResult> CollectionStats_ExceptionHandler(
+            Exception ex, int attemptCount, string processName, int currentBackoff,
+            CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                MigrationJobContext.AddVerboseLog($"{processName} cancelled");
+                return Task.FromResult(TaskResult.Abort);
+            }
+            
+            if (ex is TimeoutException)
+            {
+                MigrationJobContext.AddVerboseLog($"{processName} attempt {attemptCount} timed out. Retrying in {currentBackoff}s...");
+            }
+            else
+            {
+                MigrationJobContext.AddVerboseLog($"{processName} attempt {attemptCount} failed. Error: {ex.Message}. Retrying in {currentBackoff}s...");
+            }
+            
+            return Task.FromResult(TaskResult.Retry);
         }
 
 

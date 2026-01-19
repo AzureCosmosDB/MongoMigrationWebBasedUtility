@@ -48,29 +48,57 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 if (string.IsNullOrWhiteSpace(connectionStringOrPath))
                     throw new ArgumentException("Connection string cannot be null or empty", nameof(connectionStringOrPath));
 
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                Helper.LogToFile($"DocumentDBPersistence.Initialize starting");
+                
                 try
                 {
+                    Helper.LogToFile($"Creating MongoClient, elapsed: {sw.ElapsedMilliseconds}ms");
                     _client = new MongoClient(connectionStringOrPath);
+                    Helper.LogToFile($"MongoClient created, elapsed: {sw.ElapsedMilliseconds}ms");
+                    
+                    Helper.LogToFile($"Getting database {DATABASE_NAME}, elapsed: {sw.ElapsedMilliseconds}ms");
                     _database = _client.GetDatabase(DATABASE_NAME);
+                    Helper.LogToFile($"Database reference obtained, elapsed: {sw.ElapsedMilliseconds}ms");
+                    
                     _dataCollection = _database.GetCollection<BsonDocument>(DATA_Collection);
                     _logCollection = _database.GetCollection<BsonDocument>(LOG_Collection);
+                    
+                    Helper.LogToFile($"Listing collection names, elapsed: {sw.ElapsedMilliseconds}ms");
                     var collectionNames = _database.ListCollectionNames().ToListAsync().GetAwaiter().GetResult();
+                    Helper.LogToFile($"Collection names listed ({collectionNames.Count} collections), elapsed: {sw.ElapsedMilliseconds}ms");
 
                     if (!collectionNames.Contains(DATA_Collection))
                     {
+                        Helper.LogToFile($"Creating {DATA_Collection} collection, elapsed: {sw.ElapsedMilliseconds}ms");
                         _database.CreateCollectionAsync(DATA_Collection).GetAwaiter().GetResult();
+                        Helper.LogToFile($"{DATA_Collection} collection created, elapsed: {sw.ElapsedMilliseconds}ms");
                     }
 
                     if (!collectionNames.Contains(LOG_Collection))
                     {
+                        Helper.LogToFile($"Creating {LOG_Collection} collection, elapsed: {sw.ElapsedMilliseconds}ms");
                         _database.CreateCollectionAsync(LOG_Collection).GetAwaiter().GetResult();
+                        Helper.LogToFile($"{LOG_Collection} collection created, elapsed: {sw.ElapsedMilliseconds}ms");
+                        
+                        // Create ascending index on JobId for logfiles collection
+                        Helper.LogToFile($"Creating index on JobId, elapsed: {sw.ElapsedMilliseconds}ms");
+                        var indexKeysDefinition = Builders<BsonDocument>.IndexKeys.Ascending("JobId");
+                        var indexModel = new CreateIndexModel<BsonDocument>(indexKeysDefinition);
+                        _logCollection.Indexes.CreateOne(indexModel);
+                        Helper.LogToFile($"Index created, elapsed: {sw.ElapsedMilliseconds}ms");
                     }
 
                     _appId = appId;
                     _isInitialized = true;
+                    
+                    sw.Stop();
+                    Helper.LogToFile($"DocumentDBPersistence.Initialize completed in {sw.ElapsedMilliseconds}ms");
                 }
                 catch (Exception ex)
                 {
+                    sw.Stop();
+                    Helper.LogToFile($"DocumentDBPersistence.Initialize FAILED after {sw.ElapsedMilliseconds}ms: {ex.Message}");
                     throw new InvalidOperationException($"Failed to initialize DocumentDBPersistence. Details: {ex}", ex);
                 }
             }

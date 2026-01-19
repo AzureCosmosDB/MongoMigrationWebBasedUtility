@@ -199,7 +199,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       containers: [
         {
           name: containerAppName
-          image: stateStoreAppID == '' ? '${acr.properties.loginServer}/nginx:latest' : '${acr.properties.loginServer}/${acrRepository}:${imageTag}'
+          image: stateStoreAppID == '' ? 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest' : '${acr.properties.loginServer}/${acrRepository}:${imageTag}'
           resources: {
             cpu: vCores
             memory: '${memoryGB}Gi'

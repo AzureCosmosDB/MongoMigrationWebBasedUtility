@@ -1740,7 +1740,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 ValidatePartitioningPrerequisites();
 
                 _log.WriteLine($"Getting collection info for {databaseName}.{collectionName}", LogType.Debug);
-                var (documentCount, totalCollectionSizeBytes, collection) = await GetCollectionInfoAsync(databaseName, collectionName);
+                var (documentCount, totalCollectionSizeBytes, collection) = await GetCollectionInfoAsync(databaseName, collectionName, cts);
                 _log.WriteLine($"Collection info retrieved - docCount: {documentCount}, sizeBytes: {totalCollectionSizeBytes}", LogType.Debug);
 
                 _log.WriteLine($"Calculating partitioning strategy for {databaseName}.{collectionName}", LogType.Debug);
@@ -1772,6 +1772,11 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _log.WriteLine($"PartitionCollectionAsync cancelled for {databaseName}.{collectionName}", LogType.Warning);
                 return (new List<MigrationChunk>(), false);
             }
+            catch (TimeoutException ex)
+            {
+                _log.WriteLine($"PartitionCollectionAsync timed out for {databaseName}.{collectionName}. {ex.Message}", LogType.Error);
+                return (new List<MigrationChunk>(), false);
+            }
             catch (Exception ex)
             {
 
@@ -1787,11 +1792,11 @@ namespace OnlineMongoMigrationProcessor.Workers
         }
 
         private async Task<(long documentCount, long totalCollectionSizeBytes, IMongoCollection<BsonDocument> collection)> GetCollectionInfoAsync(
-            string databaseName, string collectionName)
+            string databaseName, string collectionName, CancellationToken cancellationToken = default)
         {
             MigrationJobContext.AddVerboseLog($"GetCollectionInfoAsync: db={databaseName}, coll={collectionName}");
 
-            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName);
+            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName, cancellationToken);
             long documentCount = stats.DocumentCount;
             long totalCollectionSizeBytes = stats.CollectionSizeBytes;
 
