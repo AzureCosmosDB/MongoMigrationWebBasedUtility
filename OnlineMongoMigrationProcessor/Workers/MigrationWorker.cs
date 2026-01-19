@@ -20,6 +20,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using ZstdSharp.Unsafe;
 
 
 namespace OnlineMongoMigrationProcessor.Workers
@@ -169,6 +170,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 dumpRestoreProcessor.AdjustDumpWorkers(newCount);
             }
+            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
         /// <summary>
@@ -181,6 +183,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 dumpRestoreProcessor.AdjustRestoreWorkers(newCount);
             }
+            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
         /// <summary>
@@ -193,6 +196,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 dumpRestoreProcessor.AdjustInsertionWorkers(newCount);
             }
+            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
         public async Task WaitForResumeTokenTask(string collectionKey)
@@ -506,7 +510,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                         }
 
-                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts);                            
+                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts,false);                            
                     }
                     catch (Exception ex)
                     {
@@ -818,7 +822,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 _ = Task.Run(async () =>
                 {
-                    await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, 30, syncBack, _cts);
+                    await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, 30, syncBack, _cts,false);
                 });
 
                 context.ServerLevelResumeTokenSet = true;
@@ -1736,7 +1740,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 ValidatePartitioningPrerequisites();
 
                 _log.WriteLine($"Getting collection info for {databaseName}.{collectionName}", LogType.Debug);
-                var (documentCount, totalCollectionSizeBytes, collection) = await GetCollectionInfoAsync(databaseName, collectionName);
+                var (documentCount, totalCollectionSizeBytes, collection) = await GetCollectionInfoAsync(databaseName, collectionName, cts);
                 _log.WriteLine($"Collection info retrieved - docCount: {documentCount}, sizeBytes: {totalCollectionSizeBytes}", LogType.Debug);
 
                 _log.WriteLine($"Calculating partitioning strategy for {databaseName}.{collectionName}", LogType.Debug);
@@ -1768,6 +1772,11 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _log.WriteLine($"PartitionCollectionAsync cancelled for {databaseName}.{collectionName}", LogType.Warning);
                 return (new List<MigrationChunk>(), false);
             }
+            catch (TimeoutException ex)
+            {
+                _log.WriteLine($"PartitionCollectionAsync timed out for {databaseName}.{collectionName}. {ex.Message}", LogType.Error);
+                return (new List<MigrationChunk>(), false);
+            }
             catch (Exception ex)
             {
 
@@ -1783,11 +1792,11 @@ namespace OnlineMongoMigrationProcessor.Workers
         }
 
         private async Task<(long documentCount, long totalCollectionSizeBytes, IMongoCollection<BsonDocument> collection)> GetCollectionInfoAsync(
-            string databaseName, string collectionName)
+            string databaseName, string collectionName, CancellationToken cancellationToken = default)
         {
             MigrationJobContext.AddVerboseLog($"GetCollectionInfoAsync: db={databaseName}, coll={collectionName}");
 
-            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName);
+            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName, cancellationToken);
             long documentCount = stats.DocumentCount;
             long totalCollectionSizeBytes = stats.CollectionSizeBytes;
 

@@ -91,24 +91,46 @@ namespace OnlineMongoMigrationProcessor
             }
 
 
-            DriveInfo drive = new DriveInfo(Path.GetPathRoot(directoryPath));
-            double freeSpaceInMb = drive.AvailableFreeSpace / (1024.0 * 1024);
+            double freeSpaceInMb= 0;
+            if (IsWindows())
+            {
+                DriveInfo drive = new DriveInfo(Path.GetPathRoot(directoryPath));
+                freeSpaceInMb = drive.AvailableFreeSpace / (1024.0 * 1024);          
+            }
+            else
+            {
+                double maxAllowedMb = 100 *1024;
+                try
+                {
+                    var quotaEnv = Environment.GetEnvironmentVariable("STORAGE_QUOTA_GB");
+                    maxAllowedMb=double.Parse(quotaEnv) * 1024;
+                }
+                catch
+                {
+                    //use default
+                }   
 
-            // Check if the total disk available is less than 5 GB
+                long currentUsageBytes = Directory
+                    .EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories)
+                    .Sum(f => new FileInfo(f).Length);
+
+                freeSpaceInMb = maxAllowedMb - (currentUsageBytes / (1024.0 * 1024));
+            }
+            freeSpaceGB = Math.Round(freeSpaceInMb / 1024, 2);
+            
+
+            // Check if the total disk available is less than spaceRequiredInMb
             if (freeSpaceInMb < spaceRequiredInMb)
             {
                 // Get disk space info
-
-
                 DirectoryInfo dirInfo = Directory.GetParent(directoryPath)?.Parent.Parent;
-
                 folderSizeInGB = Math.Round(GetFolderSizeInGB(dirInfo.FullName), 2);
-                freeSpaceGB = Math.Round(freeSpaceInMb /1024, 2);
-                MigrationJobContext.AddVerboseLog($"CanProceedWithDownloads returned false: directoryPath={directoryPath}, spaceRequiredInMb={spaceRequiredInMb}");
+                MigrationJobContext.AddVerboseLog($"Checking for Disk Space returned false: directoryPath={directoryPath}, spaceRequiredInMb={spaceRequiredInMb}, freeSpaceInMb={freeSpaceInMb}");
                 return false;
             }
             else
             {
+                MigrationJobContext.AddVerboseLog($"Checking for Disk Space returned true: directoryPath={directoryPath}, spaceRequiredInMb={spaceRequiredInMb}, freeSpaceInMb={freeSpaceInMb}");
                 return true;
             }
               

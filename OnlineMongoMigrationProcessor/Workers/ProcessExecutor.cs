@@ -47,9 +47,7 @@ namespace OnlineMongoMigrationProcessor.Workers
         public bool Execute(
             MigrationUnit mu,
             MigrationChunk chunk,
-            int chunkIndex,
-            double basePercent,
-            double contribFactor,
+            int chunkIndex,           
             long targetCount,
             string exePath,
             string arguments,
@@ -99,7 +97,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     if (!string.IsNullOrEmpty(args.Data))
                     {
                         errorBuffer.AppendLine(args.Data);
-                        ProcessConsoleOutput(args.Data, processType, mu, chunk, chunkIndex, basePercent, contribFactor, targetCount);
+                        ProcessConsoleOutput(args.Data, processType, mu, chunk, chunkIndex, targetCount);
 
                         string lowerData = args.Data.ToLower();
                         if (lowerData.Contains("failed to connect") || lowerData.Contains("error parsing") || lowerData.Contains("failed:"))
@@ -194,7 +192,7 @@ namespace OnlineMongoMigrationProcessor.Workers
         }
 
 
-        private void ProcessConsoleOutput(string data, string processType, MigrationUnit mu, MigrationChunk chunk,int chunkIndex, double basePercent, double contribFactor, long targetCount)
+        private void ProcessConsoleOutput(string data, string processType, MigrationUnit mu, MigrationChunk chunk,int chunkIndex, long targetCount)
         {
 
             if (processType == "MongoDump")

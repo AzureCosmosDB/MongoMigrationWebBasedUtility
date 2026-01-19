@@ -205,6 +205,9 @@ namespace OnlineMongoMigrationProcessor.Context
         public static string? AppId { get; set; }
         public static void Initialize(IConfiguration configuration)
         {
+            var initStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            Helper.LogToFile($"MigrationJobContext.Initialize started");
+            
             bool isLocal = true;
             var stateStoreCSorPath = string.Empty;
             var appId = string.Empty;
@@ -214,6 +217,7 @@ namespace OnlineMongoMigrationProcessor.Context
                 stateStoreCSorPath = configuration["StateStore:ConnectionStringOrPath"];             
                 appId = configuration["StateStore:AppID"];
                 AppId = appId;
+                Helper.LogToFile($"Configuration loaded - isLocal: {isLocal}, appId: {appId}, elapsed: {initStopwatch.ElapsedMilliseconds}ms");
             }
             catch
             {
@@ -227,7 +231,9 @@ namespace OnlineMongoMigrationProcessor.Context
                 {
                     Store = new DiskPersistence();
                     var localPath = string.IsNullOrEmpty(stateStoreCSorPath) ? Helper.GetWorkingFolder() : stateStoreCSorPath;
+                    Helper.LogToFile($"Initializing DiskPersistence at {localPath}, elapsed: {initStopwatch.ElapsedMilliseconds}ms");
                     Store.Initialize(localPath, string.Empty);
+                    Helper.LogToFile($"DiskPersistence initialized, elapsed: {initStopwatch.ElapsedMilliseconds}ms");
                 }
                 else
                 {                  
@@ -242,7 +248,9 @@ namespace OnlineMongoMigrationProcessor.Context
 
                     AppId=appId;
                     Store = new DocumentDBPersistence();
+                    Helper.LogToFile($"Initializing DocumentDBPersistence (Windows), elapsed: {initStopwatch.ElapsedMilliseconds}ms");
                     Store.Initialize(stateStoreCSorPath, appId);
+                    Helper.LogToFile($"DocumentDBPersistence initialized (Windows), elapsed: {initStopwatch.ElapsedMilliseconds}ms");
                 } 
             }
             else
@@ -258,10 +266,14 @@ namespace OnlineMongoMigrationProcessor.Context
                 }
                 AppId = appId;
                 Store = new DocumentDBPersistence();
+                Helper.LogToFile($"Initializing DocumentDBPersistence (non-Windows), elapsed: {initStopwatch.ElapsedMilliseconds}ms");
                 Store.Initialize(stateStoreCSorPath, appId);
+                Helper.LogToFile($"DocumentDBPersistence initialized (non-Windows), elapsed: {initStopwatch.ElapsedMilliseconds}ms");
             }
 
+            Helper.LogToFile($"Loading JobList, elapsed: {initStopwatch.ElapsedMilliseconds}ms");
             JobList= LoadJobList(out bool notFound,out string errorMessage);
+            Helper.LogToFile($"JobList loaded (notFound: {notFound}), elapsed: {initStopwatch.ElapsedMilliseconds}ms");
             if(notFound && JobList == null)
             {
                 JobList=new JobList();
@@ -271,7 +283,11 @@ namespace OnlineMongoMigrationProcessor.Context
             {
                 throw new InvalidOperationException($"Error initializing Job List: {errorMessage}");
             }
+            Helper.LogToFile($"Persisting JobList, elapsed: {initStopwatch.ElapsedMilliseconds}ms");
             JobList.Persist();
+            
+            initStopwatch.Stop();
+            Helper.LogToFile($"MigrationJobContext.Initialize completed in {initStopwatch.ElapsedMilliseconds}ms");
         }
 
         private static MigrationJob? LoadMigrationJob(string jobId)
