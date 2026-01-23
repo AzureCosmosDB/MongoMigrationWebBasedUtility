@@ -1,0 +1,413 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.39.26.7824",
+      "templateHash": "4330028920114987765"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    },
+    "ownerTag": {
+      "type": "string",
+      "metadata": {
+        "description": "Owner tag required by Azure Policy"
+      }
+    },
+    "containerAppName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Container App"
+      }
+    },
+    "acrName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Azure Container Registry"
+      }
+    },
+    "acrRepository": {
+      "type": "string",
+      "defaultValue": "[parameters('containerAppName')]",
+      "metadata": {
+        "description": "ACR repository name for the container image"
+      }
+    },
+    "imageTag": {
+      "type": "string",
+      "defaultValue": "latest",
+      "metadata": {
+        "description": "Docker image tag to deploy"
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "[take(format('{0}stor', replace(parameters('containerAppName'), '-', '')), 24)]",
+      "metadata": {
+        "description": "Storage account name for persistent migration files"
+      }
+    },
+    "stateStoreConnectionString": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "StateStore connection string for the container"
+      }
+    },
+    "stateStoreAppID": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "StateStore App ID for the container"
+      }
+    },
+    "vCores": {
+      "type": "int",
+      "defaultValue": 8,
+      "minValue": 1,
+      "maxValue": 32,
+      "metadata": {
+        "description": "Number of vCores for the container"
+      }
+    },
+    "memoryGB": {
+      "type": "int",
+      "defaultValue": 32,
+      "minValue": 2,
+      "maxValue": 64,
+      "metadata": {
+        "description": "Memory in GB for the container"
+      }
+    },
+    "aspNetCoreEnvironment": {
+      "type": "string",
+      "defaultValue": "Development",
+      "metadata": {
+        "description": "ASP.NET Core environment setting"
+      }
+    },
+    "infrastructureSubnetResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional: Resource ID of the subnet for VNet integration (e.g., /subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name})"
+      }
+    },
+    "useEntraIdForStorage": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When true, UseBlobServiceClient env var is set and no volume is mounted."
+      }
+    }
+  },
+  "variables": {
+    "workloadProfileType": "[if(lessOrEquals(parameters('vCores'), 4), 'D4', if(lessOrEquals(parameters('vCores'), 8), 'D8', if(lessOrEquals(parameters('vCores'), 16), 'D16', 'D32')))]",
+    "workloadProfileName": "Dedicated"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[format('{0}-identity', parameters('containerAppName'))]",
+      "location": "[parameters('location')]",
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('acrName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Basic"
+      },
+      "properties": {
+        "adminUserEnabled": false
+      },
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', parameters('acrName'))]",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'acrPull')]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-01-01",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "properties": {
+        "accessTier": "Hot",
+        "allowBlobPublicAccess": false,
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2",
+        "allowSharedKeyAccess": "[not(parameters('useEntraIdForStorage'))]"
+      },
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      }
+    },
+    {
+      "condition": "[not(parameters('useEntraIdForStorage'))]",
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2023-01-01",
+      "name": "[format('{0}/default/migration-data', parameters('storageAccountName'))]",
+      "properties": {
+        "shareQuota": 100,
+        "enabledProtocols": "SMB"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType'))]",
+      "location": "[parameters('location')]",
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      },
+      "properties": "[union(createObject('workloadProfiles', createArray(createObject('name', 'Consumption', 'workloadProfileType', 'Consumption'), createObject('name', variables('workloadProfileName'), 'workloadProfileType', variables('workloadProfileType'), 'minimumCount', 1, 'maximumCount', 1))), if(not(equals(parameters('infrastructureSubnetResourceId'), '')), createObject('vnetConfiguration', createObject('infrastructureSubnetId', parameters('infrastructureSubnetResourceId'), 'internal', false())), createObject()))]"
+    },
+    {
+      "condition": "[not(parameters('useEntraIdForStorage'))]",
+      "type": "Microsoft.App/managedEnvironments/storages",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/{1}', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')), 'migration-storage')]",
+      "properties": {
+        "azureFile": {
+          "accountName": "[parameters('storageAccountName')]",
+          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value]",
+          "shareName": "migration-data",
+          "accessMode": "ReadWrite"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('useEntraIdForStorage')]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[format('Microsoft.Storage/storageAccounts/{0}', parameters('storageAccountName'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'storageBlobDataContributor')]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2023-05-01",
+      "name": "[parameters('containerAppName')]",
+      "location": "[parameters('location')]",
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      },
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))))]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')))]",
+        "workloadProfileName": "[variables('workloadProfileName')]",
+        "configuration": {
+          "secrets": "[if(not(equals(parameters('stateStoreConnectionString'), '')), createArray(createObject('name', 'statestore-connection', 'value', parameters('stateStoreConnectionString'))), createArray())]",
+          "registries": [
+            {
+              "server": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-07-01').loginServer]",
+              "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]"
+            }
+          ],
+          "ingress": {
+            "external": true,
+            "targetPort": 8080,
+            "allowInsecure": true,
+            "traffic": [
+              {
+                "weight": 100,
+                "latestRevision": true
+              }
+            ]
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "[parameters('containerAppName')]",
+              "image": "[if(equals(parameters('stateStoreAppID'), ''), 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest', format('{0}/{1}:{2}', reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-07-01').loginServer, parameters('acrRepository'), parameters('imageTag')))]",
+              "resources": {
+                "cpu": "[parameters('vCores')]",
+                "memory": "[format('{0}Gi', parameters('memoryGB'))]"
+              },
+              "volumeMounts": "[if(parameters('useEntraIdForStorage'), createArray(), createArray(createObject('volumeName', 'migration-data-volume', 'mountPath', '/app/migration-data')))]",
+              "env": "[concat(createArray(createObject('name', 'ASPNETCORE_ENVIRONMENT', 'value', parameters('aspNetCoreEnvironment')), createObject('name', 'ASPNETCORE_HTTP_PORTS', 'value', '8080'), createObject('name', 'StateStoreAppID', 'value', parameters('stateStoreAppID')), createObject('name', 'ResourceDrive', 'value', '/app/migration-data')), if(not(equals(parameters('stateStoreConnectionString'), '')), createArray(createObject('name', 'StateStoreConnectionStringOrPath', 'secretRef', 'statestore-connection')), createArray()), if(parameters('useEntraIdForStorage'), createArray(createObject('name', 'UseBlobServiceClient', 'value', 'true'), createObject('name', 'BlobServiceClientURI', 'value', format('https://{0}.blob.{1}', parameters('storageAccountName'), environment().suffixes.storage)), createObject('name', 'BlobContainerName', 'value', 'migration-data')), createArray()))]",
+              "probes": [
+                {
+                  "type": "Startup",
+                  "httpGet": {
+                    "path": "/api/HealthCheck/ping",
+                    "port": 8080,
+                    "scheme": "HTTP"
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 5,
+                  "failureThreshold": 30,
+                  "successThreshold": 1,
+                  "timeoutSeconds": 3
+                },
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/api/HealthCheck/ping",
+                    "port": 8080,
+                    "scheme": "HTTP"
+                  },
+                  "initialDelaySeconds": 0,
+                  "periodSeconds": 30,
+                  "failureThreshold": 3,
+                  "successThreshold": 1,
+                  "timeoutSeconds": 5
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/api/HealthCheck/ping",
+                    "port": 8080,
+                    "scheme": "HTTP"
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10,
+                  "failureThreshold": 3,
+                  "successThreshold": 1,
+                  "timeoutSeconds": 3
+                }
+              ]
+            }
+          ],
+          "volumes": "[if(parameters('useEntraIdForStorage'), createArray(), createArray(createObject('name', 'migration-data-volume', 'storageType', 'AzureFile', 'storageName', 'migration-storage')))]",
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 1
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+        "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+        "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'storageBlobDataContributor'))]",
+        "[resourceId('Microsoft.App/managedEnvironments/storages', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')), 'migration-storage')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "containerAppEnvironmentId": {
+      "type": "string",
+      "metadata": {
+        "description": "Container Apps Environment ID"
+      },
+      "value": "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')))]"
+    },
+    "containerAppFQDN": {
+      "type": "string",
+      "metadata": {
+        "description": "Container App FQDN"
+      },
+      "value": "[if(not(equals(parameters('stateStoreAppID'), '')), reference(resourceId('Microsoft.App/containerApps', parameters('containerAppName')), '2023-05-01').configuration.ingress.fqdn, 'not-ready')]"
+    },
+    "containerAppUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "Container App URL"
+      },
+      "value": "[if(equals(parameters('stateStoreAppID'), ''), 'not-ready', format('https://{0}', reference(resourceId('Microsoft.App/containerApps', parameters('containerAppName')), '2023-05-01').configuration.ingress.fqdn))]"
+    },
+    "managedIdentityId": {
+      "type": "string",
+      "metadata": {
+        "description": "Managed Identity Resource ID"
+      },
+      "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]"
+    },
+    "managedIdentityClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Managed Identity Client ID"
+      },
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').clientId]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Storage Account Name for migration data"
+      },
+      "value": "[parameters('storageAccountName')]"
+    },
+    "fileShareName": {
+      "type": "string",
+      "metadata": {
+        "description": "File Share Name for migration data (only when not using Entra ID)"
+      },
+      "value": "migration-data"
+    },
+    "resourceDrivePath": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource Drive Mount Path in container"
+      },
+      "value": "/app/migration-data"
+    },
+    "storageMode": {
+      "type": "string",
+      "metadata": {
+        "description": "Storage mode: MountedAzureFiles or EntraIdBlobStorage"
+      },
+      "value": "[if(parameters('useEntraIdForStorage'), 'EntraIdBlobStorage', 'MountedAzureFiles')]"
+    },
+    "blobServiceUri": {
+      "type": "string",
+      "metadata": {
+        "description": "Blob Service URI (only when using Entra ID)"
+      },
+      "value": "[if(parameters('useEntraIdForStorage'), format('https://{0}.blob.{1}', parameters('storageAccountName'), environment().suffixes.storage), '')]"
+    }
+  }
+}

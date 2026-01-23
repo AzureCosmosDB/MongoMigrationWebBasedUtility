@@ -289,13 +289,15 @@ namespace OnlineMongoMigrationProcessor.Workers
                 }
             }
 
+            _log.WriteLine("Verifying source server connectivity...", LogType.Debug);
             try
             {
                 string version = MongoHelper.GetServerVersion(_sourceClient);
+                _log.WriteLine($"Source server version check passed: {version}", LogType.Debug);
             }
-            catch
+            catch (Exception ex)
             {
-                _log.WriteLine("Failed to connect to source server. Please verify the connection string and network connectivity.", LogType.Error);
+                _log.WriteLine($"Failed to connect to source server. Please verify the connection string and network connectivity. Error: {ex.Message}", LogType.Error);
                 return TaskResult.Retry;
             }
 
@@ -326,9 +328,11 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             else
             {
+                _log.WriteLine("Offline job - getting source server version...", LogType.Debug);
                 //// Connect to the MongoDB server
                 var client = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], true, _config.CACertContentsForSourceServer ?? string.Empty);
                 var version = MongoHelper.GetServerVersion(client);
+                _log.WriteLine($"Source server version: {version}", LogType.Debug);
                 MigrationJobContext.CurrentlyActiveJob.SourceServerVersion = version;
                 MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
             }
@@ -1464,7 +1468,11 @@ namespace OnlineMongoMigrationProcessor.Workers
                 MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]);
 
             targetConnectionString = Helper.UpdateAppName(targetConnectionString, 
-                $"MSFTMongoWebMigration{Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob)}-" + MigrationJobContext.CurrentlyActiveJob.Id);
+                $"MSFTMongoWebMigration-{Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob)}-" + MigrationJobContext.CurrentlyActiveJob.Id);
+
+            // Store the modified connection strings back to MigrationJobContext so they're used throughout the migration
+            MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id] = sourceConnectionString;
+            MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id] = targetConnectionString;
 
             return (sourceConnectionString, targetConnectionString);
         }

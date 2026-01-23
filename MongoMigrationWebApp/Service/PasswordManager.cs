@@ -1,5 +1,6 @@
 using OnlineMongoMigrationProcessor;
 using OnlineMongoMigrationProcessor.Context;
+using OnlineMongoMigrationProcessor.Helpers;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -15,15 +16,12 @@ namespace MongoMigrationWebApp.Service
         public PasswordManager()
         {
             var workingFolder = Helper.GetWorkingFolder();
-            if (!Directory.Exists(workingFolder))
+            
+            // Only create local directory if not using Blob Storage
+            if (!StorageStreamFactory.UseBlobStorage && !Directory.Exists(workingFolder))
             {
                 Directory.CreateDirectory(workingFolder);
             }
-
-            //if (!Helper.IsWindows())
-            //{
-            //    workingFolder = $"{workingFolder}/{MigrationJobContext.AppId}/";
-            //}
 
             _passwordFilePath = Path.Combine(workingFolder, PasswordFileName);
         }
@@ -40,14 +38,30 @@ namespace MongoMigrationWebApp.Service
 
         public async Task<string?> GetStoredPasswordAsync()
         {
-            if (!File.Exists(_passwordFilePath))
+            bool exists = await StorageStreamFactory.ExistsAsync(_passwordFilePath);
+            if (!exists)
             {
                 return null;
             }
 
             try
             {
-                var encryptedBytes = await File.ReadAllBytesAsync(_passwordFilePath);
+                byte[] encryptedBytes;
+                
+                if (StorageStreamFactory.UseBlobStorage)
+                {
+                    // Read from Blob Storage
+                    using var stream = await StorageStreamFactory.OpenReadAsync(_passwordFilePath);
+                    using var ms = new MemoryStream();
+                    await stream.CopyToAsync(ms);
+                    encryptedBytes = ms.ToArray();
+                }
+                else
+                {
+                    // Read from local file
+                    encryptedBytes = await File.ReadAllBytesAsync(_passwordFilePath);
+                }
+                
                 var decryptedPassword = Decrypt(encryptedBytes);
                 return decryptedPassword;
             }
@@ -60,21 +74,30 @@ namespace MongoMigrationWebApp.Service
 
         public async Task<bool> IsPasswordSetAsync()
         {
-            return File.Exists(_passwordFilePath);
+            return await StorageStreamFactory.ExistsAsync(_passwordFilePath);
         }
 
         public async Task SetPasswordAsync(string newPassword)
         {
             var encryptedBytes = Encrypt(newPassword);
             
-            // Ensure directory exists
-            var directory = Path.GetDirectoryName(_passwordFilePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            if (StorageStreamFactory.UseBlobStorage)
             {
-                Directory.CreateDirectory(directory);
+                // Write to Blob Storage
+                using var stream = await StorageStreamFactory.OpenWriteAsync(_passwordFilePath);
+                await stream.WriteAsync(encryptedBytes);
             }
+            else
+            {
+                // Ensure directory exists for local file
+                var directory = Path.GetDirectoryName(_passwordFilePath);
+                if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
 
-            await File.WriteAllBytesAsync(_passwordFilePath, encryptedBytes);
+                await File.WriteAllBytesAsync(_passwordFilePath, encryptedBytes);
+            }
         }
 
         private byte[] Encrypt(string plainText)

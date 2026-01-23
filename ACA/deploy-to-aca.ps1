@@ -37,6 +37,9 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$InfrastructureSubnetResourceId = "",
     
+    [Parameter(Mandatory=$false)]
+    [switch]$UseEntraIdForAzureStorage,
+
     [Parameter(Mandatory=$true)]
     [string]$OwnerTag
 )
@@ -74,6 +77,9 @@ if ([string]::IsNullOrEmpty($StorageAccountName)) {
 }
 
 Write-Host "Using location: $Location" -ForegroundColor Cyan
+if ($UseEntraIdForAzureStorage) {
+    Write-Host "Using Entra ID (Managed Identity) for Azure Storage instead of mounted disk" -ForegroundColor Cyan
+}
 
 Write-Host "`nStep 1: Deploying infrastructure (ACR, Storage Account, Managed Identity, Container Apps Environment)..." -ForegroundColor Yellow
 Write-Host "Note: This may take 3-5 minutes..." -ForegroundColor Gray
@@ -90,7 +96,8 @@ $bicepParams = @(
         "storageAccountName=$StorageAccountName",
         "vCores=$VCores",
         "memoryGB=$MemoryGB",
-        "ownerTag=$OwnerTag"
+        "ownerTag=$OwnerTag",
+        "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())"
 )
 
 # Add VNet configuration if provided
@@ -175,7 +182,8 @@ $finalBicepParams = @(
         "stateStoreConnectionString=`"$connString`"",
         "aspNetCoreEnvironment=Development",
         "imageTag=$ImageTag",
-        "ownerTag=$OwnerTag"
+        "ownerTag=$OwnerTag",
+        "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())"
 )
 
 # Add VNet configuration if provided

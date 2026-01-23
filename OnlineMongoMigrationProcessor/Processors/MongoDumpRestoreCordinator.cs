@@ -648,10 +648,7 @@ namespace OnlineMongoMigrationProcessor
             if (overwrite)
             {
                 //Ensure previous dump file(if any) is removed before fresh dump
-                if (File.Exists(dumpFilePath))
-                {
-                    try { File.Delete(dumpFilePath); } catch { }
-                }
+                try { StorageStreamFactory.DeleteIfExists(dumpFilePath); } catch { }
             }
 
             return dumpFilePath;
@@ -661,7 +658,7 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.CheckDumpDownloaded: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}");
             string dumpFilePath = GetDumpFilePath(mu, chunkIndex);
-            return File.Exists(dumpFilePath);
+            return StorageStreamFactory.Exists(dumpFilePath);
         }
 
         /// <summary>
@@ -833,6 +830,11 @@ namespace OnlineMongoMigrationProcessor
 
         private bool HasSufficientDiskSpace()
         {
+            // When using Azure Blob Storage with Entra ID, skip disk space check
+            // as blob storage has virtually unlimited capacity
+            if (StorageStreamFactory.UseBlobStorage)
+                return true;
+
             lock (_diskSpaceCheckLock)
             {
                 //check if current time is less than paused till
@@ -1046,7 +1048,7 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.PrepareDumpFolder: database={dbName}, collection={colName}");
             string folder = Path.Combine(_mongoDumpOutputFolder, _jobId ?? "", Helper.SafeFileName($"{dbName}.{colName}"));
-            Directory.CreateDirectory(folder);
+            StorageStreamFactory.EnsureDirectoryExists(folder);
             return folder;
         }
 
@@ -1586,6 +1588,9 @@ namespace OnlineMongoMigrationProcessor
                         colName
                     );
 
+                    // Warm up connection to target collection with async findOne
+                    _ = WarmUpTargetConnectionAsync(context.TargetConnectionString, dbName, colName);
+
                     // Execute restore
                     bool success = await ExecuteRestoreProcessAsync(
                         mu,
@@ -1680,7 +1685,7 @@ namespace OnlineMongoMigrationProcessor
             var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
 
             var dumpFilePath = GetDumpFilePath(mu, context.ChunkIndex);
-            if (!File.Exists(dumpFilePath))
+            if (!StorageStreamFactory.Exists(dumpFilePath))
             {
                 int chunkIndex = context.ChunkIndex;
 
@@ -1754,6 +1759,28 @@ namespace OnlineMongoMigrationProcessor
                 MigrationJobContext.CurrentlyActiveJob.MaxInsertionWorkersPerCollection,
                 MigrationJobContext.CurrentlyActiveJob.CurrentInsertionWorkers
             );
+        }
+
+        /// <summary>
+        /// Warms up connection to the target collection by performing an async findOne operation.
+        /// This runs in the background and does not block the restore operation.
+        /// </summary>
+        private async Task WarmUpTargetConnectionAsync(string targetConnectionString, string dbName, string colName)
+        {
+            try
+            {
+                var targetClient = MongoClientFactory.Create(_log, targetConnectionString);
+                var targetDb = targetClient.GetDatabase(dbName);
+                var targetCollection = targetDb.GetCollection<BsonDocument>(colName);
+                
+                // Perform a findOne to warm up the connection
+                await targetCollection.Find(new BsonDocument()).Limit(1).FirstOrDefaultAsync();
+            }
+            catch (Exception ex)
+            {
+                // Log but don't fail - this is just a warm-up operation
+                _log?.WriteLine($"WarmUp findOne for {dbName}.{colName} failed: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+            }
         }
 
         /// <summary>
@@ -1898,10 +1925,7 @@ namespace OnlineMongoMigrationProcessor
             // Delete dump file
             try
             {
-                if (File.Exists(dumpFilePath))
-                {
-                    File.Delete(dumpFilePath);
-                }
+                StorageStreamFactory.DeleteIfExists(dumpFilePath);
             }
             catch (Exception ex)
             {

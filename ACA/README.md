@@ -2,6 +2,8 @@
 
 This guide explains how to deploy the MongoDB Migration Web-Based Utility to Azure Container Apps using the `aca_main.bicep` template. ACA provides enterprise-grade dedicated compute resources and persistent storage for high-performance migrations.
 
+![ACA Architecture](ACA_architecture.png)
+
 ## Deployment Scripts Overview
 
 Two PowerShell scripts are provided for different deployment scenarios:
@@ -81,6 +83,15 @@ cd c:\Work\GitHub\repos\MongoMigrationWebBasedUtility
   -Location "eastus" `
   -OwnerTag "yourname@company.com" `
   -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
+
+# Deployment with Entra ID (Managed Identity) for Azure Blob Storage
+# Use this when your organization blocks storage account key-based access
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "MongoMigrationRGTest" `
+  -ContainerAppName "mongomigration" `
+  -Location "eastus" `
+  -OwnerTag "yourname@company.com" `
+  -UseEntraIdForAzureStorage
 ```
 
 **Using Existing Azure Resources:**
@@ -227,6 +238,7 @@ Remove-Variable connString, secureConnString
 | `VCores` | int | `8` (range: 1-32) | Number of vCores for the container. |
 | `MemoryGB` | int | `32` (range: 2-64) | Memory in GB for the container. |
 | `InfrastructureSubnetResourceId` | string | `""` (empty) | Resource ID of the subnet for VNet integration. **Must be provided at environment creation time**. See [VNet Integration](#vnet-integration) section. |
+| `UseEntraIdForAzureStorage` | switch | `$false` | Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When enabled, no volume is mounted and the app uses `BlobServiceClient` with Managed Identity. **Recommended when your organization blocks storage account key-based access**. |
 
 ## Naming Constraints
 
@@ -357,6 +369,21 @@ Azure Container Apps with Dedicated Plan provides configurable high-performance 
   -MemoryGB 64 `
   -ImageTag "v1.0" `
   -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
+
+# With Entra ID for Blob Storage (no mounted volume, uses Managed Identity)
+# Use when organization policy blocks storage account keys
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "rg-mongomig-perf" `
+  -ContainerAppName "mongomigration-perf" `
+  -AcrName "sharedproductionacr" `
+  -AcrRepository "mongomig-perf" `
+  -StorageAccountName "sharedprodstg" `
+  -StateStoreAppID "perf-migration-01" `
+  -Location "eastus" `
+  -VCores 32 `
+  -MemoryGB 64 `
+  -ImageTag "v1.0" `
+  -UseEntraIdForAzureStorage
 
 # Script will:
 # - Use existing ACR "sharedproductionacr" (no creation needed)
@@ -605,11 +632,33 @@ For enhanced security, configure private endpoints for your Azure resources to k
 
 ## Persistent Storage
 
-### Migration Data Storage
+The application supports two storage modes for migration data:
+
+### Storage Mode 1: Azure Files Mount (Default)
+
+By default, the application uses an Azure File Share mounted as a volume:
+
 - **Path**: `/app/migration-data` (accessible via `ResourceDrive` environment variable)
-- **Capacity**: 100GB Azure File Share
+- **Capacity**: 100GB Azure File Share (expandable)
 - **Persistence**: Data survives container restarts, deployments, and scaling events
 - **Performance**: Standard_LRS storage for consistent I/O performance
+- **Authentication**: Storage account key (managed by Azure Container Apps)
+
+### Storage Mode 2: Azure Blob Storage with Entra ID (Managed Identity)
+
+When `-UseEntraIdForAzureStorage` is specified, the application uses Azure Blob Storage with Managed Identity:
+
+- **No volume mounted**: Application uses Azure Blob SDK instead of file system
+- **Container**: `migration-data` blob container (created automatically)
+- **Authentication**: Managed Identity with Storage Blob Data Contributor role
+- **Use case**: When organization policy blocks storage account key-based access
+
+**Environment variables set automatically:**
+| Variable | Value |
+|----------|-------|
+| `UseBlobServiceClient` | `true` |
+| `BlobServiceClientURI` | `https://<storageaccount>.blob.core.windows.net` |
+| `BlobContainerName` | `migration-data` |
 
 ### Using Persistent Storage in Application
 Your application can access the persistent storage using the environment variable:
@@ -631,8 +680,10 @@ After successful deployment, the template provides these outputs:
 | `managedIdentityId` | Resource ID of the managed identity |
 | `managedIdentityClientId` | Client ID for the managed identity |
 | `storageAccountName` | Storage account name for migration data |
-| `fileShareName` | File share name (migration-data) |
+| `fileShareName` | File share name (migration-data) - only when using Azure Files mount |
 | `resourceDrivePath` | Mount path for persistent storage |
+| `storageMode` | Storage mode: `MountedAzureFiles` or `EntraIdBlobStorage` |
+| `blobServiceUri` | Blob service URI (only when using Entra ID) |
 
 View outputs:
 ```powershell
@@ -1085,6 +1136,8 @@ az containerapp update `
 - Your application can read this value using `Environment.GetEnvironmentVariable("STORAGE_QUOTA_GB")`
 - Pricing is based on provisioned size, not used space - see [Azure Files Pricing](https://azure.microsoft.com/pricing/details/storage/files/)
 - Monitor disk usage through the application's monitoring interface to plan capacity increases
+
+> **Note**: The disk space increase procedure above applies only to the default Azure Files mount mode. If you deployed with `-UseEntraIdForAzureStorage`, the application uses Azure Blob Storage which has virtually unlimited capacity and does not require manual quota increases.
 
 ## Cost Optimization Tips
 
