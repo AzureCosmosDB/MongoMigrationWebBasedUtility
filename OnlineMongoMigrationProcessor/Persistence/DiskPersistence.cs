@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using OnlineMongoMigrationProcessor.Helpers;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -51,11 +52,8 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 {
                     _storagePath = connectionStringOrPath;
                     _appId= appId;
-                    // Create directory if it doesn't exist
-                    if (!Directory.Exists(_storagePath))
-                    {
-                        Directory.CreateDirectory(_storagePath);
-                    }
+                    // Create directory if it doesn't exist (no-op for blob storage)
+                    StorageStreamFactory.EnsureDirectoryExists(_storagePath);
 
                     _isInitialized = true;
                 }
@@ -103,12 +101,9 @@ namespace OnlineMongoMigrationProcessor.Persistence
                     pathParts.Add(SanitizeFileName(parts[i]));
                 }
                 
-                // Create the directory structure if it doesn't exist
+                // Create the directory structure if it doesn't exist (no-op for blob storage)
                 var directoryPath = Path.Combine(pathParts.ToArray());
-                if (!Directory.Exists(directoryPath))
-                {
-                    Directory.CreateDirectory(directoryPath);
-                }
+                StorageStreamFactory.EnsureDirectoryExists(directoryPath);
                 
                 // Add the last part as the filename (already has .json extension)
                 var fileName = SanitizeFileName(parts[^1]);
@@ -170,7 +165,8 @@ namespace OnlineMongoMigrationProcessor.Persistence
             try
             {
                 var filePath = GetFilePath(id);
-                return Helper.WriteAtomicFile(filePath, jsonContent);
+                // Use StorageStreamFactory for blob storage support
+                return StorageStreamFactory.WriteAllText(filePath, jsonContent);
             }
             catch (Exception ex)
             {
@@ -197,14 +193,8 @@ namespace OnlineMongoMigrationProcessor.Persistence
             try
             {
                 var filePath = GetFilePath(id);
-
-                using var fs = new FileStream(
-                    filePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete);
-                using var sr = new StreamReader(fs);
-                return sr.ReadToEnd();
+                // Use StorageStreamFactory for blob storage support
+                return StorageStreamFactory.ReadAllText(filePath);
             }
             catch (Exception ex)
             {
@@ -231,7 +221,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             try
             {
                 var filePath = GetFilePath(id);
-                return File.Exists(filePath);
+                return StorageStreamFactory.Exists(filePath);
             }
             catch
             {
@@ -260,22 +250,17 @@ namespace OnlineMongoMigrationProcessor.Persistence
                     // Delete file
                     var filePath = GetFilePath(id);
                     
-                    if (!File.Exists(filePath))
+                    if (!StorageStreamFactory.Exists(filePath))
                         return false;
 
-                    File.Delete(filePath);
+                    StorageStreamFactory.DeleteIfExists(filePath);
                     return true;
                 }
                 else
                 {
-                    // Delete folder
+                    // Delete folder (and all contents)
                     var directoryPath = GetDirectoryPath(id);
-                    
-                    if (!Directory.Exists(directoryPath))
-                        return false;
-
-                    Directory.Delete(directoryPath, recursive: true);
-                    return true;
+                    return StorageStreamFactory.DeleteDirectory(directoryPath, recursive: true);
                 }
             }
             catch (Exception ex)
@@ -298,16 +283,25 @@ namespace OnlineMongoMigrationProcessor.Persistence
             {
                 var ids = new List<string>();
                 
-                // Recursively find all .json files
-                var files = Directory.GetFiles(_storagePath!, "*" + FILE_EXTENSION, SearchOption.AllDirectories);
+                // Recursively find all .json files using StorageStreamFactory
+                var files = StorageStreamFactory.ListFiles(_storagePath!, "*" + FILE_EXTENSION, recursive: true);
                 
                 foreach (var file in files)
                 {
                     // Get relative path from storage root
-                    var relativePath = Path.GetRelativePath(_storagePath!, file);
+                    string relativePath;
+                    if (StorageStreamFactory.UseBlobStorage)
+                    {
+                        // For blob storage, the file is already a relative blob name
+                        relativePath = file;
+                    }
+                    else
+                    {
+                        relativePath = Path.GetRelativePath(_storagePath!, file);
+                    }
                     
                     // Convert path separators to backslash for consistency (keep .json extension)
-                    var id = relativePath.Replace(Path.DirectorySeparatorChar, '\\');
+                    var id = relativePath.Replace('/', '\\').Replace(Path.DirectorySeparatorChar, '\\');
                     
                     ids.Add(id);
                 }
@@ -333,6 +327,9 @@ namespace OnlineMongoMigrationProcessor.Persistence
 
             try
             {
+                // For blob storage, assume connection is valid if initialized
+                if (StorageStreamFactory.UseBlobStorage)
+                    return true;
                 return Directory.Exists(_storagePath);
             }
             catch
@@ -364,9 +361,9 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 var folder = Path.Combine(_storagePath, "migrationlogs");
                 var binPath = Path.Combine(folder, $"{jobId}.bin");
 
-                Directory.CreateDirectory(folder);
+                StorageStreamFactory.EnsureDirectoryExists(folder);
 
-                using var fs = new FileStream(binPath, FileMode.Append, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough);
+                using var fs = StorageStreamFactory.OpenAppend(binPath);
                 using var bw = new BinaryWriter(fs);
 
                 var messageBytes = Encoding.UTF8.GetBytes(logObject.Message);
@@ -383,13 +380,14 @@ namespace OnlineMongoMigrationProcessor.Persistence
             var folder = Path.Combine(_storagePath, "migrationlogs");
             var binPath = Path.Combine(folder, $"{id}.bin");
             
-            if (!File.Exists(binPath))
+            if (!StorageStreamFactory.Exists(binPath))
                 return 0;
                 
             int count = 0;
             try
             {
-                using var fs = new FileStream(binPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var fs = StorageStreamFactory.OpenReadShared(binPath);
+                if (fs == null) return 0;
                 using var br = new BinaryReader(fs);
                 
                 while (fs.Position < fs.Length)
@@ -431,12 +429,13 @@ namespace OnlineMongoMigrationProcessor.Persistence
             var logBucket = new LogBucket { Logs = new List<LogObject>() };
             var offsets = new List<long>();
 
-            if (!File.Exists(binPath))
+            if (!StorageStreamFactory.Exists(binPath))
                 return Array.Empty<byte>();
 
             try
             {
-                using var fs = new FileStream(binPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var fs = StorageStreamFactory.OpenReadShared(binPath);
+                if (fs == null) return Array.Empty<byte>();
                 using var br = new BinaryReader(fs);
 
                 // First pass: collect all offsets
@@ -547,7 +546,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                     var folder = Path.Combine(_storagePath, "migrationlogs");
                     var binPath = Path.Combine(folder, $"{id}.bin");
 
-                    if (File.Exists(binPath))
+                    if (StorageStreamFactory.Exists(binPath))
                     {
                         var logBucket = ParseLogBinFile(binPath);
                         if (logBucket.Logs == null || logBucket.Logs.Count == 0)
@@ -570,7 +569,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
         {
             backupFileName = CreateFileCopyWithTimestamp(currentLogFilePath);
 
-            File.Delete(currentLogFilePath);
+            StorageStreamFactory.DeleteIfExists(currentLogFilePath);
 
             var logBucket = new LogBucket();
             logBucket.Logs ??= new List<LogObject>();
@@ -590,9 +589,9 @@ namespace OnlineMongoMigrationProcessor.Persistence
 
             try
             {
-                Directory.CreateDirectory(folder);
+                StorageStreamFactory.EnsureDirectoryExists(folder);
 
-                using var fs = new FileStream(binPath, FileMode.Append, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough);
+                using var fs = StorageStreamFactory.OpenAppend(binPath);
                 using var bw = new BinaryWriter(fs);
 
                 foreach (var log in logs)
@@ -616,7 +615,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 }
 
                 bw.Flush();
-                fs.Flush(true);
+                fs.Flush();
             }
             catch (Exception ex)
             {
@@ -631,12 +630,13 @@ namespace OnlineMongoMigrationProcessor.Persistence
             var logBucket = new LogBucket { Logs = new List<LogObject>() };
             var offsets = new List<long>();
 
-            if (!File.Exists(binPath))
+            if (!StorageStreamFactory.Exists(binPath))
                 return logBucket;
 
             try
             {
-                using var fs = new FileStream(binPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var fs = StorageStreamFactory.OpenReadShared(binPath);
+                if (fs == null) return logBucket;
                 using var br = new BinaryReader(fs);
 
                 // First pass: collect offsets of valid log entries
@@ -763,7 +763,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             if (string.IsNullOrEmpty(sourceFilePath))
                 throw new ArgumentException("Source file path cannot be null or empty.", nameof(sourceFilePath));
 
-            if (!File.Exists(sourceFilePath))
+            if (!StorageStreamFactory.Exists(sourceFilePath))
                 throw new FileNotFoundException("Source file not found.", sourceFilePath);
 
             string directory = Path.GetDirectoryName(sourceFilePath) ?? string.Empty;
@@ -773,9 +773,9 @@ namespace OnlineMongoMigrationProcessor.Persistence
             string newFileName = $"{fileNameWithoutExtension}_{timestamp}{extension}";
             string newFilePath = Path.Combine(directory, newFileName);
 
-            if (!File.Exists(newFilePath))
+            if (!StorageStreamFactory.Exists(newFilePath))
             {
-                File.Copy(sourceFilePath, newFilePath);
+                StorageStreamFactory.CopyFile(sourceFilePath, newFilePath);
             }
 
             return newFileName;
@@ -799,9 +799,9 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 var folder = Path.Combine(_storagePath!, "migrationlogs");
                 var binPath = Path.Combine(folder, $"{jobId}.bin");
 
-                if (File.Exists(binPath))
+                if (StorageStreamFactory.Exists(binPath))
                 {
-                    File.Delete(binPath);
+                    StorageStreamFactory.DeleteIfExists(binPath);
                     Helper.LogToFile($"[DiskPersistence] Deleted log file for job {jobId}", "DiskPersistence.txt");
                     return 1;
                 }

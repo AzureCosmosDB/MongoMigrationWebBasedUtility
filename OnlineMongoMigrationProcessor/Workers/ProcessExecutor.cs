@@ -129,25 +129,21 @@ namespace OnlineMongoMigrationProcessor.Workers
                 }
 
                 // -------------------------
-                // Dump => write stdout -> file
-                // Restore => read file -> stdin
+                // Dump => write stdout -> file/blob
+                // Restore => read file/blob -> stdin
                 // -------------------------
                 if (processType == "MongoDump")
                 {
-                    using var fileStream = new FileStream(
-                        outputFilePath, FileMode.Create, FileAccess.Write, FileShare.None,
-                        bufferSize: 81920, useAsync: true);
+                    using var stream = StorageStreamFactory.OpenWriteAsync(outputFilePath, cancellationToken).GetAwaiter().GetResult();
 
-                    _process.StandardOutput.BaseStream.CopyToAsync(fileStream, cancellationToken).Wait(cancellationToken);
-                    fileStream.Flush();
+                    _process.StandardOutput.BaseStream.CopyToAsync(stream, cancellationToken).Wait(cancellationToken);
+                    stream.Flush();
                 }
                 else // MongoRestore
                 {
-                    using var fileStream = new FileStream(
-                        outputFilePath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                        bufferSize: 81920, useAsync: true);
+                    using var stream = StorageStreamFactory.OpenReadAsync(outputFilePath, cancellationToken).GetAwaiter().GetResult();
 
-                    fileStream.CopyToAsync(_process.StandardInput.BaseStream, cancellationToken).Wait(cancellationToken);
+                    stream.CopyToAsync(_process.StandardInput.BaseStream, cancellationToken).Wait(cancellationToken);
                     _process.StandardInput.Close(); // signal EOF to mongo restore
                 }
 

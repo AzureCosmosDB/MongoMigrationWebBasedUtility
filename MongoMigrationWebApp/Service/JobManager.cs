@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using OnlineMongoMigrationProcessor;
+using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Models;
 using OnlineMongoMigrationProcessor.Workers;
 using OnlineMongoMigrationProcessor.Context;
@@ -197,8 +198,7 @@ namespace MongoMigrationWebApp.Service
                     //clearing  dumped files
 
                     string dumpPath = Path.Combine(Helper.GetWorkingFolder(), "mongodump", jobId);
-                    if (System.IO.Directory.Exists(dumpPath))
-                        System.IO.Directory.Delete(dumpPath, true);
+                    StorageStreamFactory.DeleteDirectory(dumpPath, true);
 
                 });
             }

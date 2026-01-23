@@ -81,12 +81,15 @@ namespace OnlineMongoMigrationProcessor.Persistence
                         _database.CreateCollectionAsync(LOG_Collection).GetAwaiter().GetResult();
                         Helper.LogToFile($"{LOG_Collection} collection created, elapsed: {sw.ElapsedMilliseconds}ms");
                         
-                        // Create ascending index on JobId for logfiles collection
-                        Helper.LogToFile($"Creating index on JobId, elapsed: {sw.ElapsedMilliseconds}ms");
-                        var indexKeysDefinition = Builders<BsonDocument>.IndexKeys.Ascending("JobId");
+                        // Create composite index on JobId and _id to optimize ReadLogs queries
+                        // ReadLogs filters by JobId and sorts by _id
+                        Helper.LogToFile($"Creating composite index on JobId and _id, elapsed: {sw.ElapsedMilliseconds}ms");
+                        var indexKeysDefinition = Builders<BsonDocument>.IndexKeys
+                            .Ascending("JobId")
+                            .Ascending("_id");
                         var indexModel = new CreateIndexModel<BsonDocument>(indexKeysDefinition);
                         _logCollection.Indexes.CreateOne(indexModel);
-                        Helper.LogToFile($"Index created, elapsed: {sw.ElapsedMilliseconds}ms");
+                        Helper.LogToFile($"Composite index created, elapsed: {sw.ElapsedMilliseconds}ms");
                     }
 
                     _appId = appId;

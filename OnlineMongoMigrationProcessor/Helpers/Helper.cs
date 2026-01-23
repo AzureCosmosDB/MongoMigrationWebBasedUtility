@@ -2,6 +2,7 @@
 using MongoDB.Driver;
 using Newtonsoft.Json;
 using OnlineMongoMigrationProcessor.Context;
+using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Helpers.Mongo;
 using OnlineMongoMigrationProcessor.Models;
 using SharpCompress.Common;
@@ -84,6 +85,14 @@ namespace OnlineMongoMigrationProcessor
             
             freeSpaceGB = 0;
             folderSizeInGB = 0;
+
+            // When using Azure Blob Storage with Entra ID, skip disk space check
+            // as blob storage has virtually unlimited capacity
+            if (StorageStreamFactory.UseBlobStorage)
+            {
+                freeSpaceGB = double.MaxValue;
+                return true;
+            }
 
             if (!Directory.Exists(directoryPath)) 
             {
@@ -277,10 +286,20 @@ namespace OnlineMongoMigrationProcessor
         {
             try
             {
-                string path = path = Path.Combine(Helper.GetWorkingFolder(),striFileName);
+                string path = Path.Combine(Helper.GetWorkingFolder(), striFileName);
                 string timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff");
                 string logEntry = $"[{timestamp} UTC] {message}{Environment.NewLine}";
-                System.IO.File.AppendAllText(path, logEntry);
+                
+                if (StorageStreamFactory.UseBlobStorage)
+                {
+                    // Append to Blob Storage
+                    StorageStreamFactory.AppendText(path, logEntry);
+                }
+                else
+                {
+                    // Append to local file
+                    System.IO.File.AppendAllText(path, logEntry);
+                }
             }
             catch
             {
@@ -303,8 +322,12 @@ namespace OnlineMongoMigrationProcessor
             {
                 _workingFolder = $"{Environment.GetEnvironmentVariable("ResourceDrive")}/{MigrationJobContext.AppId}/";
 
-                if (!System.IO.Directory.Exists(_workingFolder))
-                    System.IO.Directory.CreateDirectory(_workingFolder);
+                // Only create local directory if not using Blob Storage
+                if (!StorageStreamFactory.UseBlobStorage)
+                {
+                    if (!System.IO.Directory.Exists(_workingFolder))
+                        System.IO.Directory.CreateDirectory(_workingFolder);
+                }
 
                 return _workingFolder;
             }
@@ -489,14 +512,14 @@ namespace OnlineMongoMigrationProcessor
             return unitsToAdd;
         }
 
-        public static bool CreateFolderIfNotExists(string folderPath)
-        {
-            if (!Directory.Exists(folderPath))
-            {
-                Directory.CreateDirectory(folderPath);
-            }
-            return true;
-        }
+        //public static bool CreateFolderIfNotExists(string folderPath)
+        //{
+        //    if (!Directory.Exists(folderPath))
+        //    {
+        //        Directory.CreateDirectory(folderPath);
+        //    }
+        //    return true;
+        //}
 
         public static bool  AddMigrationUnits(List<MigrationUnit> unitsToAdd, MigrationJob job, Log log=null)
         {
@@ -752,99 +775,99 @@ namespace OnlineMongoMigrationProcessor
             return sanitizedFileName;
         }
 
-        public static bool WriteAtomicFile(string filePath, string content, int maxRetries = 5)
-        {
-            string tempFile = filePath + ".tmp";
-            bool isNewFile = false;
-            if (!System.IO.File.Exists(filePath))
-            {
-                tempFile = filePath;
-                isNewFile = true;
-            }
+        //public static bool WriteAtomicFile(string filePath, string content, int maxRetries = 5)
+        //{
+        //    string tempFile = filePath + ".tmp";
+        //    bool isNewFile = false;
+        //    if (!System.IO.File.Exists(filePath))
+        //    {
+        //        tempFile = filePath;
+        //        isNewFile = true;
+        //    }
                         
 
-            //Log($"WriteAtomicFile: Writing to {filePath}");
+        //    //Log($"WriteAtomicFile: Writing to {filePath}");
 
-            // Write to temp file (fully flushed)
-            using (var fs = new FileStream(
-                tempFile,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                4096,
-                FileOptions.WriteThrough))
+        //    // Write to temp file (fully flushed)
+        //    using (var fs = new FileStream(
+        //        tempFile,
+        //        FileMode.Create,
+        //        FileAccess.Write,
+        //        FileShare.None,
+        //        4096,
+        //        FileOptions.WriteThrough))
 
-            using (var sw = new StreamWriter(fs))
-            {
-                sw.Write(content);
-                sw.Flush();
-                fs.Flush(true);
-            }
+        //    using (var sw = new StreamWriter(fs))
+        //    {
+        //        sw.Write(content);
+        //        sw.Flush();
+        //        fs.Flush(true);
+        //    }
 
-            //Log($"Flush complete {filePath}");
+        //    //Log($"Flush complete {filePath}");
 
-            if (isNewFile)
-            {
-                return true;
-            }
+        //    if (isNewFile)
+        //    {
+        //        return true;
+        //    }
 
-            int attempt = 0;
+        //    int attempt = 0;
 
-            while (attempt < maxRetries)
-            {
-                try
-                {
-                    string backupFile = $"{filePath}.backup";
+        //    while (attempt < maxRetries)
+        //    {
+        //        try
+        //        {
+        //            string backupFile = $"{filePath}.backup";
 
-                    // If original exists → back it up
-                    if (File.Exists(filePath))
-                    {
-                        SafeDelete(backupFile);
-                        SafeMove(filePath, backupFile);
-                    }
+        //            // If original exists → back it up
+        //            if (File.Exists(filePath))
+        //            {
+        //                SafeDelete(backupFile);
+        //                SafeMove(filePath, backupFile);
+        //            }
 
-                    // Move new file into place
-                    SafeMove(tempFile, filePath);
+        //            // Move new file into place
+        //            SafeMove(tempFile, filePath);
 
-                    // Cleanup backup (best effort)
-                    SafeDelete(backupFile);
+        //            // Cleanup backup (best effort)
+        //            SafeDelete(backupFile);
 
-                    return true; // DONE
-                }
-                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
-                {
-                    attempt++;
+        //            return true; // DONE
+        //        }
+        //        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+        //        {
+        //            attempt++;
 
 
-                    if (attempt >= maxRetries)
-                    {
-                        SafeDelete(tempFile);
-                        throw new IOException(
-                            $"Failed to write atomic file '{filePath}' after {maxRetries} attempts.",
-                            ex);
-                    }
+        //            if (attempt >= maxRetries)
+        //            {
+        //                SafeDelete(tempFile);
+        //                throw new IOException(
+        //                    $"Failed to write atomic file '{filePath}' after {maxRetries} attempts.",
+        //                    ex);
+        //            }
 
-                    Thread.Sleep(1000);
-                }
-            }
+        //            Thread.Sleep(1000);
+        //        }
+        //    }
 
-            return false;
-        }
+        //    return false;
+        //}
 
-        private static void SafeDelete(string path)
-        {
-            try
-            {
-                if (File.Exists(path))
-                    File.Delete(path);
-            }
-            catch { }
-        }
+        //private static void SafeDelete(string path)
+        //{
+        //    try
+        //    {
+        //        if (File.Exists(path))
+        //            File.Delete(path);
+        //    }
+        //    catch { }
+        //}
 
-        private static void SafeMove(string src, string dest)
-        {
-            File.Move(src, dest); // keep exceptions — this is the "atomic" part
-        }
+        //private static void SafeMove(string src, string dest)
+        //{
+        //    File.Move(src, dest); // keep exceptions — this is the "atomic" part
+        //}
 
 
         public static string GenerateMigrationUnitId(string databaseName, string collectionName)

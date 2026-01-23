@@ -42,6 +42,9 @@ param aspNetCoreEnvironment string = 'Development'
 @description('Optional: Resource ID of the subnet for VNet integration (e.g., /subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name})')
 param infrastructureSubnetResourceId string = ''
 
+@description('Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When true, UseBlobServiceClient env var is set and no volume is mounted.')
+param useEntraIdForStorage bool = false
+
 // Variables for dynamic workload profile selection
 var workloadProfileType = vCores <= 4 ? 'D4' : vCores <= 8 ? 'D8' : vCores <= 16 ? 'D16' : 'D32'
 var workloadProfileName = 'Dedicated'
@@ -94,14 +97,16 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
     allowBlobPublicAccess: false
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
+    // Disable shared key access when using Entra ID - required by some org policies
+    allowSharedKeyAccess: !useEntraIdForStorage
   }
   tags: {
     owner: ownerTag
   }
 }
 
-// File Share for migration data (100GB)
-resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
+// File Share for migration data (100GB) - only needed when NOT using Entra ID
+resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = if (!useEntraIdForStorage) {
   name: '${storageAccount.name}/default/migration-data'
   properties: {
     shareQuota: 100
@@ -140,8 +145,8 @@ resource containerAppEnvironment 'Microsoft.App/managedEnvironments@2023-05-01' 
   )
 }
 
-// Storage configuration for Container Apps Environment
-resource storageConfiguration 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
+// Storage configuration for Container Apps Environment (only when not using Entra ID)
+resource storageConfiguration 'Microsoft.App/managedEnvironments/storages@2023-05-01' = if (!useEntraIdForStorage) {
   parent: containerAppEnvironment
   name: 'migration-storage'
   properties: {
@@ -151,6 +156,17 @@ resource storageConfiguration 'Microsoft.App/managedEnvironments/storages@2023-0
       shareName: 'migration-data'
       accessMode: 'ReadWrite'
     }
+  }
+}
+
+// Role assignment for Managed Identity to access Blob Storage (only when using Entra ID)
+resource storageBlobDataContributorRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (useEntraIdForStorage) {
+  name: guid(storageAccount.id, managedIdentity.id, 'storageBlobDataContributor')
+  scope: storageAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe') // Storage Blob Data Contributor
+    principalId: managedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -204,7 +220,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             cpu: vCores
             memory: '${memoryGB}Gi'
           }
-          volumeMounts: [
+          volumeMounts: useEntraIdForStorage ? [] : [
             {
               volumeName: 'migration-data-volume'
               mountPath: '/app/migration-data'
@@ -231,6 +247,23 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             {
               name: 'StateStoreConnectionStringOrPath'
               secretRef: 'statestore-connection'
+            }
+          ] : [], useEntraIdForStorage ? [
+            {
+              name: 'UseBlobServiceClient'
+              value: 'true'
+            }
+            {
+              name: 'BlobServiceClientURI'
+              value: 'https://${storageAccount.name}.blob.${environment().suffixes.storage}'
+            }
+            {
+              name: 'BlobContainerName'
+              value: 'migration-data'
+            }
+            {
+              name: 'AZURE_CLIENT_ID'
+              value: managedIdentity.properties.clientId
             }
           ] : [])
           probes: [
@@ -276,7 +309,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           ]
         }
       ]
-      volumes: [
+      volumes: useEntraIdForStorage ? [] : [
         {
           name: 'migration-data-volume'
           storageType: 'AzureFile'
@@ -289,7 +322,9 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       }
     }
   }
-  dependsOn: [
+  dependsOn: useEntraIdForStorage ? [
+    storageBlobDataContributorRole
+  ] : [
     storageConfiguration
   ]
 }
@@ -313,8 +348,14 @@ output managedIdentityClientId string = managedIdentity.properties.clientId
 @description('Storage Account Name for migration data')
 output storageAccountName string = storageAccount.name
 
-@description('File Share Name for migration data')
+@description('File Share Name for migration data (only when not using Entra ID)')
 output fileShareName string = 'migration-data'
 
 @description('Resource Drive Mount Path in container')
 output resourceDrivePath string = '/app/migration-data'
+
+@description('Storage mode: MountedAzureFiles or EntraIdBlobStorage')
+output storageMode string = useEntraIdForStorage ? 'EntraIdBlobStorage' : 'MountedAzureFiles'
+
+@description('Blob Service URI (only when using Entra ID)')
+output blobServiceUri string = useEntraIdForStorage ? 'https://${storageAccount.name}.blob.${environment().suffixes.storage}' : ''
