@@ -31,7 +31,6 @@ namespace OnlineMongoMigrationProcessor.Processors
     {
 
         // RU-specific configuration
-        private static int MaxConcurrentPartitions => Math.Max(20,Environment.ProcessorCount * 5);
         private static readonly TimeSpan BatchDuration = TimeSpan.FromSeconds(60);
         private static readonly object _processingLock = new object();
         private readonly ParallelWriteHelper _parallelWriteHelper;
@@ -64,10 +63,12 @@ namespace OnlineMongoMigrationProcessor.Processors
                 // Check for cancellation
                 if (_cts.Token.IsCancellationRequested)
                     return TaskResult.Canceled;
+
+                int maxConcurrentPartitions = MigrationJobContext.CurrentlyActiveJob?.ParallelThreads ?? Environment.ProcessorCount * 5;
   
                 var chunksToProcess = mu.MigrationChunks
                     .Where(s => s.IsUploaded == false)
-                    .Take(MaxConcurrentPartitions)
+                    .Take(maxConcurrentPartitions)
                     .ToList();
 
                 // If no chunks to process, break the loop
@@ -80,7 +81,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                 if (_cts.Token.IsCancellationRequested)
                     return TaskResult.Canceled;
 
-                SemaphoreSlim semaphore = new SemaphoreSlim(MaxConcurrentPartitions);
+                SemaphoreSlim semaphore = new SemaphoreSlim(maxConcurrentPartitions);
                 List<Task<TaskResult>> tasks = new List<Task<TaskResult>>();
                 
                 foreach (var chunk in chunksToProcess)

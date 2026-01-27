@@ -118,7 +118,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 				int segmentIndex = 0;
                 errors = new ConcurrentBag<Exception>();
                 mu.MigrationChunks[migrationChunkIndex].RestoredFailedDocCount = 0;
-                SemaphoreSlim semaphore = new SemaphoreSlim(Environment.ProcessorCount * 5);
+                int parallelThreads = MigrationJobContext.CurrentlyActiveJob?.ParallelThreads ?? Environment.ProcessorCount * 5;
+                SemaphoreSlim semaphore = new SemaphoreSlim(parallelThreads);
 
                 foreach (var segment in mu.MigrationChunks[migrationChunkIndex].Segments)
                 {
