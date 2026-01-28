@@ -190,8 +190,15 @@
                                 <input type="number" id="maxInsertionWorkers" class="form-control" @bind="maxInsertionWorkers" min="1" max="16" placeholder="@($"Auto ({defaultInsertionWorkers})")" disabled="@(!NewMode)" />
                             </div>
                         </div>
-                    }
-                </div>
+                    }                    @if (jobType == JobType.MongoDriver || jobType == JobType.RUOptimizedCopy)
+                    {
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="parallelThreads" class="form-label" title="Number of parallel threads for document copy operations. Default = ProcessorCount * 5.">Max degree of parallelism</label>
+                                <input type="number" id="parallelThreads" class="form-control" @bind="parallelThreads" min="1" max="500" placeholder="@($"Default ({defaultParallelThreads})")"/>
+                            </div>
+                        </div>
+                    }                </div>
 
                 @if(ShowWarning())
                 {
@@ -259,6 +266,8 @@
     private int defaultDumpWorkers = 1; // Default calculated dump workers
     private int defaultRestoreWorkers = 1; // Default calculated restore workers
     private int defaultInsertionWorkers = 1; // Default calculated insertion workers
+    private int? parallelThreads = null; // Parallel threads for MongoDB Driver document copy
+    private int defaultParallelThreads = Environment.ProcessorCount * 5; // Default parallel threads
     private LogType logLevel = LogType.Info; // Minimum log level
     private string namespaces = string.Empty;   // Comma-separated list of namespaces to migrate
     private string name = string.Empty; // Name of the migration job
@@ -451,6 +460,7 @@
             maxDumpWorkers = null;
             maxRestoreWorkers = null;
             maxInsertionWorkers = null;
+            parallelThreads = null; // Default will be calculated
             CalculateDefaultWorkerCounts(); // Calculate defaults on initialization
             logLevel = LogType.Info; // Default to Info
             changeStreamMode = ChangeStreamMode.Delayed;
@@ -486,6 +496,7 @@
             maxDumpWorkers = Job?.MaxParallelDumpProcesses;
             maxRestoreWorkers = Job?.MaxParallelRestoreProcesses;
             maxInsertionWorkers = Job?.MaxInsertionWorkersPerCollection;
+            parallelThreads = Job?.ParallelThreads == defaultParallelThreads ? null : Job?.ParallelThreads; // Show null if default
             CalculateDefaultWorkerCounts(); // Calculate defaults for display
             logLevel = Job?.LogLevel ?? LogType.Info;
             changeStreamLevel = Job?.ChangeStreamLevel ?? ChangeStreamLevel.Collection;
@@ -625,6 +636,7 @@
             CurrentDumpWorkers = maxDumpWorkers ?? defaultDumpWorkers,
             CurrentRestoreWorkers = maxRestoreWorkers ?? defaultRestoreWorkers,
             CurrentInsertionWorkers = maxInsertionWorkers ?? defaultInsertionWorkers,
+            ParallelThreads = parallelThreads ?? defaultParallelThreads,
             SyncBackEnabled = (enableSyncBack && cdcMode != CDCMode.Offline && !isSimulatedRun) ? true : false,
             ChangeStreamMode = changeStreamMode,
             ChangeStreamLevel = changeStreamLevel,

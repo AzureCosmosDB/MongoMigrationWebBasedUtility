@@ -93,6 +93,12 @@ namespace OnlineMongoMigrationProcessor
         /// </summary>
         public int CurrentInsertionWorkers { get; set; }
         
+        /// <summary>
+        /// Number of parallel threads for MongoDB Driver document copy operations. 
+        /// Controls the SemaphoreSlim concurrency limit. Default = Environment.ProcessorCount * 5.
+        /// </summary>
+        public int ParallelThreads { get; set; } = Environment.ProcessorCount * 5;
+        
         // Global resume token properties for server-level change streams (Forward sync)
         public string? ResumeToken { get; set; }
         public string? OriginalResumeToken { get; set; }
