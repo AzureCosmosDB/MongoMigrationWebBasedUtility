@@ -113,9 +113,9 @@ namespace OnlineMongoMigrationProcessor
         private class MigrationUnitTracker
         {
             public string MigrationUnitId { get; set; } = null!;
-            public int TotalChunks { get; set; }
-            public int DownloadedChunks { get; set; }
-            public int RestoredChunks { get; set; }
+            public int TotalChunks;  // Field instead of property for Interlocked.Add support
+            public int DownloadedChunks;  // Field instead of property for Interlocked.Add support
+            public int RestoredChunks;  // Field instead of property for Interlocked.Add support
             public DateTime AddedAt { get; set; }
             public bool AllDownloadsCompleted => DownloadedChunks >= TotalChunks;
             public bool AllRestoresCompleted => RestoredChunks >= TotalChunks;
@@ -1357,9 +1357,10 @@ namespace OnlineMongoMigrationProcessor
                     int addedChunks = ReplaceChunkWithSubChunks(mu, chunkIndex, subChunks);
 
                     // Update the tracker's TotalChunks to account for newly added sub-chunks
+                    // Use Interlocked for thread-safe update since multiple chunks may be processed in parallel
                     if (addedChunks > 0 && _activeMigrationUnits.TryGetValue(mu.Id, out var tracker))
                     {
-                        tracker.TotalChunks += addedChunks;
+                        Interlocked.Add(ref tracker.TotalChunks, addedChunks);
                         _log?.WriteLine($"Updated tracker TotalChunks to {tracker.TotalChunks} for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
                     }
 
@@ -1395,6 +1396,20 @@ namespace OnlineMongoMigrationProcessor
                     );
 
                     docCount = retrySuccess ? retryCount : 0;
+
+                    // Validate that the split actually reduced the count for the first sub-chunk
+                    // Calculate max docs per chunk: (EstimatedDocCount / ChunkCount) * 3, capped at 25M
+                    long maxDocsPerChunk = Math.Min((mu.EstimatedDocCount / mu.MigrationChunks.Count) * 3, 25000000);
+                    if (retrySuccess && retryCount > maxDocsPerChunk)
+                    {
+                        _log?.WriteLine($"First sub-chunk still has {retryCount} docs (max allowed: {maxDocsPerChunk}). Recursively splitting again.", LogType.Warning);
+                        // Recursively split the first sub-chunk again
+                        var recursiveResult = await HandleCountTimeoutWithChunkSplitAsync(mu, chunkIndex, sourceCollection, userFilterDoc, sourceConnectionString, targetConnectionString, false);
+                        docCount = recursiveResult.docCount;
+                        gte = recursiveResult.gte;
+                        lt = recursiveResult.lt;
+                        query = recursiveResult.query;
+                    }
                 }
                 else
                 {
@@ -1454,7 +1469,9 @@ namespace OnlineMongoMigrationProcessor
             );
 
             // Handle timeout by splitting chunk if needed
-            if (!countSuccess || docCount > 25000000)
+            // Calculate max docs per chunk: (EstimatedDocCount / ChunkCount) * 3, capped at 25M
+            long maxDocsPerChunk = Math.Min((mu.EstimatedDocCount / mu.MigrationChunks.Count) * 3, 25000000);
+            if (!countSuccess || docCount > maxDocsPerChunk)
             {
                 var result = await HandleCountTimeoutWithChunkSplitAsync(mu, chunkIndex, sourceCollection, userFilterDoc, sourceConnectionString, targetConnectionString,!countSuccess);
                 docCount = result.docCount;
@@ -2081,8 +2098,11 @@ namespace OnlineMongoMigrationProcessor
             {
                 if (_activeMigrationUnits.TryGetValue(muId, out var tracker))
                 {
-                    tracker.DownloadedChunks += downloadIncrement;
-                    tracker.RestoredChunks += restoreIncrement;
+                    // Use Interlocked for thread-safe updates since multiple chunks may complete in parallel
+                    if (downloadIncrement != 0)
+                        Interlocked.Add(ref tracker.DownloadedChunks, downloadIncrement);
+                    if (restoreIncrement != 0)
+                        Interlocked.Add(ref tracker.RestoredChunks, restoreIncrement);
 
                     // Note: MigrationUnit doesn't have DownloadPercent/RestorePercent properties
                     // Progress tracking is handled through tracker object

@@ -24,7 +24,8 @@ namespace OnlineMongoMigrationProcessor.Workers
         private MongoClient _targetClient;
         private IMongoCollection<BsonDocument> _sourceCollection;
         private IMongoCollection<BsonDocument> _targetCollection;
-        private int _pageSize = 500;
+        private int _pageSize = 5000; // Increased from 500 for better throughput
+        private int _saveProgressEveryNPages = 20; // Reduce disk I/O by batching saves
         private long _successCount = 0;
         private long _failureCount = 0;
         private long _skippedCount = 0;
@@ -223,62 +224,45 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
 
             segment.QueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, combinedFilter,null);
-            MigrationJobContext.SaveMigrationUnit(mu,false);
+            // Don't save immediately - reduces I/O overhead
 
-            var querySuccess = false;
             try
             {
                 bool failed = false;
-                int pageIndex = 0;
-                List<BsonDocument> set = new List<BsonDocument>();
+                segment.ResultDocCount = 0;
+
+                // Use cursor-based processing instead of skip/limit pagination
+                TaskResult result = await new RetryHelper().ExecuteTask(
+                    () => ProcessSegmentWithCursorAsync(segment, combinedFilter, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, errors, cancellationToken, isWriteSimulated, segmentId),
+                    (ex, attemptCount, currentBackoff) => ProcessSegmentExceptionHandler(
+                        ex, attemptCount,
+                        $"Processing segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]", currentBackoff
+                    ),
+                    _log
+                );
+
+                if (result == TaskResult.Canceled)
+                {
+                    return TaskResult.Canceled;
+                }
                 
+                failed = (result != TaskResult.Success);                
 
-                segment.ResultDocCount =0;
-
-                while (!cancellationToken.IsCancellationRequested)
+                if (failed)
                 {
-                    TaskResult result = await new RetryHelper().ExecuteTask(
-                           () => ProcessSegmentPageAsync(segment, combinedFilter, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, errors, cancellationToken, isWriteSimulated, segmentId, pageIndex),
-                           (ex, attemptCount, currentBackoff) => ProcessSegmentExceptionHandler(
-                               ex, attemptCount,
-                               $"Processing segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}], Page {pageIndex}", currentBackoff
-                           ),
-                           _log
-                       );
-
-                    if(result== TaskResult.Success)
-                    {
-                        break; //completed all pages
-                    }
-
-                    if (result != TaskResult.HasMore)
-                    {
-                        failed = true;
-                        break;
-                    }
-                    pageIndex++;
-                }                
-
-                if (!cancellationToken.IsCancellationRequested)
+                    _log.WriteLine($"Document copy failed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}].", LogType.Warning);
+                }
+                else if (_failureCount > 0 || _skippedCount > 0)
                 {
-                    if (failed)
-                    {
-                        _log.WriteLine($"Document copy failed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}].", LogType.Warning);
-                    }
-                    else if (_failureCount > 0 || _skippedCount > 0)
-                    {
-                        _log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied, {_skippedCount} documents skipped(duplicate), {_failureCount} documents failed.");
-                    }
-                    else
-                    {
-                        _log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied.", LogType.Debug);
-                    }
-                    segment.IsProcessed = !failed;
-                    MigrationJobContext.SaveMigrationUnit(mu,false);
-                    return TaskResult.Success;
+                    _log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied, {_skippedCount} documents skipped(duplicate), {_failureCount} documents failed.");
                 }
                 else
-                    return TaskResult.Canceled;
+                {
+                    _log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied.", LogType.Debug);
+                }
+                segment.IsProcessed = !failed;
+                MigrationJobContext.SaveMigrationUnit(mu, false);
+                return failed ? TaskResult.Retry : TaskResult.Success;
             }
             catch (Exception ex) when (!(ex is OperationCanceledException))
             {
@@ -295,6 +279,143 @@ namespace OnlineMongoMigrationProcessor.Workers
         }
 
 
+        /// <summary>
+        /// Process entire segment using cursor-based iteration (no skip/limit).
+        /// This is much faster than skip/limit pagination for large datasets.
+        /// </summary>
+        private async Task<TaskResult> ProcessSegmentWithCursorAsync(
+            Segment segment,
+            FilterDefinition<BsonDocument> combinedFilter,
+            MigrationUnit mu,
+            int migrationChunkIndex,
+            double basePercent,
+            double contribFactor,
+            long targetCount,
+            ConcurrentBag<Exception> errors,
+            CancellationToken cancellationToken,
+            bool isWriteSimulated,
+            string segmentId)
+        {
+            var querySuccess = false;
+            int batchCount = 0;
+            List<BsonDocument> batch = new List<BsonDocument>(_pageSize);
+
+            try
+            {
+                // Use Find with cursor - much faster than Aggregate + Skip/Limit
+                var findOptions = new FindOptions<BsonDocument>
+                {
+                    BatchSize = _pageSize,
+                    NoCursorTimeout = true
+                };
+
+                using var cursor = await _sourceCollection.FindAsync(combinedFilter, findOptions, cancellationToken);
+                querySuccess = true;
+
+                while (await cursor.MoveNextAsync(cancellationToken))
+                {
+                    foreach (var doc in cursor.Current)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                            return TaskResult.Canceled;
+
+                        batch.Add(doc);
+
+                        if (batch.Count >= _pageSize)
+                        {
+                            var writeResult = await WriteBatchAsync(batch, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                            if (writeResult == TaskResult.Canceled)
+                                return TaskResult.Canceled;
+
+                            batch.Clear();
+                            batchCount++;
+
+                            // Update progress less frequently to reduce I/O
+                            if (batchCount % _saveProgressEveryNPages == 0)
+                            {
+                                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
+                            }
+                        }
+                    }
+                }
+
+                // Process remaining documents
+                if (batch.Count > 0)
+                {
+                    var writeResult = await WriteBatchAsync(batch, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                    if (writeResult == TaskResult.Canceled)
+                        return TaskResult.Canceled;
+                }
+
+                // Final progress update
+                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
+                return TaskResult.Success;
+            }
+            catch (MongoBulkWriteException<BsonDocument> ex)
+            {
+                HandleBulkWriteException(ex, segment, mu, migrationChunkIndex, segmentId);
+                return TaskResult.HasMore;
+            }
+            catch (OutOfMemoryException ex)
+            {
+                _log.WriteLine(
+                    $"Encountered Out Of Memory exception for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. Try reducing _pageSize. Details: {ex}",
+                    LogType.Error);
+                return TaskResult.Retry;
+            }
+            catch (Exception ex) when (ex.ToString().Contains("canceled."))
+            {
+                _log.WriteLine($"Document copy operation for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] was canceled.");
+                return TaskResult.Canceled;
+            }
+            catch (Exception ex)
+            {
+                if (!querySuccess)
+                {
+                    _log.WriteLine($"Error in fetching documents for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] during command execution.", LogType.Warning);
+                    return TaskResult.Retry;
+                }
+                errors.Add(ex);
+                _log.WriteLine(
+                    $"Batch processing error encountered during document copy of segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. Details: {ex}.",
+                    LogType.Error);
+                return TaskResult.Retry;
+            }
+        }
+
+        private async Task<TaskResult> WriteBatchAsync(
+            List<BsonDocument> batch,
+            Segment segment,
+            MigrationUnit mu,
+            int migrationChunkIndex,
+            string segmentId,
+            bool isWriteSimulated,
+            ConcurrentBag<Exception> errors,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (!isWriteSimulated)
+                {
+                    var writeResult = await WriteDocumentsToTarget(batch, segment, cancellationToken);
+                    if (writeResult == TaskResult.Canceled)
+                        return TaskResult.Canceled;
+                }
+                else
+                {
+                    Interlocked.Add(ref _successCount, batch.Count);
+                }
+                return TaskResult.Success;
+            }
+            catch (MongoBulkWriteException<BsonDocument> ex)
+            {
+                HandleBulkWriteException(ex, segment, mu, migrationChunkIndex, segmentId);
+                return TaskResult.Success; // Continue processing
+            }
+        }
+
+        // Keep legacy method for backward compatibility but mark as obsolete
+        [Obsolete("Use ProcessSegmentWithCursorAsync instead for better performance")]
         private async Task<TaskResult> ProcessSegmentPageAsync(Segment segment,
             FilterDefinition<BsonDocument> combinedFilter,
             MigrationUnit mu,
