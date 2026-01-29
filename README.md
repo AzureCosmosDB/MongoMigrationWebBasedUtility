@@ -348,8 +348,8 @@ These settings are persisted per app instance and affect all jobs:
 
 - ObjectId Partitioner
     - Choose the partitioning method for ObjectId-based collections:
-      - **Use Sample Command**: Uses MongoDB's $sample command (best for small collections)
-      - **Use Time Boundaries**: Time-based boundaries using ObjectId timestamps (recommended for most workloads)
+      - **Use Sample Command**: Uses MongoDB's $sample command (recommended for most workloads)
+      - **Use Time Boundaries**: Time-based boundaries using ObjectId timestamps (recommended for well distributed objectId workloads)
       - **Use Adjusted Time Boundaries**: Time-based boundaries adjusted by actual record counts (best for balanced chunks)
       - **Use Pagination**: Pagination-based boundaries for equal-sized chunks (deterministic)
     - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for detailed explanations.

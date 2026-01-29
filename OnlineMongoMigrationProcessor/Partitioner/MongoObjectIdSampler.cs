@@ -116,11 +116,12 @@ namespace OnlineMongoMigrationProcessor.Partitioner
         /// Generates time-based equidistant ObjectIds, then validates and adjusts ranges to ensure 
         /// each range has 1K-1M records. Returns empty list if total records < 1K.
         /// </summary>
-        public async Task<List<BsonValue>> GenerateEquidistantObjectIdsAsync(int count, BsonDocument filter, MigrationSettings settings)
+        public async Task<List<BsonValue>> GenerateEquidistantObjectIdsAsync(int count, BsonDocument filter, MigrationSettings settings, long collectionTotalDocCount)
         {
-            MigrationJobContext.AddVerboseLog($"MongoObjectIdSampler.GenerateEquidistantObjectIdsAsync: count={count}, ObjectIdPartitioner={settings.ObjectIdPartitioner}");
+            MigrationJobContext.AddVerboseLog($"MongoObjectIdSampler.GenerateEquidistantObjectIdsAsync: count={count}, ObjectIdPartitioner={settings.ObjectIdPartitioner}, collectionTotalDocCount={collectionTotalDocCount}");
             const int MIN_RECORDS_PER_RANGE = 1000;
-            const int MAX_RECORDS_PER_RANGE = 25000000;
+            // Calculate max records per range: min of (CollectionTotalDocCount / 5) and 25M
+            int MAX_RECORDS_PER_RANGE = (int)Math.Min(collectionTotalDocCount / 5, 25000000);
 
             // Try to get total count with retry logic
             var (totalCount, countTimedOut) = await TryGetCountWithRetryAsync(filter);
@@ -354,13 +355,21 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                     int mergeEndIdx = idx;
                     
                     // Keep merging until we have enough records or run out of ranges
+                    // BUT stop if the next range is too large (it should be split separately)
                     while (mergeEndIdx < rangeStats.Count - 1 && mergedCount < minRecords)
                     {
+                        // Check if the next range is too large - if so, stop merging before it
+                        var nextRange = rangeStats[mergeEndIdx + 1];
+                        if (nextRange.count > maxRecords)
+                        {
+                            MigrationJobContext.AddVerboseLog($"ValidateAndAdjustRanges: Stopping merge before large range with {nextRange.count} docs");
+                            break;
+                        }
                         mergeEndIdx++;
                         mergedCount += rangeStats[mergeEndIdx].count;
                     }
                     
-                    // Add merged range
+                    // Add merged range boundary
                     if (adjustedBoundaries.Count == 0 || !adjustedBoundaries[adjustedBoundaries.Count - 1].Equals(currentRange.startId))
                     {
                         adjustedBoundaries.Add(currentRange.startId);
@@ -372,7 +381,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 // If range is too large, split it
                 else if (currentRange.count > maxRecords)
                 {
-                    var splitBoundaries = await SplitLargeRange(
+                    var splitBoundaries = await SplitLargeRangeRecursive(
                         currentRange.startId,
                         currentRange.endId,
                         currentRange.count,
@@ -395,6 +404,96 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             }
 
             return adjustedBoundaries;
+        }
+
+        /// <summary>
+        /// Splits a large range into smaller ranges with recursive validation.
+        /// After splitting, verifies the first sub-range is actually within limits.
+        /// If not, recursively splits again until the first chunk is small enough.
+        /// </summary>
+        private async Task<List<BsonValue>> SplitLargeRangeRecursive(
+            BsonValue startId,
+            BsonValue endId,
+            long recordCount,
+            BsonDocument filter,
+            int maxRecords,
+            CancellationToken cancellationToken,
+            int maxRecursionDepth = 10)
+        {
+            MigrationJobContext.AddVerboseLog($"MongoObjectIdSampler.SplitLargeRangeRecursive: recordCount={recordCount}, maxRecords={maxRecords}, maxRecursionDepth={maxRecursionDepth}");
+            
+            if (maxRecursionDepth <= 0)
+            {
+                MigrationJobContext.AddVerboseLog($"SplitLargeRangeRecursive: Max recursion depth reached, returning current boundaries");
+                return new List<BsonValue> { startId };
+            }
+
+            // Get initial split boundaries
+            var splitBoundaries = await SplitLargeRange(startId, endId, recordCount, filter, maxRecords, cancellationToken);
+            
+            if (splitBoundaries.Count < 2)
+            {
+                return splitBoundaries;
+            }
+
+            // Validate the first sub-range count
+            var firstRangeFilter = Builders<BsonDocument>.Filter.And(
+                filter,
+                Builders<BsonDocument>.Filter.Gte("_id", splitBoundaries[0]),
+                Builders<BsonDocument>.Filter.Lt("_id", splitBoundaries[1])
+            );
+            
+            var (firstRangeCount, timedOut) = await TryGetCountWithRetryAsync(firstRangeFilter);
+            
+            if (timedOut)
+            {
+                // If count timed out, assume it's still too large and split further
+                MigrationJobContext.AddVerboseLog($"SplitLargeRangeRecursive: First sub-range count timed out, recursively splitting");
+                long estimatedLargeCount = maxRecords * 10;
+                var recursiveSplit = await SplitLargeRangeRecursive(
+                    splitBoundaries[0],
+                    splitBoundaries[1],
+                    estimatedLargeCount,
+                    filter,
+                    maxRecords,
+                    cancellationToken,
+                    maxRecursionDepth - 1);
+                
+                // Replace first boundary with recursive results and keep the rest
+                var result = new List<BsonValue>();
+                result.AddRange(recursiveSplit);
+                for (int i = 1; i < splitBoundaries.Count; i++)
+                {
+                    result.Add(splitBoundaries[i]);
+                }
+                return result;
+            }
+            
+            // If first sub-range is still too large, recursively split it
+            if (firstRangeCount > maxRecords)
+            {
+                MigrationJobContext.AddVerboseLog($"SplitLargeRangeRecursive: First sub-range still has {firstRangeCount} docs (max: {maxRecords}), recursively splitting");
+                var recursiveSplit = await SplitLargeRangeRecursive(
+                    splitBoundaries[0],
+                    splitBoundaries[1],
+                    firstRangeCount,
+                    filter,
+                    maxRecords,
+                    cancellationToken,
+                    maxRecursionDepth - 1);
+                
+                // Replace first boundary with recursive results and keep the rest
+                var result = new List<BsonValue>();
+                result.AddRange(recursiveSplit);
+                for (int i = 1; i < splitBoundaries.Count; i++)
+                {
+                    result.Add(splitBoundaries[i]);
+                }
+                return result;
+            }
+            
+            MigrationJobContext.AddVerboseLog($"SplitLargeRangeRecursive: First sub-range has {firstRangeCount} docs, within limits");
+            return splitBoundaries;
         }
 
         /// <summary>
