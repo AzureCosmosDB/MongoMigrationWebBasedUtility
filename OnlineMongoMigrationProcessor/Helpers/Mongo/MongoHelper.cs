@@ -492,7 +492,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     var masterCommand = new BsonDocument("isMaster", 1);
                     var isMasterResult = await adminDatabase.RunCommandAsync<BsonDocument>(masterCommand);
 
-                    version = GetServerVersion(client);
+                    version = await GetServerVersionAsync(client).ConfigureAwait(false);
 
                     // Check if the server is part of a replica set or a sharded cluster
                     if (isMasterResult.Contains("setName") || isMasterResult.GetValue("msg", "").AsString == "isdbgrid")
@@ -540,14 +540,16 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         }
 
 
-        public static string GetServerVersion(MongoClient client)
+        public static async Task<string> GetServerVersionAsync(MongoClient client, int timeoutSeconds = 30)
         {
             // Check the server status to verify replica set or sharded cluster
             var adminDatabase = client.GetDatabase("admin");
 
             // Get Mongo Version
             var verCommand = new BsonDocument("buildInfo", 1);
-            var result = adminDatabase.RunCommandAsync<BsonDocument>(verCommand).GetAwaiter().GetResult();
+            
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var result = await adminDatabase.RunCommandAsync<BsonDocument>(verCommand, cancellationToken: cts.Token).ConfigureAwait(false);
                         
             string version = result["version"].AsString;
             return version;
