@@ -21,9 +21,25 @@ namespace OnlineMongoMigrationProcessor
 {
     public static class SamplePartitioner
     {
-        public static int MaxSegments = Math.Max(20,Environment.ProcessorCount * 5);
-        public static int MaxSamples = 2000;
 
+        public static int GetMaxSegments()
+        {
+            try
+            {
+                int maxConcurrentPartitions = MigrationJobContext.CurrentlyActiveJob?.ParallelThreads ?? Environment.ProcessorCount * 5;
+                int MaxSegments = Math.Max(20, maxConcurrentPartitions);
+                return MaxSegments;
+            }
+            catch
+            {
+                return 20;
+            }
+        }
+
+        public static int GetMaxSamples()
+        {
+            return 3000;
+        }
 
         /// <summary>
         /// Creates partitions based on sampled data from the collection.
@@ -44,10 +60,10 @@ namespace OnlineMongoMigrationProcessor
             BsonDocument? userFilter = null;
             userFilter = MongoHelper.GetFilterDoc(migrationUnit.UserFilter);
 
-            int adjustedMaxSamples=MaxSamples;
-            if (optimizeForObjectId && dataType == DataType.ObjectId)
+            int adjustedMaxSamples = GetMaxSamples();
+            if (optimizeForObjectId && dataType == DataType.ObjectId && config.ObjectIdPartitioner != PartitionerType.UseSampleCommand)
             {
-                adjustedMaxSamples = MaxSamples * 1000;
+                adjustedMaxSamples = GetMaxSamples() * 1000;
             }
 
             // Determine if we should skip DataType filtering
@@ -146,7 +162,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                     
 
-                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {adjustedMaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Error);
+                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {adjustedMaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Warning);
                     chunkCount = (int)newCount;
                 }
 
@@ -158,7 +174,7 @@ namespace OnlineMongoMigrationProcessor
                 // Calculate segments based on documents per chunk
                 segmentCount = Math.Min(
                     Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
-                    MaxSegments
+                    GetMaxSegments()
                 );
 
 
@@ -174,7 +190,7 @@ namespace OnlineMongoMigrationProcessor
                 // Optimize for non-dump scenarios
                 if (!optimizeForMongoDump)
                 {
-                    while (chunkCount > segmentCount && segmentCount < MaxSegments)
+                    while (chunkCount > segmentCount && segmentCount < GetMaxSegments())
                     {
                         chunkCount--;
                         segmentCount++;
@@ -281,12 +297,18 @@ namespace OnlineMongoMigrationProcessor
             }
 
 
-            var pipeline = new[]
+            var pipelineStages = new List<BsonDocument>();
+            
+            // Only add $match stage if matchCondition is not empty
+            if (matchCondition != null && matchCondition.ElementCount > 0)
             {
-                    new BsonDocument("$match", matchCondition),  // Add the match condition for the data type
-                    new BsonDocument("$sample", new BsonDocument("size", sampleCount)),
-                    new BsonDocument("$project", new BsonDocument("_id", 1)) // Keep only the _id key
-                };
+                pipelineStages.Add(new BsonDocument("$match", matchCondition));
+            }
+            
+            pipelineStages.Add(new BsonDocument("$sample", new BsonDocument("size", sampleCount)));
+            pipelineStages.Add(new BsonDocument("$project", new BsonDocument("_id", 1)));
+            
+            var pipeline = pipelineStages.ToArray();
 
             List<BsonValue> partitionValues = new List<BsonValue>();
             for (int i = 0; i < 10; i++)
