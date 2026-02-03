@@ -34,7 +34,23 @@ try
     var stateStoreCSorPath = Environment.GetEnvironmentVariable("StateStoreConnectionStringOrPath");
     if (!string.IsNullOrEmpty(stateStoreCSorPath))
     {
-        builder.Configuration["StateStore:ConnectionStringOrPath"] = stateStoreCSorPath;
+        // Check if the value is a file path and read the connection string from the file
+        string connectionString;
+        if (File.Exists(stateStoreCSorPath))
+        {
+            // Read connection string from file (single line text file)
+            connectionString = File.ReadAllText(stateStoreCSorPath).Trim();
+            if (string.IsNullOrEmpty(connectionString))
+            {
+                throw new Exception($"The file '{stateStoreCSorPath}' is empty. Expected a connection string.");
+            }
+        }
+        else
+        {
+            // Use the value directly as connection string
+            connectionString = stateStoreCSorPath;
+        }
+        builder.Configuration["StateStore:ConnectionStringOrPath"] = connectionString;
     }
     else
     {
