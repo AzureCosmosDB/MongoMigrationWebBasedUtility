@@ -36,13 +36,31 @@ try
     {
         // Check if the value is a file path and read the connection string from the file
         string connectionString;
-        if (File.Exists(stateStoreCSorPath))
+        
+        // Check if it looks like a file path (starts with / on Linux or contains path separators)
+        // and try to read it as a file. This handles symlinks and mounted secrets better than File.Exists alone.
+        bool isFilePath = stateStoreCSorPath.StartsWith("/") || 
+                          stateStoreCSorPath.StartsWith("\\") ||
+                          (stateStoreCSorPath.Length > 1 && stateStoreCSorPath[1] == ':');
+        
+        if (isFilePath)
         {
-            // Read connection string from file (single line text file)
-            connectionString = File.ReadAllText(stateStoreCSorPath).Trim();
-            if (string.IsNullOrEmpty(connectionString))
+            try
             {
-                throw new Exception($"The file '{stateStoreCSorPath}' is empty. Expected a connection string.");
+                // Attempt to read the file directly - this works better with symlinks and mounted volumes
+                connectionString = File.ReadAllText(stateStoreCSorPath).Trim();
+                if (string.IsNullOrEmpty(connectionString))
+                {
+                    throw new Exception($"The file '{stateStoreCSorPath}' is empty. Expected a connection string.");
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                 throw new Exception($"The file '{stateStoreCSorPath}' was not found. Expected a connection string or valid txt file path.");
+            }
+            catch (DirectoryNotFoundException)
+            {
+                 throw new Exception($"The file '{stateStoreCSorPath}' was not found. Expected a connection string or valid txt file path.");
             }
         }
         else
