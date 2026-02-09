@@ -3,6 +3,7 @@ using MongoDB.Driver;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using ZstdSharp.Unsafe;
@@ -28,6 +29,55 @@ namespace OnlineMongoMigrationProcessor.Persistence
         private const string LOG_Collection = "logfiles";
 
         /// <summary>
+        /// Resolves the connection string from a file path or returns it directly.
+        /// This handles Kubernetes secrets, HashiCorp Vault mounts, and other file-based secret injection.
+        /// </summary>
+        /// <param name="connectionStringOrPath">Connection string or path to a file containing the connection string</param>
+        /// <returns>The resolved connection string</returns>
+        /// <exception cref="InvalidOperationException">Thrown when the file cannot be read or is empty</exception>
+        private static string ResolveConnectionString(string connectionStringOrPath)
+        {
+            // Check if it looks like a file path (starts with / on Linux or contains path separators)
+            bool isFilePath = connectionStringOrPath.StartsWith("/") || 
+                              connectionStringOrPath.StartsWith("\\") ||
+                              (connectionStringOrPath.Length > 1 && connectionStringOrPath[1] == ':');
+
+            if (isFilePath)
+            {
+                try
+                {
+                    // Attempt to read the file directly - this works better with symlinks and mounted volumes
+                    var connectionString = File.ReadAllText(connectionStringOrPath).Trim();
+                    if (string.IsNullOrEmpty(connectionString))
+                    {
+                        throw new InvalidOperationException($"The file '{connectionStringOrPath}' is empty. Expected a connection string.");
+                    }
+                    Helper.LogToFile($"Connection string successfully read from file: {connectionStringOrPath}");
+                    return connectionString;
+                }
+                catch (FileNotFoundException)
+                {
+                    throw new InvalidOperationException($"The file '{connectionStringOrPath}' was not found. Expected a connection string or valid file path.");
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    throw new InvalidOperationException($"The directory for file '{connectionStringOrPath}' was not found. Expected a connection string or valid file path.");
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    throw new InvalidOperationException($"Access denied to file '{connectionStringOrPath}'. Check file permissions.");
+                }
+                catch (IOException ex)
+                {
+                    throw new InvalidOperationException($"Error reading file '{connectionStringOrPath}': {ex.Message}");
+                }
+            }
+
+            // Not a file path, return as-is
+            return connectionStringOrPath;
+        }
+
+        /// <summary>
         /// Initializes the MongoDB persistence layer with the provided connection string.
         /// This method is thread-safe and idempotent.
         /// </summary>
@@ -48,13 +98,16 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 if (string.IsNullOrWhiteSpace(connectionStringOrPath))
                     throw new ArgumentException("Connection string cannot be null or empty", nameof(connectionStringOrPath));
 
+                // Resolve connection string from file if it's a file path
+                string resolvedConnectionString = ResolveConnectionString(connectionStringOrPath);
+
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 Helper.LogToFile($"DocumentDBPersistence.Initialize starting");
                 
                 try
                 {
                     Helper.LogToFile($"Creating MongoClient, elapsed: {sw.ElapsedMilliseconds}ms");
-                    _client = new MongoClient(connectionStringOrPath);
+                    _client = new MongoClient(resolvedConnectionString);
                     Helper.LogToFile($"MongoClient created, elapsed: {sw.ElapsedMilliseconds}ms");
                     
                     Helper.LogToFile($"Getting database {DATABASE_NAME}, elapsed: {sw.ElapsedMilliseconds}ms");

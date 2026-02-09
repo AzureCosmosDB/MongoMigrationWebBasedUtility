@@ -82,7 +82,7 @@ namespace OnlineMongoMigrationProcessor
                 CACertContentsForSourceServer = string.Empty;
                 CompareSampleSize = 50;
                 LogPageSize = 5000;
-                ObjectIdPartitioner = PartitionerType.UseTimeBoundaries;
+                ObjectIdPartitioner = PartitionerType.UseSampleCommand;
             }
         }
 

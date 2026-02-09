@@ -21,9 +21,25 @@ namespace OnlineMongoMigrationProcessor
 {
     public static class SamplePartitioner
     {
-        public static int MaxSegments = Math.Max(20,Environment.ProcessorCount * 5);
-        public static int MaxSamples = 2000;
 
+        public static int GetMaxSegments()
+        {
+            try
+            {
+                int maxConcurrentPartitions = MigrationJobContext.CurrentlyActiveJob?.ParallelThreads ?? Environment.ProcessorCount * 5;
+                int MaxSegments = Math.Max(20, maxConcurrentPartitions);
+                return MaxSegments;
+            }
+            catch
+            {
+                return 20;
+            }
+        }
+
+        public static int GetMaxSamples()
+        {
+            return 3000;
+        }
 
         /// <summary>
         /// Creates partitions based on sampled data from the collection.
@@ -44,10 +60,10 @@ namespace OnlineMongoMigrationProcessor
             BsonDocument? userFilter = null;
             userFilter = MongoHelper.GetFilterDoc(migrationUnit.UserFilter);
 
-            int adjustedMaxSamples=MaxSamples;
-            if (optimizeForObjectId && dataType == DataType.ObjectId)
+            int adjustedMaxSamples = GetMaxSamples();
+            if (optimizeForObjectId && dataType == DataType.ObjectId && config.ObjectIdPartitioner != PartitionerType.UseSampleCommand)
             {
-                adjustedMaxSamples = MaxSamples * 1000;
+                adjustedMaxSamples = GetMaxSamples() * 1000;
             }
 
             // Determine if we should skip DataType filtering
@@ -146,7 +162,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                     
 
-                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {adjustedMaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Error);
+                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {adjustedMaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Warning);
                     chunkCount = (int)newCount;
                 }
 
@@ -158,7 +174,7 @@ namespace OnlineMongoMigrationProcessor
                 // Calculate segments based on documents per chunk
                 segmentCount = Math.Min(
                     Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
-                    MaxSegments
+                    GetMaxSegments()
                 );
 
 
@@ -174,7 +190,7 @@ namespace OnlineMongoMigrationProcessor
                 // Optimize for non-dump scenarios
                 if (!optimizeForMongoDump)
                 {
-                    while (chunkCount > segmentCount && segmentCount < MaxSegments)
+                    while (chunkCount > segmentCount && segmentCount < GetMaxSegments())
                     {
                         chunkCount--;
                         segmentCount++;
@@ -193,7 +209,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     try
                     {
-                        return GetChunkBoundariesForObjectId(log, collection, optimizeForMongoDump, sampleCount, segmentCount, userFilter, config);
+                        return GetChunkBoundariesForObjectId(log, collection, optimizeForMongoDump, sampleCount, segmentCount, userFilter, config, docCountByType);
                     }
                     catch (Exception ex)
                     {
@@ -205,6 +221,10 @@ namespace OnlineMongoMigrationProcessor
                 else
                 {
                     MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating chunkCount: collection={collection.CollectionNamespace}, dataType={dataType}, userFilter={userFilter}, skipDataTypeFilter={skipDataTypeFilter}, sampleCount={sampleCount}, chunkCount={chunkCount}, segmentCount={segmentCount}");
+
+                    if (optimizeForObjectId && dataType == DataType.ObjectId && config.ObjectIdPartitioner == PartitionerType.UseSampleCommand)
+                        skipDataTypeFilter = true;
+
                     return GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
                 }
 
@@ -277,12 +297,18 @@ namespace OnlineMongoMigrationProcessor
             }
 
 
-            var pipeline = new[]
+            var pipelineStages = new List<BsonDocument>();
+            
+            // Only add $match stage if matchCondition is not empty
+            if (matchCondition != null && matchCondition.ElementCount > 0)
             {
-                    new BsonDocument("$match", matchCondition),  // Add the match condition for the data type
-                    new BsonDocument("$sample", new BsonDocument("size", sampleCount)),
-                    new BsonDocument("$project", new BsonDocument("_id", 1)) // Keep only the _id key
-                };
+                pipelineStages.Add(new BsonDocument("$match", matchCondition));
+            }
+            
+            pipelineStages.Add(new BsonDocument("$sample", new BsonDocument("size", sampleCount)));
+            pipelineStages.Add(new BsonDocument("$project", new BsonDocument("_id", 1)));
+            
+            var pipeline = pipelineStages.ToArray();
 
             List<BsonValue> partitionValues = new List<BsonValue>();
             for (int i = 0; i < 10; i++)
@@ -346,15 +372,25 @@ namespace OnlineMongoMigrationProcessor
             return chunkBoundaries;
         }
 
-        private static ChunkBoundaries? GetChunkBoundariesForObjectId(Log log, IMongoCollection<BsonDocument> collection, bool optimizeForMongoDump, int sampleCount, int segmentCount, BsonDocument userFilter, MigrationSettings config)
+        private static ChunkBoundaries? GetChunkBoundariesForObjectId(Log log, IMongoCollection<BsonDocument> collection, bool optimizeForMongoDump, int sampleCount, int segmentCount, BsonDocument userFilter, MigrationSettings config, long collectionTotalDocCount)
         {
 
             log.WriteLine($"Using objectId sampler {config.ObjectIdPartitioner} for sampling {collection.CollectionNamespace} with {sampleCount} samples, Segment Count: {segmentCount}");
             MongoObjectIdSampler objectIdSampler = new MongoObjectIdSampler(collection);
             //var objectIdRange = objectIdSampler.GetObjectIdRangeAsync(userFilter).GetAwaiter().GetResult();
-            var ids = objectIdSampler.GenerateEquidistantObjectIdsAsync(sampleCount, userFilter, config).GetAwaiter().GetResult();
+            var ids = objectIdSampler.GenerateEquidistantObjectIdsAsync(sampleCount, userFilter, config, collectionTotalDocCount).GetAwaiter().GetResult();
 
-            return ConvertToBoundaries(ids, segmentCount);
+            // Adjust segmentCount if we got fewer boundaries than expected (due to data skew or recursive splitting)
+            // Only set segmentCount to 1 when optimizeForMongoDump is true (need many chunks for parallel dump/restore)
+            // When optimizeForMongoDump is false, keep original segmentCount to have multiple segments per chunk for parallel writes
+            int effectiveSegmentCount = segmentCount;
+            if (ids.Count > 0 && ids.Count <= segmentCount && optimizeForMongoDump)
+            {
+                effectiveSegmentCount = 1;
+                log.WriteLine($"Adjusted segmentCount from {segmentCount} to {effectiveSegmentCount} (each boundary becomes a chunk for parallel dump/restore) based on actual boundary count ({ids.Count})", LogType.Debug);
+            }
+
+            return ConvertToBoundaries(ids, effectiveSegmentCount);
         }
 
         private static ChunkBoundaries ConvertToBoundaries(List<BsonValue> ids, int segmentCount)

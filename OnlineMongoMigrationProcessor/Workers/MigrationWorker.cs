@@ -292,7 +292,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             _log.WriteLine("Verifying source server connectivity...", LogType.Debug);
             try
             {
-                string version = MongoHelper.GetServerVersion(_sourceClient);
+                string version = await MongoHelper.GetServerVersionAsync(_sourceClient).ConfigureAwait(false);
                 _log.WriteLine($"Source server version check passed: {version}", LogType.Debug);
             }
             catch (Exception ex)
@@ -331,7 +331,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _log.WriteLine("Offline job - getting source server version...", LogType.Debug);
                 //// Connect to the MongoDB server
                 var client = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], true, _config.CACertContentsForSourceServer ?? string.Empty);
-                var version = MongoHelper.GetServerVersion(client);
+                var version = await MongoHelper.GetServerVersionAsync(client).ConfigureAwait(false);
                 _log.WriteLine($"Source server version: {version}", LogType.Debug);
                 MigrationJobContext.CurrentlyActiveJob.SourceServerVersion = version;
                 MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
@@ -1836,11 +1836,11 @@ namespace OnlineMongoMigrationProcessor.Workers
             else
             {
                 _log.WriteLine($"{databaseName}.{collectionName} estimated document count: {documentCount}", LogType.Debug);
-                totalChunks = (int)Math.Min(SamplePartitioner.MaxSamples / SamplePartitioner.MaxSegments, 
-                    documentCount / (SamplePartitioner.MaxSamples == 0 ? 1 : SamplePartitioner.MaxSamples));
+                totalChunks = (int)Math.Min(SamplePartitioner.GetMaxSamples() / SamplePartitioner.GetMaxSegments(),
+                    documentCount / (SamplePartitioner.GetMaxSamples() == 0 ? 1 : SamplePartitioner.GetMaxSamples()));
                 totalChunks = Math.Max(1, totalChunks);
                 totalChunks = Math.Max(totalChunks, totalChunksBySize);
-                totalChunks = Math.Min(totalChunks, SamplePartitioner.MaxSamples);
+                totalChunks = Math.Min(totalChunks, SamplePartitioner.GetMaxSamples());
                 minDocsInChunk = documentCount / (totalChunks == 0 ? 1 : totalChunks);
             }
 
