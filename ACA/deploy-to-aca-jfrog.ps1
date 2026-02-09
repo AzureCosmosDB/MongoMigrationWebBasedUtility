@@ -51,7 +51,7 @@ param(
     [string]$JFrogDebianRepo,
     
     [Parameter(Mandatory=$true)]
-    [string]$JFrogDebianDistribution,
+    [string]$JFrogDebianDistribution = "bookworm",
     
     [Parameter(Mandatory=$true)]
     [string]$JFrogDebianComponent,
@@ -93,6 +93,9 @@ param(
     
     [Parameter(Mandatory=$false)]
     [string]$JFrogPassword = "",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$StateStoreConnectionString = "",
     
     [Parameter(Mandatory=$false)]
     [switch]$SkipDockerBuild
@@ -275,11 +278,16 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Infrastructure deployment completed successfully" -ForegroundColor Green
 
-Write-Host "`nStep 3: Prompting for StateStore connection string..." -ForegroundColor Yellow
-$secureConnString = Read-Host -Prompt "The StateStore keeps track of migration job details in a DocumentDB. You may use the same database as the Target DocumentDB or a separate one. Enter the connection string for the StateStore." -AsSecureString
-$connString = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString)
-)
+Write-Host "`nStep 3: StateStore connection string..." -ForegroundColor Yellow
+if ([string]::IsNullOrEmpty($StateStoreConnectionString)) {
+    $secureConnString = Read-Host -Prompt "The StateStore keeps track of migration job details in a DocumentDB. You may use the same database as the Target DocumentDB or a separate one. Enter the connection string for the StateStore." -AsSecureString
+    $connString = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString)
+    )
+} else {
+    $connString = $StateStoreConnectionString
+    Write-Host "Using StateStore connection string from parameter" -ForegroundColor Gray
+}
 
 Write-Host "`nStep 4: Deploying Container App with application image..." -ForegroundColor Yellow
 
