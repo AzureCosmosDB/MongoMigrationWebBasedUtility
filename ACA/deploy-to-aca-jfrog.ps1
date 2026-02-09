@@ -12,6 +12,18 @@
 #   1. Create a Docker repository in JFrog (e.g., docker-local for pushing, docker-virtual for pulling)
 #   2. Ensure dotnet/sdk:9.0 and dotnet/aspnet:9.0 are available (via remote proxy to MCR or manual upload)
 #   3. Generate an API key or use username/password for authentication
+#
+# =============================================================================
+# TODO: MONGODB TOOLS - PENDING JFROG APPROVAL
+# =============================================================================
+# Currently, MongoDB Database Tools are downloaded directly from MongoDB CDN
+# because the JFrog team has not yet approved the proxy for:
+#   https://repo.mongodb.org/apt/debian
+#
+# Once the JFrog team adds this repository as a remote proxy, update the
+# Dockerfile.jfrog to use apt-get install instead of direct download.
+# See the TODO comment in Dockerfile.jfrog for the exact change needed.
+# =============================================================================
 
 param(
     [Parameter(Mandatory=$true)]
@@ -33,6 +45,21 @@ param(
     [string]$JFrogBaseImageRegistry = "",
     
     [Parameter(Mandatory=$false)]
+    [string]$JFrogBaseImageRepository = "",
+    
+    [Parameter(Mandatory=$true)]
+    [string]$JFrogDebianRepo,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$JFrogDebianDistribution,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$JFrogDebianComponent,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$JFrogNuGetRepo,
+    
+    [Parameter(Mandatory=$false)]
     [string]$StateStoreAppID = "",
     
     [Parameter(Mandatory=$true)]
@@ -40,6 +67,9 @@ param(
     
     [Parameter(Mandatory=$false)]
     [string]$StorageAccountName = "",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$ImageName = "mongo-migration",
     
     [Parameter(Mandatory=$false)]
     [string]$ImageTag = "latest",
@@ -62,6 +92,9 @@ param(
     [string]$OwnerTag,
     
     [Parameter(Mandatory=$false)]
+    [string]$JFrogPassword = "",
+    
+    [Parameter(Mandatory=$false)]
     [switch]$SkipDockerBuild
 )
 
@@ -71,6 +104,12 @@ $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrEmpty($JFrogBaseImageRegistry)) {
     $JFrogBaseImageRegistry = $JFrogRegistryServer
     Write-Host "Using JFrog server for base images: $JFrogBaseImageRegistry" -ForegroundColor Cyan
+}
+
+# Use group repository for base images if not specified (typically contains proxied MCR images)
+if ([string]::IsNullOrEmpty($JFrogBaseImageRepository)) {
+    $JFrogBaseImageRepository = $JFrogRepository -replace '-stage$', '-group' -replace '-local$', '-group'
+    Write-Host "Using JFrog repository for base images: $JFrogBaseImageRepository" -ForegroundColor Cyan
 }
 
 # Generate StateStoreAppID if not provided
@@ -89,7 +128,7 @@ if ([string]::IsNullOrEmpty($StorageAccountName)) {
 }
 
 # Build full image path
-$FullImagePath = "$JFrogRegistryServer/$JFrogRepository"
+$FullImagePath = "$JFrogRegistryServer/$JFrogRepository/$ImageName"
 $FullImageWithTag = "${FullImagePath}:${ImageTag}"
 
 Write-Host "`n=== Azure Container Apps Deployment (JFrog Registry) ===" -ForegroundColor Cyan
@@ -105,12 +144,17 @@ if ($UseEntraIdForAzureStorage) {
 }
 Write-Host ""
 
-# Prompt for JFrog password/API key
+# Prompt for JFrog password/API key (if not provided as parameter)
 Write-Host "Step 0: JFrog Authentication" -ForegroundColor Yellow
-$secureJFrogPassword = Read-Host -Prompt "Enter JFrog password or API key" -AsSecureString
-$jfrogPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureJFrogPassword)
-)
+if ([string]::IsNullOrEmpty($JFrogPassword)) {
+    $secureJFrogPassword = Read-Host -Prompt "Enter JFrog password or API key" -AsSecureString
+    $jfrogPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureJFrogPassword)
+    )
+} else {
+    $jfrogPassword = $JFrogPassword
+    Write-Host "Using JFrog password from parameter" -ForegroundColor Gray
+}
 
 if (-not $SkipDockerBuild) {
     Write-Host "`nStep 1: Building and pushing Docker image to JFrog..." -ForegroundColor Yellow
@@ -142,6 +186,7 @@ if (-not $SkipDockerBuild) {
     # Build the Docker image using JFrog base images
     Write-Host "Building Docker image with JFrog base images..." -ForegroundColor Gray
     Write-Host "  Base image registry: $JFrogBaseImageRegistry" -ForegroundColor Gray
+    Write-Host "  Base image repository: $JFrogBaseImageRepository" -ForegroundColor Gray
     Write-Host "  Target image: $FullImageWithTag" -ForegroundColor Gray
     
     $ErrorActionPreference = 'Continue'
@@ -150,6 +195,14 @@ if (-not $SkipDockerBuild) {
         docker build `
             -f MongoMigrationWebApp/Dockerfile.jfrog `
             --build-arg JFROG_REGISTRY=$JFrogBaseImageRegistry `
+            --build-arg JFROG_REPOSITORY=$JFrogBaseImageRepository `
+            --build-arg JFROG_DEBIAN_REPO=$JFrogDebianRepo `
+            --build-arg JFROG_DEBIAN_URL="https://$JFrogRegistryServer/artifactory/$JFrogDebianRepo" `
+            --build-arg JFROG_DEBIAN_DISTRIBUTION=$JFrogDebianDistribution `
+            --build-arg JFROG_DEBIAN_COMPONENT=$JFrogDebianComponent `
+            --build-arg JFROG_NUGET_URL="https://$JFrogRegistryServer/artifactory/api/nuget/v3/$JFrogNuGetRepo/index.json" `
+            --build-arg JFROG_USERNAME=$JFrogUsername `
+            --build-arg JFROG_PASSWORD=$jfrogPassword `
             -t $FullImageWithTag `
             .
         

@@ -120,7 +120,7 @@ resource containerAppEnvironment 'Microsoft.App/managedEnvironments@2023-05-01' 
     infrastructureSubnetResourceId != '' ? {
       vnetConfiguration: {
         infrastructureSubnetId: infrastructureSubnetResourceId
-        internal: false
+        internal: true  // Private endpoint - no public access (required by corporate policy)
       }
     } : {}
   )
@@ -193,7 +193,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       ingress: {
         external: true
         targetPort: 8080
-        allowInsecure: true
+        allowInsecure: false
         traffic: [
           {
             weight: 100

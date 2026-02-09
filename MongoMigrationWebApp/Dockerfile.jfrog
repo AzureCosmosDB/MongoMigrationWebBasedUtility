@@ -15,21 +15,65 @@
 #
 # See https://aka.ms/customizecontainer for container customization details
 
-# JFrog Registry ARG - must be provided at build time
-ARG JFROG_REGISTRY
 
-# This stage is used when running from VS in fast mode (Default for Debug configuration)
-FROM ${JFROG_REGISTRY}/dotnet/aspnet:9.0 AS base
+
+
+# JFrog Registry and Repository ARGs - must be provided at build time
+# NOTE: JFROG_REPOSITORY must include the full path (e.g., apm0013439-dkr-group/mongomigration) and must NOT be empty.
+ARG JFROG_REGISTRY
+ARG JFROG_REPOSITORY
+ARG JFROG_DEBIAN_REPO
+ARG JFROG_DEBIAN_URL
+ARG JFROG_DEBIAN_DISTRIBUTION
+ARG JFROG_DEBIAN_COMPONENT
+ARG JFROG_NUGET_URL
+
+
+
+# Ensure ARGs are available in all stages
+# Prevent double slashes by requiring JFROG_REPOSITORY to be non-empty
+FROM ${JFROG_REGISTRY}/${JFROG_REPOSITORY}/dotnet/aspnet:9.0 AS base
+ARG JFROG_REGISTRY
+ARG JFROG_REPOSITORY
 USER $APP_UID
 WORKDIR /app
 EXPOSE 8080
 EXPOSE 8081
 
-
 # This stage is used to build the service project
-FROM ${JFROG_REGISTRY}/dotnet/sdk:9.0 AS build
+FROM ${JFROG_REGISTRY}/${JFROG_REPOSITORY}/dotnet/sdk:9.0 AS build
+ARG JFROG_REGISTRY
+ARG JFROG_REPOSITORY
+ARG JFROG_NUGET_URL
+ARG JFROG_USERNAME
+ARG JFROG_PASSWORD
 ARG BUILD_CONFIGURATION=Release
+ENV JFROG_NUGET_URL=${JFROG_NUGET_URL}
 WORKDIR /src
+
+# Configure NuGet to use only the Artifactory feed with credentials
+# Writes a NuGet.Config for the build user so `dotnet restore` uses the internal feed.
+RUN mkdir -p /root/.nuget/NuGet && \
+    cat > /root/.nuget/NuGet/NuGet.Config <<NUGETCFG
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="artifactory" value="${JFROG_NUGET_URL}" />
+  </packageSources>
+  <packageSourceCredentials>
+    <artifactory>
+      <add key="Username" value="${JFROG_USERNAME}" />
+      <add key="ClearTextPassword" value="${JFROG_PASSWORD}" />
+    </artifactory>
+  </packageSourceCredentials>
+</configuration>
+NUGETCFG
+
+# Disable .NET SSL certificate validation for restore
+ENV DOTNET_SYSTEM_NET_HTTP_USESOCKETSHTTPHANDLER=0
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+
 COPY ["MongoMigrationWebApp/MongoMigrationWebApp.csproj", "MongoMigrationWebApp/"]
 COPY ["OnlineMongoMigrationProcessor/OnlineMongoMigrationProcessor.csproj", "OnlineMongoMigrationProcessor/"]
 RUN dotnet restore "./MongoMigrationWebApp/MongoMigrationWebApp.csproj"
@@ -48,15 +92,26 @@ FROM base AS final
 # Switch to root to install MongoDB tools
 USER root
 
-# Install MongoDB Database Tools
-RUN apt-get update && \
-    apt-get install -y wget gnupg && \
-    wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | apt-key add - && \
-    echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" | tee /etc/apt/sources.list.d/mongodb-org-7.0.list && \
-    apt-get update && \
-    apt-get install -y mongodb-database-tools && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# =============================================================================
+# MONGODB TOOLS - Copied from local build context
+# =============================================================================
+# The mongodb-database-tools tarball must be downloaded to MongoMigrationWebApp/
+# Download from: https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-x86_64-100.9.5.tgz
+#
+# TODO: Once JFrog team approves https://repo.mongodb.org/apt/debian as a remote
+# proxy, switch to apt-get install instead:
+# ARG JFROG_DEBIAN_URL
+# ARG JFROG_DEBIAN_DISTRIBUTION  
+# ARG JFROG_DEBIAN_COMPONENT
+# RUN echo "deb [trusted=yes] ${JFROG_DEBIAN_URL} ${JFROG_DEBIAN_DISTRIBUTION} ${JFROG_DEBIAN_COMPONENT}" > /etc/apt/sources.list.d/jfrog.list
+# RUN apt-get update && apt-get install -y mongodb-database-tools && apt-get clean && rm -rf /var/lib/apt/lists/*
+# =============================================================================
+
+# Copy and install MongoDB Database Tools from local build context
+COPY MongoMigrationWebApp/mongodb-database-tools-debian12-x86_64-100.9.5.tgz /tmp/mongodb-tools.tgz
+RUN tar -xzf /tmp/mongodb-tools.tgz -C /tmp && \
+    cp /tmp/mongodb-database-tools-*/bin/* /usr/local/bin/ && \
+    rm -rf /tmp/mongodb-tools.tgz /tmp/mongodb-database-tools-*
 
 # Create the migration data directory structure that the app expects
 # The app looks for ResourceDrive/home/ directory structure
