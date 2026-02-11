@@ -42,8 +42,14 @@ if (!string.IsNullOrEmpty(appId))
     MigrationJobContext.AppId = appId;
 }
 
-bool.TryParse(Environment.GetEnvironmentVariable("StateStoreUseLocalDisk"), out var useLocal);
-builder.Configuration["StateStore:UseLocalDisk"] = useLocal.ToString();
+
+var useLocalDisk=Environment.GetEnvironmentVariable("StateStoreUseLocalDisk");
+bool useLocal=false;
+if (!string.IsNullOrEmpty(useLocalDisk))
+{
+    bool.TryParse(useLocalDisk, out useLocal);
+    builder.Configuration["StateStore:UseLocalDisk"] = useLocal.ToString();
+}
 
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
