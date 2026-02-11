@@ -1,0 +1,132 @@
+# Dockerfile for JFrog Registry
+# Uses JFrog Artifactory as the container registry for base images and final push
+#
+# PREREQUISITES:
+#   - JFrog Artifactory with Docker repository configured
+#   - .NET 9.0 base images mirrored/proxied in JFrog (aspnet:9.0 and sdk:9.0)
+#
+# BUILD ARGS:
+#   JFROG_REGISTRY  - Your JFrog Docker registry URL (e.g., yourcompany.jfrog.io/docker-virtual)
+#
+# EXAMPLE BUILD:
+#   docker build -f Dockerfile.jfrog \
+#     --build-arg JFROG_REGISTRY=yourcompany.jfrog.io/docker-virtual \
+#     -t yourcompany.jfrog.io/docker-local/mongomigration:latest .
+#
+# See https://aka.ms/customizecontainer for container customization details
+
+
+
+
+# JFrog Registry and Repository ARGs - must be provided at build time
+# NOTE: JFROG_REPOSITORY must include the full path (e.g., apm0013439-dkr-group/mongomigration) and must NOT be empty.
+ARG JFROG_REGISTRY
+ARG JFROG_REPOSITORY
+ARG JFROG_DEBIAN_REPO
+ARG JFROG_DEBIAN_URL
+ARG JFROG_DEBIAN_DISTRIBUTION
+ARG JFROG_DEBIAN_COMPONENT
+ARG JFROG_NUGET_URL
+
+
+
+# Ensure ARGs are available in all stages
+# Prevent double slashes by requiring JFROG_REPOSITORY to be non-empty
+FROM ${JFROG_REGISTRY}/${JFROG_REPOSITORY}/dotnet/aspnet:9.0 AS base
+ARG JFROG_REGISTRY
+ARG JFROG_REPOSITORY
+USER $APP_UID
+WORKDIR /app
+EXPOSE 8080
+EXPOSE 8081
+
+# This stage is used to build the service project
+FROM ${JFROG_REGISTRY}/${JFROG_REPOSITORY}/dotnet/sdk:9.0 AS build
+ARG JFROG_REGISTRY
+ARG JFROG_REPOSITORY
+ARG JFROG_NUGET_URL
+ARG JFROG_USERNAME
+ARG JFROG_PASSWORD
+ARG BUILD_CONFIGURATION=Release
+ENV JFROG_NUGET_URL=${JFROG_NUGET_URL}
+WORKDIR /src
+
+# Configure NuGet to use only the Artifactory feed with credentials
+# Writes a NuGet.Config for the build user so `dotnet restore` uses the internal feed.
+RUN mkdir -p /root/.nuget/NuGet && \
+    cat > /root/.nuget/NuGet/NuGet.Config <<NUGETCFG
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="artifactory" value="${JFROG_NUGET_URL}" />
+  </packageSources>
+  <packageSourceCredentials>
+    <artifactory>
+      <add key="Username" value="${JFROG_USERNAME}" />
+      <add key="ClearTextPassword" value="${JFROG_PASSWORD}" />
+    </artifactory>
+  </packageSourceCredentials>
+</configuration>
+NUGETCFG
+
+# Disable .NET SSL certificate validation for restore
+ENV DOTNET_SYSTEM_NET_HTTP_USESOCKETSHTTPHANDLER=0
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+COPY ["MongoMigrationWebApp/MongoMigrationWebApp.csproj", "MongoMigrationWebApp/"]
+COPY ["OnlineMongoMigrationProcessor/OnlineMongoMigrationProcessor.csproj", "OnlineMongoMigrationProcessor/"]
+RUN dotnet restore "./MongoMigrationWebApp/MongoMigrationWebApp.csproj"
+COPY . .
+WORKDIR "/src/MongoMigrationWebApp"
+RUN dotnet build "./MongoMigrationWebApp.csproj" -c $BUILD_CONFIGURATION -o /app/build
+
+# This stage is used to publish the service project to be copied to the final stage
+FROM build AS publish
+ARG BUILD_CONFIGURATION=Release
+RUN dotnet publish "./MongoMigrationWebApp.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+
+# This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
+FROM base AS final
+
+# Switch to root to install MongoDB tools
+USER root
+
+# =============================================================================
+# MONGODB TOOLS - Copied from local build context
+# =============================================================================
+# The mongodb-database-tools tarball must be downloaded to MongoMigrationWebApp/
+# Download from: https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-x86_64-100.9.5.tgz
+#
+# TODO: Once JFrog team approves https://repo.mongodb.org/apt/debian as a remote
+# proxy, switch to apt-get install instead:
+# ARG JFROG_DEBIAN_URL
+# ARG JFROG_DEBIAN_DISTRIBUTION  
+# ARG JFROG_DEBIAN_COMPONENT
+# RUN echo "deb [trusted=yes] ${JFROG_DEBIAN_URL} ${JFROG_DEBIAN_DISTRIBUTION} ${JFROG_DEBIAN_COMPONENT}" > /etc/apt/sources.list.d/jfrog.list
+# RUN apt-get update && apt-get install -y mongodb-database-tools && apt-get clean && rm -rf /var/lib/apt/lists/*
+# =============================================================================
+
+# Copy and install MongoDB Database Tools from local build context
+COPY MongoMigrationWebApp/mongodb-database-tools-debian12-x86_64-100.9.5.tgz /tmp/mongodb-tools.tgz
+RUN tar -xzf /tmp/mongodb-tools.tgz -C /tmp && \
+    cp /tmp/mongodb-database-tools-*/bin/* /usr/local/bin/ && \
+    rm -rf /tmp/mongodb-tools.tgz /tmp/mongodb-database-tools-*
+
+# Create the migration data directory structure that the app expects
+# The app looks for ResourceDrive/home/ directory structure
+RUN mkdir -p /app/migration-data/home && \
+    chown -R $APP_UID:$APP_UID /app/migration-data && \
+    chmod -R 755 /app/migration-data
+
+# Switch back to non-root user for security
+RUN mkdir -p /app/mongodump /tmp/mongodump && \
+    chown -R $APP_UID:$APP_UID /app/mongodump /tmp/mongodump && \
+    chmod -R 755 /app/mongodump /tmp/mongodump
+
+# Switch back to non-root user for security
+USER $APP_UID
+
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "MongoMigrationWebApp.dll"]
