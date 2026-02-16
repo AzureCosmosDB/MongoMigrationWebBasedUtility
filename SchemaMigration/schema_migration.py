@@ -160,13 +160,24 @@ class SchemaMigration:
                 try:
                     source_shard_key = self._get_shard_key(source_db, collection_config)
                     if (source_shard_key is not None):
-                        print(f"-- Migrating shard key - {source_shard_key}.")
+                        # Only single-field shard keys are supported on the destination
+                        if len(source_shard_key) > 1:
+                            shard_fields = list(source_shard_key.keys())
+                            self._print_warning(f"-- Compound shard key {source_shard_key} is not supported on destination. Only single-field hashed shard keys are allowed.")
+                            self._print_warning(f"   Using first field '{shard_fields[0]}' as the hashed shard key. Please verify this is correct.")
+                            hashed_shard_key = {shard_fields[0]: "hashed"}
+                        else:
+                            # Convert shard key to use hashed value since the destination
+                            # only supports hashed shard keys
+                            hashed_shard_key = {k: "hashed" for k in source_shard_key}
+                        print(f"-- Migrating shard key - {source_shard_key} as hashed: {hashed_shard_key}.")
                         self._print_verbose(f"Found shard key on source: {source_shard_key}")
+                        self._print_verbose(f"Converted to hashed shard key: {hashed_shard_key}")
                         self._print_verbose(f"Running shardCollection command on destination")
                         dest_client.admin.command(
                             "shardCollection",
                             f"{db_name}.{collection_name}",
-                            key=source_shard_key)
+                            key=hashed_shard_key)
                         self._print_verbose(f"Shard key applied successfully")
                     else:
                         self._print_warning(f"-- No shard key found for collection {collection_name}. Skipping shard key setup.")
