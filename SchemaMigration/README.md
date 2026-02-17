@@ -173,6 +173,33 @@ Before running the assessment, ensure that the client machine meets the followin
     - Detailed decision-making logic (e.g., why certain indexes are optimized or skipped)
     - Success/failure status for each operation
 
+    **Optional: Export shard keys to a file** for review or later use:
+
+    ```cmd
+    python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string> --shardkey-export-file shardkeys.json
+    ```
+
+    This exports the shard key definitions from the source into a JSON file with the following structure:
+
+    ```json
+    {
+      "mydb.orders": {"customerId": 1},
+      "mydb.products": {"categoryId": "hashed"}
+    }
+    ```
+
+    **Optional: Import shard keys from a file** instead of reading from the source:
+
+    ```cmd
+    python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string> --shardkey-import-file shardkeys.json
+    ```
+
+    This is useful when:
+    - The user credentials do not have sufficient privileges to read shard key information from the source `config` database.
+    - You want to customize the shard key definitions before applying them to the destination (e.g., change the shard key field).
+
+    **Workflow:** You can export first, edit the JSON file to customize shard keys, and then import the modified file in a subsequent run.
+
 This process will generate an Azure DocumentDB-optimized schema with index and sharding recommendations based on your workload.
 
 
@@ -193,4 +220,6 @@ This process will generate an Azure DocumentDB-optimized schema with index and s
 | **--source-uri** | Yes | MongoDB connection string for the source database (e.g., `mongodb://localhost:27017`). |
 | **--dest-uri** | Yes | MongoDB/DocumentDB connection string for the destination database. |
 | **--verbose** | No | Enable verbose output mode. When set, displays detailed logging of all operations including connection status, configuration parsing, collection enumeration, and step-by-step migration progress. Useful for debugging and monitoring long-running migrations. |
+| **--shardkey-export-file** | No | Path to a JSON file where shard key definitions from the source will be exported. The file can be reviewed, edited, and later used with `--shardkey-import-file`. Migration proceeds normally in addition to exporting. |
+| **--shardkey-import-file** | No | Path to a JSON file containing shard key definitions to use instead of reading from the source. When provided, the source server is not queried for shard key information. Useful when credentials lack permissions to read the `config` database, or when you want to customize shard keys before applying them. |
 
