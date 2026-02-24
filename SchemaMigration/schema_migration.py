@@ -110,36 +110,86 @@ class SchemaMigration:
         self._print_verbose(f"Starting migration for {len(collection_configs)} collection(s)")
         self.incompatible_indexes = []  # Reset incompatible indexes list for each migration run
         
+        # Invalid characters in collection names for DocumentDB
+        INVALID_COLLECTION_NAME_CHARS = ['/', '\\', '"', '$', '*', '<', '>', ':', '|', '?']
+        
+        # Track renamed collections to detect collisions
+        renamed_collections = {}  # Maps (db_name, new_name) -> original_name
+        
         for collection_index, collection_config in enumerate(collection_configs):
             db_name = collection_config.db_name
             collection_name = collection_config.collection_name
+            dest_collection_name = collection_name  # May be renamed
 
             print(f"\nMigrating schema for collection: {db_name}.{collection_name}")
             
             self._print_verbose(f"Processing collection {collection_index + 1}/{len(collection_configs)}")
             self._print_verbose(f"  Database: {db_name}")
             self._print_verbose(f"  Collection: {collection_name}")
+            
+            # Skip system collections (system.*, system.views, etc.)
+            if collection_name.startswith('system.'):
+                self._print_warning(f"-- [SKIPPED] System collection '{collection_name}' cannot be migrated")
+                self._print_warning(f"   System collections are internal to MongoDB and should not be migrated directly")
+                continue
+            
+            # Check for invalid characters in collection name and substitute with underscore
+            invalid_chars_found = [c for c in INVALID_COLLECTION_NAME_CHARS if c in collection_name]
+            if invalid_chars_found:
+                # Substitute invalid characters with underscore
+                dest_collection_name = collection_name
+                for char in INVALID_COLLECTION_NAME_CHARS:
+                    dest_collection_name = dest_collection_name.replace(char, '_')
+                
+                # Check for collision with another renamed collection
+                collision_key = (db_name, dest_collection_name)
+                if collision_key in renamed_collections:
+                    original = renamed_collections[collision_key]
+                    self._print_error(f"-- [SKIPPED] Collection name collision detected!")
+                    self._print_error(f"   '{collection_name}' would be renamed to '{dest_collection_name}'")
+                    self._print_error(f"   but '{original}' was already renamed to '{dest_collection_name}'")
+                    self._print_error(f"   Please manually resolve this naming conflict")
+                    continue
+                
+                renamed_collections[collision_key] = collection_name
+                self._print_warning(f"-- [RENAMED] Collection contains invalid characters: {invalid_chars_found}")
+                self._print_warning(f"   Source: {collection_name}")
+                self._print_warning(f"   Target: {dest_collection_name}")
+                self._print_warning(f"   NOTE: Update your application code to use the new collection name!")
 
             source_db = source_client[db_name]
             source_collection = source_db[collection_name]
 
             dest_db = dest_client[db_name]
-            dest_collection = dest_db[collection_name]
+            dest_collection = dest_db[dest_collection_name]
+
+            # Check if the source is a view (not a collection)
+            try:
+                # Try to get collection options - views will have 'viewOn' field
+                coll_info = source_db.list_collections(filter={"name": collection_name})
+                coll_list = list(coll_info)
+                if coll_list and coll_list[0].get('type') == 'view':
+                    view_on = coll_list[0].get('options', {}).get('viewOn', 'unknown')
+                    self._print_warning(f"-- [SKIPPED] '{collection_name}' is a view (based on '{view_on}'), not a collection")
+                    self._print_warning(f"   Views should be recreated manually after migrating the underlying collections")
+                    continue
+            except Exception as e:
+                self._print_verbose(f"  Could not determine if collection is a view: {e}")
 
             # Check if the destination collection should be dropped
             if collection_config.drop_if_exists:
                 print("-- Running drop command on target collection")
-                self._print_verbose(f"Dropping existing collection {db_name}.{collection_name} on destination")
+                self._print_verbose(f"Dropping existing collection {db_name}.{dest_collection_name} on destination")
                 dest_collection.drop()
                 self._print_verbose(f"Collection dropped successfully")
             else:
                 self._print_verbose(f"drop_if_exists=False, keeping existing collection if present")
 
             # Create the destination collection if it doesn't exist
-            if not collection_name in dest_db.list_collection_names():
+            if not dest_collection_name in dest_db.list_collection_names():
                 print("-- Creating target collection")
                 self._print_verbose(f"Collection does not exist on destination, creating new collection")
-                dest_db.create_collection(collection_name)
+                dest_db.create_collection(dest_collection_name)
                 self._print_verbose(f"Collection created successfully")
             else:
                 print("-- Target collection already exists. Skipping creation.")
@@ -149,8 +199,8 @@ class SchemaMigration:
             if collection_config.co_locate_with:
                 print(f"-- Setting up colocation with collection: {collection_config.co_locate_with}")
                 self._print_verbose(f"Colocation requested with reference collection: {collection_config.co_locate_with}")
-                self._setup_colocation(dest_db, collection_name, collection_config.co_locate_with)
-                self._verify_colocation(dest_client, db_name, collection_name, collection_config.co_locate_with)
+                self._setup_colocation(dest_db, dest_collection_name, collection_config.co_locate_with)
+                self._verify_colocation(dest_client, db_name, dest_collection_name, collection_config.co_locate_with)
             else:
                 self._print_verbose(f"No colocation configured for this collection")
 
@@ -165,7 +215,7 @@ class SchemaMigration:
                         self._print_verbose(f"Running shardCollection command on destination")
                         dest_client.admin.command(
                             "shardCollection",
-                            f"{db_name}.{collection_name}",
+                            f"{db_name}.{dest_collection_name}",
                             key=source_shard_key)
                         self._print_verbose(f"Shard key applied successfully")
                     else:
@@ -204,11 +254,30 @@ class SchemaMigration:
 
             print("-- Migrating indexes for collection")
             self._print_verbose(f"Creating {len(index_list)} index(es) on destination")
+            
+            # Track created index keys to avoid duplicates (especially after hashed->regular conversion)
+            created_index_keys = set()
+            
             for index_keys, index_options in index_list:
                 index_name = index_options.get('name', 'unnamed')
                 
+                # Skip the default _id_ index - it's automatically created by MongoDB/DocumentDB
+                if index_name == '_id_' and index_keys == [('_id', 1)]:
+                    self._print_verbose(f"  Skipping default _id_ index (automatically created)")
+                    continue
+                
+                # Normalize index key directions (convert float 1.0/-1.0 to int 1/-1)
+                index_keys = self._normalize_index_keys(index_keys, index_name)
+                
                 # Transform hashed indexes to regular composite indexes
                 index_keys, was_hashed = self._transform_hashed_index(index_keys, index_name)
+                
+                # Check for duplicate index keys (can happen when hashed index is converted to regular
+                # and a regular index with the same keys already exists)
+                index_keys_tuple = tuple(index_keys)
+                if index_keys_tuple in created_index_keys:
+                    self._print_warning(f"---- [SKIPPED] Index '{index_name}': Duplicate of already created index with keys {index_keys}")
+                    continue
                 
                 # Transform partialFilterExpression if present
                 if 'partialFilterExpression' in index_options:
@@ -224,15 +293,76 @@ class SchemaMigration:
                         continue
                     index_options['partialFilterExpression'] = transformed
                 
+                # Fix textIndexVersion for DocumentDB compatibility (only version 2 is supported)
+                if 'textIndexVersion' in index_options and index_options.get('textIndexVersion', 2) > 2:
+                    original_version = index_options['textIndexVersion']
+                    index_options['textIndexVersion'] = 2
+                    self._print_warning(f"---- [MODIFIED] Index '{index_name}': Downgraded textIndexVersion from {original_version} to 2 for DocumentDB compatibility")
+                
+                # Skip indexes with collation (not supported in DocumentDB)
+                if 'collation' in index_options:
+                    self._print_warning(f"---- [SKIPPED] Index '{index_name}': Collation indexes are not supported in DocumentDB")
+                    self._print_warning(f"         Collation: {index_options['collation']}")
+                    self._print_warning(f"         You may need to handle case-insensitive queries at the application level")
+                    continue
+                
+                # Remove unsupported index options for DocumentDB
+                unsupported_options = ['clustered', 'prepareUnique', 'wildcardProjection']
+                removed_options = []
+                for opt in unsupported_options:
+                    if opt in index_options:
+                        removed_options.append(f"{opt}={index_options.pop(opt)}")
+                if removed_options:
+                    self._print_warning(f"---- [MODIFIED] Index '{index_name}': Removed unsupported options: {', '.join(removed_options)}")
+                
+                # Check for geospatial indexes (2dsphere, 2d) - they don't support 'unique' option
+                is_geospatial = any(direction in ('2dsphere', '2d') for _, direction in index_keys)
+                if is_geospatial and 'unique' in index_options:
+                    index_options.pop('unique')
+                    self._print_warning(f"---- [MODIFIED] Index '{index_name}': Removed 'unique' option (not supported for geospatial indexes)")
+                
                 self._print_success(f"---- Created index: {index_keys} with options: {index_options}")
                 self._print_verbose(f"  Creating index on destination: {index_keys}")
                 dest_collection.create_index(index_keys, **index_options)
+                created_index_keys.add(index_keys_tuple)
                 self._print_verbose(f"  Index created successfully")
         
         # Report all incompatible indexes at the end
         self._report_incompatible_indexes()
         
         self._print_verbose(f"Migration completed for all {len(collection_configs)} collection(s)")
+
+    def _normalize_index_keys(
+            self,
+            index_keys: List[Tuple[str, Any]],
+            index_name: str) -> List[Tuple[str, Any]]:
+        """
+        Normalize index key directions to ensure compatibility.
+        
+        Converts float directions (1.0, -1.0) to integers (1, -1) as required
+        by PyMongo's create_index method.
+        
+        :param index_keys: The original index keys as a list of tuples
+        :param index_name: The index name for reporting
+        :return: Normalized index keys
+        """
+        normalized_keys = []
+        was_modified = False
+        
+        for field, direction in index_keys:
+            if isinstance(direction, float) and direction in (1.0, -1.0):
+                # Convert float to int
+                normalized_keys.append((field, int(direction)))
+                was_modified = True
+            else:
+                normalized_keys.append((field, direction))
+        
+        if was_modified:
+            self._print_verbose(f"  Normalized float directions to int for index '{index_name}'")
+            self._print_verbose(f"    Original: {index_keys}")
+            self._print_verbose(f"    Normalized: {normalized_keys}")
+        
+        return normalized_keys
 
     def _transform_hashed_index(
             self,

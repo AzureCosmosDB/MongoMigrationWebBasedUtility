@@ -98,7 +98,10 @@ param(
     [string]$StateStoreConnectionString = "",
     
     [Parameter(Mandatory=$false)]
-    [switch]$SkipDockerBuild
+    [switch]$SkipDockerBuild,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$JFrogRegistryServerForACA = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -130,9 +133,19 @@ if ([string]::IsNullOrEmpty($StorageAccountName)) {
     Write-Host "Using generated storage account name: $StorageAccountName" -ForegroundColor Cyan
 }
 
-# Build full image path
+# Use separate registry server for ACA if specified (e.g., with port 22609 for NVA Binary Port Mapping)
+# This allows local Docker build to use standard port 443, while ACA uses the mapped port
+if ([string]::IsNullOrEmpty($JFrogRegistryServerForACA)) {
+    $JFrogRegistryServerForACA = $JFrogRegistryServer
+} else {
+    Write-Host "Using separate JFrog registry for ACA: $JFrogRegistryServerForACA" -ForegroundColor Cyan
+}
+
+# Build full image paths - one for local Docker operations, one for ACA
 $FullImagePath = "$JFrogRegistryServer/$JFrogRepository/$ImageName"
 $FullImageWithTag = "${FullImagePath}:${ImageTag}"
+$FullImagePathForACA = "$JFrogRegistryServerForACA/$JFrogRepository/$ImageName"
+$FullImageWithTagForACA = "${FullImagePathForACA}:${ImageTag}"
 
 Write-Host "`n=== Azure Container Apps Deployment (JFrog Registry) ===" -ForegroundColor Cyan
 Write-Host "Resource Group: $ResourceGroupName" -ForegroundColor White
@@ -249,10 +262,10 @@ $bicepParams = @(
     "--template-file", "aca_main_jfrog.bicep",
     "--parameters",
         "containerAppName=$ContainerAppName",
-        "jfrogRegistryServer=$JFrogRegistryServer",
+        "jfrogRegistryServer=$JFrogRegistryServerForACA",
         "jfrogUsername=$JFrogUsername",
         "jfrogPassword=`"$jfrogPassword`"",
-        "jfrogImageRepository=$FullImagePath",
+        "jfrogImageRepository=$FullImagePathForACA",
         "location=$Location",
         "storageAccountName=$StorageAccountName",
         "vCores=$VCores",
@@ -297,10 +310,10 @@ $finalBicepParams = @(
     "--template-file", "aca_main_jfrog.bicep",
     "--parameters",
         "containerAppName=$ContainerAppName",
-        "jfrogRegistryServer=$JFrogRegistryServer",
+        "jfrogRegistryServer=$JFrogRegistryServerForACA",
         "jfrogUsername=$JFrogUsername",
         "jfrogPassword=`"$jfrogPassword`"",
-        "jfrogImageRepository=$FullImagePath",
+        "jfrogImageRepository=$FullImagePathForACA",
         "location=$Location",
         "storageAccountName=$StorageAccountName",
         "vCores=$VCores",

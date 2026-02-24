@@ -18,3 +18,5 @@
 /MongoMigrationWebApp/appsettings.Development.json
 /MongoMigrationWebApp/Properties/PublishProfiles
 /SchemaMigration/__pycache__
+.env*
+private.*
