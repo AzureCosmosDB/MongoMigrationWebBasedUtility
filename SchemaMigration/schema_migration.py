@@ -37,7 +37,7 @@ class SchemaMigration:
     UNSUPPORTED_INDEX_OPTIONS = {'collation', 'hidden', 'clustered', 'prepareUnique', 'wildcardProjection'}
     
     # Invalid characters in collection names for DocumentDB
-    INVALID_COLLECTION_NAME_CHARS = ['/', '\\', '.', '"', '$', '*', '<', '>', ':', '|', '?']
+    INVALID_COLLECTION_NAME_CHARS = ['/', '\\', '"', '$', '*', '<', '>', ':', '|', '?']
 
     # Index option combinations that conflict
     CONFLICTING_INDEX_OPTION_PAIRS = [('sparse', 'partialFilterExpression')]
@@ -316,16 +316,10 @@ class SchemaMigration:
                         })
                         continue
                     has_text_index = True
-                    # ── Rule: textIndexVersion 3 not supported – cannot downgrade (v3 treats
-                    #    diacritics like fiancée/fiancee as equal; v2 does not) ──
-                    if index_options.get('textIndexVersion') == 3:
-                        self._print_error(f"---- [SKIPPED] Index '{index_name}': textIndexVersion 3 is not supported and cannot be downgraded to version 2 (different diacritic handling).")
-                        self.structural_incompatibilities.append({
-                            'collection': collection_ns,
-                            'index_name': index_name,
-                            'reason': 'textIndexVersion 3 is not supported. Cannot downgrade to version 2 because they differ in diacritic-insensitive matching (e.g. fiancée vs fiancee).'
-                        })
-                        continue
+                    # ── Rule: Downgrade textIndexVersion if needed (DocumentDB supports v1/v2) ──
+                    if index_options.get('textIndexVersion', 0) >= 3:
+                        self._print_warning(f"---- [MODIFIED] Index '{index_name}': Downgrading textIndexVersion from {index_options['textIndexVersion']} to 2")
+                        index_options['textIndexVersion'] = 2
                 
                 # ── Rule: Compound 2dsphere indexes not supported (#3) ──
                 is_2dsphere_compound = self._is_compound_geospatial_index(index_keys)
