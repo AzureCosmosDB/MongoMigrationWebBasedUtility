@@ -248,6 +248,10 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               name: 'ResourceDrive'
               value: '/app/migration-data'
             }
+            {
+              name: 'STORAGE_QUOTA_GB'
+              value: string(fileShareSizeGB)
+            }
           ], stateStoreConnectionString != '' ? [
             {
               name: 'StateStoreConnectionStringOrPath'
