@@ -40,10 +40,6 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$UseEntraIdForAzureStorage,
 
-    [Parameter(Mandatory=$false)]
-    [ValidateRange(100, 102400)]
-    [int]$FileShareSizeGB = 100,
-
     [Parameter(Mandatory=$true)]
     [string]$OwnerTag
 )
@@ -101,8 +97,7 @@ $bicepParams = @(
         "vCores=$VCores",
         "memoryGB=$MemoryGB",
         "ownerTag=$OwnerTag",
-        "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())",
-        "fileShareSizeGB=$FileShareSizeGB"
+        "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())"
 )
 
 # Add VNet configuration if provided
@@ -188,8 +183,7 @@ $finalBicepParams = @(
         "aspNetCoreEnvironment=Development",
         "imageTag=$ImageTag",
         "ownerTag=$OwnerTag",
-        "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())",
-        "fileShareSizeGB=$FileShareSizeGB"
+        "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())"
 )
 
 # Add VNet configuration if provided
