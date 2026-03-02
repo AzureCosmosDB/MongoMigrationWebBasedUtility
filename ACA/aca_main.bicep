@@ -45,6 +45,11 @@ param infrastructureSubnetResourceId string = ''
 @description('Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When true, UseBlobServiceClient env var is set and no volume is mounted.')
 param useEntraIdForStorage bool = false
 
+@description('Size of the Azure File Share in GB (only applies when useEntraIdForStorage is false)')
+@minValue(100)
+@maxValue(102400)
+param fileShareSizeGB int = 100
+
 // Variables for dynamic workload profile selection
 var workloadProfileType = vCores <= 4 ? 'D4' : vCores <= 8 ? 'D8' : vCores <= 16 ? 'D16' : 'D32'
 var workloadProfileName = 'Dedicated'
@@ -105,11 +110,11 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   }
 }
 
-// File Share for migration data (100GB) - only needed when NOT using Entra ID
+// File Share for migration data - only needed when NOT using Entra ID
 resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = if (!useEntraIdForStorage) {
   name: '${storageAccount.name}/default/migration-data'
   properties: {
-    shareQuota: 100
+    shareQuota: fileShareSizeGB
     enabledProtocols: 'SMB'
   }
 }
