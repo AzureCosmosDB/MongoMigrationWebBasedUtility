@@ -160,9 +160,15 @@ if ($imageExists -eq 'true') {
 
 Write-Host "`nStep 3: Prompting for StateStore connection string..." -ForegroundColor Yellow
 $secureConnString = Read-Host -Prompt "The StateStore keeps track of migration job details in a DocumentDB. You may use the same database as the Target DocumentDB or a separate one. Enter the connection string for the StateStore." -AsSecureString
-$connString = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString)
-)
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString)
+try {
+    $connString = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+} catch {
+    Write-Host "`nError: Failed to read the StateStore connection string: $_" -ForegroundColor Red
+    exit 1
+} finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+}
 
 Write-Host "`nStep 4: Deploying Container App with application image..." -ForegroundColor Yellow
 
@@ -179,7 +185,7 @@ $finalBicepParams = @(
         "vCores=$VCores",
         "memoryGB=$MemoryGB",
         "stateStoreAppID=$StateStoreAppID",
-        "stateStoreConnectionString=`"$connString`"",
+        "stateStoreConnectionString=$connString",
         "aspNetCoreEnvironment=Development",
         "imageTag=$ImageTag",
         "ownerTag=$OwnerTag",
