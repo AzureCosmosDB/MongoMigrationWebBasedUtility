@@ -1,4 +1,5 @@
 using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using OnlineMongoMigrationProcessor.Context;
 using OnlineMongoMigrationProcessor.Helpers.JobManagement;
@@ -8,13 +9,19 @@ using OnlineMongoMigrationProcessor.Workers;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Tracing;
+using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using static OnlineMongoMigrationProcessor.Helpers.Mongo.MongoHelper;
 
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
 
+#if !LEGACY_MONGODB_DRIVER
 namespace OnlineMongoMigrationProcessor
 {
     public class CollectionLevelChangeStreamProcessor : ChangeStreamProcessor
@@ -22,6 +29,7 @@ namespace OnlineMongoMigrationProcessor
         
         private MongoClient _changeStreamMongoClient;
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _flushLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
+        private static readonly TimeSpan StaleCursorProbeThreshold = TimeSpan.FromHours(48);
 
         public CollectionLevelChangeStreamProcessor(Log log, MongoClient sourceClient, MongoClient targetClient, ActiveMigrationUnitsCache muCache, MigrationSettings config, bool syncBack = false, MigrationWorker? migrationWorker = null)
             : base(log, sourceClient, targetClient, muCache, config, syncBack, migrationWorker)
@@ -187,6 +195,47 @@ namespace OnlineMongoMigrationProcessor
                 .ToList();
         }
 
+
+        private async Task<TaskResult> EnsureProbeEligibilityAsync(MigrationUnit mu)
+        {
+            if (mu == null || mu.ResetChangeStream)
+            {
+                return TaskResult.Abort;
+            }
+
+            DateTime cursorTimestamp = _syncBack ? mu.SyncBackCursorUtcTimestamp : mu.CursorUtcTimestamp;
+            string resumeToken = _syncBack ? mu.SyncBackResumeToken ?? string.Empty : mu.ResumeToken ?? string.Empty;
+
+            if(cursorTimestamp == DateTime.MinValue)
+                return TaskResult.Abort;
+
+            if (!string.IsNullOrEmpty(resumeToken))
+                return TaskResult.Success;
+
+            if (DateTime.UtcNow - cursorTimestamp.ToUniversalTime()< StaleCursorProbeThreshold)
+                return TaskResult.Success;
+
+            var currentJob = MigrationJobContext.CurrentlyActiveJob;
+            string collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
+            _log.WriteLine($"{_syncBackPrefix}Stale cursor with empty resume token for {collectionKey}; running probe before processing.", LogType.Debug);
+
+            bool probeFoundChange = await MongoHelper.TryInitializeResumeTokenWithIsolatedProbeAsync(
+                _log,
+                currentJob,
+                mu,
+                _syncBack,
+                CancellationToken.None,
+                _syncBack ? null : _config.CACertContentsForSourceServer);
+
+            if (!probeFoundChange)
+            {
+                _log.ShowInMonitor($"{_syncBackPrefix}Skipping {collectionKey} - stale cursor and probe found no new change.");
+                return TaskResult.Abort;
+            }
+
+            return TaskResult.Success;
+        }
+
         private void LogProcessingConfiguration(int collectionCount)
         {
             _log.WriteLine($"{_syncBackPrefix}Starting collection-level change stream processing for {collectionCount} collection(s). Each round-robin batch will process {Math.Min(_concurrentProcessors, collectionCount)} collections. Max duration per batch {_processorRunMaxDurationInSec} seconds. Collections without a resume token will be skipped and rechecked every 4 rounds.", LogType.Info);
@@ -264,7 +313,17 @@ namespace OnlineMongoMigrationProcessor
             {
                 try
                 {
-                      await SetChangeStreamOptionandWatch(mu, true, seconds);
+                    var time = System.DateTime.UtcNow;
+                    var ret = await EnsureProbeEligibilityAsync(mu);
+                    if (ret==TaskResult.Success)
+                            await SetChangeStreamOptionandWatch(mu, true, seconds);
+                    else
+                    {
+                        mu.CSUpdatesInLastBatch = 0;
+                        mu.CSNormalizedUpdatesInLastBatch = 0;
+                        mu.CSLastChecked = time;
+                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                    }
                 }
                 catch (Exception ex) when (ex is TimeoutException)
                 {
@@ -396,22 +455,22 @@ namespace OnlineMongoMigrationProcessor
 
                     // Check if both ResumeToken and OriginalResumeToken are not set
                     bool needToSetToken = false;
-                    if(_syncBack)
+                    if (_syncBack)
                         needToSetToken = string.IsNullOrEmpty(mu.SyncBackResumeToken) && !mu.ResetChangeStream;
                     else
                         needToSetToken = string.IsNullOrEmpty(mu.ResumeToken) && !mu.ResetChangeStream;
 
-                    
+
                     if (needToSetToken)
                     {
-                        if(shownlog==false)
+                        if (shownlog == false)
                         {
                             _log.WriteLine($"{_syncBackPrefix}Rechecking collections without a resume token; these collections were previously skipped.", LogType.Info);
                             shownlog = true;
                         }
 
                         MigrationJobContext.AddVerboseLog(($"{_syncBackPrefix}Setting resume token for {mu.DatabaseName}.{mu.CollectionName} (no tokens set)"));
-                        
+
                         try
                         {
 
@@ -427,21 +486,20 @@ namespace OnlineMongoMigrationProcessor
                         }
                         catch (Exception ex)
                         {
-                           // do nothing
+                            // do nothing
                         }
                     }
 
                     //remove from cache
                     MigrationJobContext.MigrationUnitsCache.RemoveMigrationUnit(mu.Id);
                 }
-                
+
             }
             catch (Exception ex)
             {
                 _log.WriteLine($"{_syncBackPrefix}Error in InitializeResumeTokensForUnsetUnitsAsync. Details: {ex}", LogType.Error);
             }
         }
-
         private async Task SetChangeStreamOptionandWatch(MigrationUnit mu, bool IsCSProcessingRun = false, int seconds = 0)
         {
 
@@ -496,8 +554,10 @@ namespace OnlineMongoMigrationProcessor
 
         private (IMongoCollection<BsonDocument>? changeStreamCollection, IMongoCollection<BsonDocument>? targetCollection) GetCollectionsForChangeStream(MigrationUnit mu)
         {
-            string databaseName = mu.DatabaseName;
-            string collectionName = mu.CollectionName;
+            string sourceDatabaseName = mu.DatabaseName;
+            string sourceCollectionName = mu.CollectionName;
+            string targetDatabaseName = mu.GetEffectiveTargetDatabaseName();
+            string targetCollectionName = mu.GetEffectiveTargetCollectionName();
 
             IMongoDatabase targetDb;
             IMongoDatabase changeStreamDb;
@@ -506,22 +566,22 @@ namespace OnlineMongoMigrationProcessor
 
             if (!_syncBack)
             {
-                changeStreamDb = _changeStreamMongoClient.GetDatabase(databaseName);
-                changeStreamCollection = changeStreamDb.GetCollection<BsonDocument>(collectionName);
+                changeStreamDb = _changeStreamMongoClient.GetDatabase(sourceDatabaseName);
+                changeStreamCollection = changeStreamDb.GetCollection<BsonDocument>(sourceCollectionName);
 
                 if (!MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
                 {
-                    targetDb = _targetClient.GetDatabase(databaseName);
-                    targetCollection = targetDb.GetCollection<BsonDocument>(collectionName);
+                    targetDb = _targetClient.GetDatabase(targetDatabaseName);
+                    targetCollection = targetDb.GetCollection<BsonDocument>(targetCollectionName);
                 }
             }
             else
             {
-                targetDb = _sourceClient.GetDatabase(databaseName);
-                targetCollection = targetDb.GetCollection<BsonDocument>(collectionName);
+                targetDb = _sourceClient.GetDatabase(sourceDatabaseName);
+                targetCollection = targetDb.GetCollection<BsonDocument>(sourceCollectionName);
                 
-                changeStreamDb = _changeStreamMongoClient.GetDatabase(databaseName);
-                changeStreamCollection = changeStreamDb.GetCollection<BsonDocument>(collectionName);
+                changeStreamDb = _changeStreamMongoClient.GetDatabase(targetDatabaseName);
+                changeStreamCollection = changeStreamDb.GetCollection<BsonDocument>(targetCollectionName);
             }
 
             return (changeStreamCollection, targetCollection);
@@ -596,13 +656,13 @@ namespace OnlineMongoMigrationProcessor
                 
                 if (targetCollection == null)
                 {
-                    var targetDb2 = _targetClient.GetDatabase(mu.DatabaseName);
-                    targetCollection = targetDb2.GetCollection<BsonDocument>(mu.CollectionName);
+                    var targetDb2 = _targetClient.GetDatabase(mu.GetEffectiveTargetDatabaseName());
+                    targetCollection = targetDb2.GetCollection<BsonDocument>(mu.GetEffectiveTargetCollectionName());
                 }
                 
                 var replaySourceClient = _syncBack ? _targetClient : _sourceClient;
-                var replaySourceDb = replaySourceClient.GetDatabase(mu.DatabaseName);
-                var replaySourceCollection = replaySourceDb.GetCollection<BsonDocument>(mu.CollectionName);
+                var replaySourceDb = replaySourceClient.GetDatabase(_syncBack ? mu.GetEffectiveTargetDatabaseName() : mu.DatabaseName);
+                var replaySourceCollection = replaySourceDb.GetCollection<BsonDocument>(_syncBack ? mu.GetEffectiveTargetCollectionName() : mu.CollectionName);
                 
                 // Use ResumeDocumentKey (full DocumentKey with shard key) instead of ResumeDocumentId
                 var documentKey = mu.ResumeDocumentKey ?? mu.ResumeDocumentId; // Fallback for backward compatibility
@@ -1238,7 +1298,11 @@ namespace OnlineMongoMigrationProcessor
 
             var bsonDoc = BsonDocument.Parse(documentKey);
             var filter = MongoHelper.BuildFilterFromDocumentKey(bsonDoc);
-            var result = sourceCollection.Find(filter).FirstOrDefault(); // Retrieve the document for the resume token
+            var sourceRawCollection = sourceCollection.Database.GetCollection<RawBsonDocument>(sourceCollection.CollectionNamespace.CollectionName);
+            var targetRawCollection = targetCollection.Database.GetCollection<RawBsonDocument>(targetCollection.CollectionNamespace.CollectionName);
+            var renderedFilter = RenderFilterForRawCollection(filter);
+            var rawFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedFilter);
+            var result = sourceRawCollection.Find(rawFilter).FirstOrDefault(); // Retrieve the document for the resume token
 
             try
             {
@@ -1251,7 +1315,7 @@ namespace OnlineMongoMigrationProcessor
                             _log.WriteLine($"{_syncBackPrefix}No document found for insert operation with document key {documentKey} in {sourceCollection.CollectionNamespace}. Skipping insert.", LogType.Warning);
                             return true; // Skip if no document found
                         }
-                        targetCollection.InsertOne(result);
+                        targetRawCollection.InsertOne(result);
                         IncrementDocCounter(mu, opType);
                         return true;
                     case ChangeStreamOperationType.Update:
@@ -1262,7 +1326,7 @@ namespace OnlineMongoMigrationProcessor
                             try
                             {
                                 // Use DocumentKey-based filter for sharded collections
-                                targetCollection.DeleteOne(filter);
+                                targetRawCollection.DeleteOne(rawFilter);
                                 IncrementDocCounter(mu, ChangeStreamOperationType.Delete);
                             }
                             catch
@@ -1272,13 +1336,13 @@ namespace OnlineMongoMigrationProcessor
                         else
                         {
                             // Use DocumentKey-based filter for sharded collections with upsert
-                            targetCollection.ReplaceOne(filter, result, new ReplaceOptions { IsUpsert = true });
+                            targetRawCollection.ReplaceOne(rawFilter, result, new ReplaceOptions { IsUpsert = true });
                             IncrementDocCounter(mu, opType);
                             return true;
                         }
                     case ChangeStreamOperationType.Delete:
                         // Use DocumentKey-based filter for sharded collections
-                        targetCollection.DeleteOne(filter);
+                        targetRawCollection.DeleteOne(rawFilter);
                         IncrementDocCounter(mu, opType);
                         return true;
                     default:
@@ -1404,7 +1468,18 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-
+        private static BsonDocument RenderFilterForRawCollection(FilterDefinition<BsonDocument> filter)
+        {
+            var serializerRegistry = BsonSerializer.SerializerRegistry;
+            var documentSerializer = serializerRegistry.GetSerializer<BsonDocument>();
+#if LEGACY_MONGODB_DRIVER
+            return filter.Render(documentSerializer, serializerRegistry);
+#else
+            var renderArgs = new RenderArgs<BsonDocument>(documentSerializer, serializerRegistry);
+            return filter.Render(renderArgs);
+#endif
+        }
 
     }
 }
+#endif // !LEGACY_MONGODB_DRIVER

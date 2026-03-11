@@ -11,6 +11,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
     /// </summary>
     public static class WorkerCountHelper
     {
+        private const int MIN_DUMP_RESTORE_WORKERS = 0;
         private const int MIN_WORKERS = 1;
         private const int MAX_WORKERS = 16;
         private const double CORES_PER_WORKER = 2.5;
@@ -29,6 +30,20 @@ namespace OnlineMongoMigrationProcessor.Helpers
         }
 
         /// <summary>
+        /// Validates and clamps dump/restore worker count to acceptable range.
+        /// Allows zero to support paused dump/restore pipelines.
+        /// </summary>
+        /// <param name="count">Requested worker count</param>
+        /// <returns>Validated worker count between 0 and MAX_WORKERS</returns>
+        public static int ValidateDumpRestoreWorkerCount(int count)
+        {
+            MigrationJobContext.AddVerboseLog($"WorkerCountHelper.ValidateDumpRestoreWorkerCount: count={count}");
+            if (count < MIN_DUMP_RESTORE_WORKERS) return MIN_DUMP_RESTORE_WORKERS;
+            if (count > MAX_WORKERS) return MAX_WORKERS;
+            return count;
+        }
+
+        /// <summary>
         /// Calculates optimal concurrency based on configuration or system resources.
         /// </summary>
         /// <param name="configOverride">Optional configuration override value</param>
@@ -38,9 +53,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
         {
             MigrationJobContext.AddVerboseLog($"WorkerCountHelper.CalculateOptimalConcurrency: configOverride={configOverride}, isDump={isDump}");
             // User override takes precedence
-            if (configOverride.HasValue && configOverride.Value > 0)
+            if (configOverride.HasValue)
             {
-                return ValidateWorkerCount(configOverride.Value);
+                return ValidateDumpRestoreWorkerCount(configOverride.Value);
             }
 
             // Base calculation: 1 instance per 2.5 cores
@@ -52,7 +67,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
             // Final calculation
             int finalConcurrency = Math.Min(baseConcurrency, memorySafeConcurrency);
 
-            return ValidateWorkerCount(finalConcurrency);
+            return ValidateDumpRestoreWorkerCount(finalConcurrency);
         }
 
         /// <summary>
@@ -95,7 +110,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
         {
             MigrationJobContext.AddVerboseLog($"WorkerCountHelper.AdjustDumpWorkers: newCount={newCount}, currentActiveCount={currentActiveCount}");
             int originalCount = newCount;
-            newCount = ValidateWorkerCount(newCount);
+            newCount = ValidateDumpRestoreWorkerCount(newCount);
             
             int currentPoolCapacity = poolManager.MaxWorkers;
             
@@ -158,7 +173,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
         internal static int AdjustRestoreWorkers(int newCount, int currentActiveCount, WorkerPoolManager poolManager, Log log)
         {
             int originalCount = newCount;
-            newCount = ValidateWorkerCount(newCount);
+            newCount = ValidateDumpRestoreWorkerCount(newCount);
             
             int currentPoolCapacity = poolManager.MaxWorkers;
             

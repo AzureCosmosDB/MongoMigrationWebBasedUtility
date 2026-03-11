@@ -1,41 +1,41 @@
 ﻿using OnlineMongoMigrationProcessor.Context;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Collections.Concurrent;
 
 namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
 {
     public class ActiveMigrationUnitsCache
     {
-       
-        private List<MigrationUnit> _migrationUnits;
+        private readonly ConcurrentDictionary<string, MigrationUnit> _migrationUnits;
+
+        private static string BuildCacheKey(string migrationUnitId, string jobId) => $"{jobId}::{migrationUnitId}";
+
         public ActiveMigrationUnitsCache()
         {
-            _migrationUnits = new List<MigrationUnit>();
+            _migrationUnits = new ConcurrentDictionary<string, MigrationUnit>();
         }
 
 
         public MigrationUnit GetMigrationUnit(string migrationUnitId, string JobId=null)
         {
             MigrationJobContext.AddVerboseLog($"ActiveMigrationUnitsCache.GetMigrationUnit: migrationUnitId={migrationUnitId}, cacheCount={_migrationUnits.Count}");
-            MigrationUnit? mu = null;
 
-
-            if(string.IsNullOrEmpty(JobId))
-                JobId= MigrationJobContext.CurrentlyActiveJob.Id;
-
-            if (_migrationUnits.Count > 0)
-                mu = _migrationUnits.Find(x => x.Id == migrationUnitId && x.JobId== JobId);
-
-            if (mu == null)
+            if (string.IsNullOrEmpty(JobId))
             {
-                mu = MigrationJobContext.GetMigrationUnitFromStorage(JobId, migrationUnitId);
-
-                if (mu != null)
-                    _migrationUnits.Add(mu);
+                JobId = MigrationJobContext.CurrentlyActiveJob?.Id;
+                if (string.IsNullOrEmpty(JobId))
+                    return null;
             }
+
+            var cacheKey = BuildCacheKey(migrationUnitId, JobId);
+
+            if (_migrationUnits.TryGetValue(cacheKey, out MigrationUnit? cachedMigrationUnit))
+                return cachedMigrationUnit;
+
+            var mu = MigrationJobContext.GetMigrationUnitFromStorage(JobId, migrationUnitId);
+
+            if (mu != null)
+                _migrationUnits[cacheKey] = mu;
 
             return mu;
         }
@@ -44,19 +44,27 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
         public  bool UpdateMigrationUnit(MigrationUnit migrationUnit)
         {
             MigrationJobContext.AddVerboseLog($"ActiveMigrationUnitsCache.UpdateMigrationUnit: migrationUnitId={migrationUnit.Id}");
-            var index = _migrationUnits.FindIndex(mu => mu.Id == migrationUnit.Id);
-            if (index != -1)
-            {
-                _migrationUnits[index] = migrationUnit;
-                return true;
-            }
-            return false;
+
+            if (migrationUnit == null || string.IsNullOrEmpty(migrationUnit.Id) || string.IsNullOrEmpty(migrationUnit.JobId))
+                return false;
+
+            var cacheKey = BuildCacheKey(migrationUnit.Id, migrationUnit.JobId);
+            _migrationUnits[cacheKey] = migrationUnit;
+            return true;
         }
 
         public void RemoveMigrationUnit(string migrationUnitId)
         {
             MigrationJobContext.AddVerboseLog($"ActiveMigrationUnitsCache.RemoveMigrationUnit: migrationUnitId={migrationUnitId}");
-            _migrationUnits.RemoveAll(mu => mu.Id == migrationUnitId);
+
+            if (string.IsNullOrEmpty(migrationUnitId))
+                return;
+
+            foreach (var key in _migrationUnits.Keys)
+            {
+                if (key.EndsWith($"::{migrationUnitId}", StringComparison.Ordinal))
+                    _migrationUnits.TryRemove(key, out _);
+            }
         }
     }
 }

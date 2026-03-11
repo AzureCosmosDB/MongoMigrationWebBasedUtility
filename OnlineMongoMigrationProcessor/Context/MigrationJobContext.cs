@@ -39,6 +39,15 @@ namespace OnlineMongoMigrationProcessor.Context
 
         public static bool ControlledPauseRequested { get; private set; } = false;
 
+#if LEGACY_MONGODB_DRIVER
+        /// <summary>
+        /// Indicates the legacy MongoDB driver is in use; online migration (change streams) is not supported.
+        /// </summary>
+        public static bool IsLegacyDriver => true;
+#else
+        public static bool IsLegacyDriver => false;
+#endif
+
         public static ConnectionAccessor SourceConnectionString => new(_sourceConnectionStrings);
         public static ConnectionAccessor TargetConnectionString => new(_targetConnectionStrings);
 

@@ -13,7 +13,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using ZstdSharp.Unsafe;
 
 namespace OnlineMongoMigrationProcessor.Partitioner
 {
@@ -145,6 +144,17 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 };
 
                 // Create the change stream cursor
+#if LEGACY_MONGODB_DRIVER
+                using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options);
+
+                await Task.Run(() => cursor.MoveNext(token), token);
+
+                var resumetoken = cursor.Current?.FirstOrDefault()?.ResumeToken;
+                if (resumetoken == null)
+                {
+                    return null;
+                }
+#else
                 using var cursor = sourceCollection.Watch<ChangeStreamDocument<BsonDocument>>(pipeline, options);
 
                 await Task.Run(() => cursor.MoveNext(token), token);
@@ -154,6 +164,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 {
                     return null;
                 }
+#endif
 
                 // Extract the LSN from the resume token using ExtractValuesFromResumeToken helper method
                 var(lsn, rid, min, max) = MongoHelper.ExtractValuesFromResumeToken(resumetoken);

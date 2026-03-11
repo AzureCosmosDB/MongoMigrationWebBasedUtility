@@ -16,6 +16,7 @@ using OnlineMongoMigrationProcessor.Context;
 
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
 
+#if !LEGACY_MONGODB_DRIVER
 namespace OnlineMongoMigrationProcessor
 {
     public abstract class ChangeStreamProcessor : IDisposable
@@ -212,15 +213,61 @@ namespace OnlineMongoMigrationProcessor
 
         protected abstract Task ProcessChangeStreamsAsync(CancellationToken token);
 
+        protected MigrationUnit? ResolveMigrationUnitFromNamespace(string databaseName, string collectionName)
+        {
+            var sourceId = Helper.GenerateMigrationUnitId(databaseName, collectionName);
+            if (_migrationUnitsToProcess.ContainsKey(sourceId))
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(sourceId);
+                if (mu != null)
+                {
+                    mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
+                    return mu;
+                }
+            }
+
+            if (MigrationJobContext.CurrentlyActiveJob?.MigrationUnitBasics == null)
+            {
+                return null;
+            }
+
+            foreach (var mub in MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics)
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(mub.Id);
+                if (mu == null)
+                {
+                    continue;
+                }
+
+                if (!_migrationUnitsToProcess.ContainsKey(mu.Id))
+                {
+                    continue;
+                }
+
+                if (string.Equals(mu.GetEffectiveTargetDatabaseName(), databaseName, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(mu.GetEffectiveTargetCollectionName(), collectionName, StringComparison.OrdinalIgnoreCase))
+                {
+                    mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
+                    return mu;
+                }
+            }
+
+            return null;
+        }
+
         
         protected IMongoCollection<BsonDocument> GetTargetCollection(string databaseName, string collectionName)
         {
+            var mu = ResolveMigrationUnitFromNamespace(databaseName, collectionName);
+
             if (!_syncBack)
             {
                 if (!MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
                 {
-                    var targetDb = _targetClient.GetDatabase(databaseName);
-                    return targetDb.GetCollection<BsonDocument>(collectionName);
+                    var targetDbName = mu?.GetEffectiveTargetDatabaseName() ?? databaseName;
+                    var targetCollectionName = mu?.GetEffectiveTargetCollectionName() ?? collectionName;
+                    var targetDb = _targetClient.GetDatabase(targetDbName);
+                    return targetDb.GetCollection<BsonDocument>(targetCollectionName);
                 }
                 else
                 {
@@ -232,8 +279,10 @@ namespace OnlineMongoMigrationProcessor
             else
             {
                 // For sync back, target is the source
-                var targetDb = _sourceClient.GetDatabase(databaseName);
-                return targetDb.GetCollection<BsonDocument>(collectionName);
+                var targetDbName = mu?.DatabaseName ?? databaseName;
+                var targetCollectionName = mu?.CollectionName ?? collectionName;
+                var targetDb = _sourceClient.GetDatabase(targetDbName);
+                return targetDb.GetCollection<BsonDocument>(targetCollectionName);
             }
         }
 
@@ -478,11 +527,13 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 var aggressiveHelper = new AggressiveChangeStreamHelper(_targetClient, _log, MigrationJobContext.CurrentlyActiveJob.Id ?? string.Empty);
+                var targetDatabaseName = _syncBack ? mu.DatabaseName : mu.GetEffectiveTargetDatabaseName();
+                var targetCollectionName = _syncBack ? mu.CollectionName : mu.GetEffectiveTargetCollectionName();
 
                 _log.WriteLine($"Processing aggressive change stream cleanup for {mu.DatabaseName}.{mu.CollectionName}");
 
                 // First, apply stored inserts and updates
-                var (inserted, updated, skipped) = await aggressiveHelper.ApplyStoredChangesAsync(mu.DatabaseName, mu.CollectionName, _sourceClient);
+                var (inserted, updated, skipped) = await aggressiveHelper.ApplyStoredChangesAsync(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName, _sourceClient);
                 
                 if (inserted > 0 || updated > 0)
                 {
@@ -502,7 +553,7 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 // Then, process deletes
-                long deletedCount = await aggressiveHelper.DeleteStoredDocsAsync(mu.DatabaseName, mu.CollectionName);
+                long deletedCount = await aggressiveHelper.DeleteStoredDocsAsync(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName);
 
                 // Mark cleanup as completed
                 mu.AggressiveCacheDeleted = true;
@@ -510,7 +561,7 @@ namespace OnlineMongoMigrationProcessor
                 
 
                 // retry deletion in case some documents were added during the first deletion pass
-                deletedCount += await aggressiveHelper.DeleteStoredDocsAsync(mu.DatabaseName, mu.CollectionName);
+                deletedCount += await aggressiveHelper.DeleteStoredDocsAsync(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName);
 
                 if (deletedCount > 0)
                 {
@@ -620,3 +671,4 @@ namespace OnlineMongoMigrationProcessor
         #endregion
     }
 }
+#endif // !LEGACY_MONGODB_DRIVER

@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using ZstdSharp.Unsafe;
 
 namespace OnlineMongoMigrationProcessor.Persistence
 {
@@ -178,6 +177,22 @@ namespace OnlineMongoMigrationProcessor.Persistence
             return $"{_appId}.{id.Replace('\\', '_').Replace('/', '_')}";
         }
 
+        private static FilterDefinition<BsonDocument> BuildJobIdFilter(string id)
+        {
+            var normalizedId = NormalizeIdForMongo(id);
+            if (string.Equals(normalizedId, id, StringComparison.Ordinal))
+            {
+                return Builders<BsonDocument>.Filter.Eq("JobId", id);
+            }
+
+            return Builders<BsonDocument>.Filter.Or(
+                Builders<BsonDocument>.Filter.Eq("JobId", normalizedId),
+                Builders<BsonDocument>.Filter.Eq("JobId", id),
+                Builders<BsonDocument>.Filter.Regex(
+                    "JobId",
+                    new BsonRegularExpression($"\\.{System.Text.RegularExpressions.Regex.Escape(id)}$")));
+        }
+
         /// <summary>
         /// Upserts a document with the specified _id.
         /// Creates a new document if it doesn't exist, updates if it does.
@@ -220,10 +235,17 @@ namespace OnlineMongoMigrationProcessor.Persistence
 
                 var filter = Builders<BsonDocument>.Filter.Eq("_id", normalizedId);
 
+#if LEGACY_MONGODB_DRIVER
+                if (IsLog)
+                    _logCollection!.ReplaceOne(filter, document, new UpdateOptions { IsUpsert = true });
+                else
+                    _dataCollection!.ReplaceOne(filter, document, new UpdateOptions { IsUpsert = true });
+#else
                 if (IsLog)
                     _logCollection!.ReplaceOne(filter, document, new ReplaceOptions { IsUpsert = true });
                 else
                     _dataCollection!.ReplaceOne(filter, document, new ReplaceOptions { IsUpsert = true });
+#endif
 
                 return true;
             }
@@ -366,14 +388,32 @@ namespace OnlineMongoMigrationProcessor.Persistence
             
             try
             {
-                var normalizedId = NormalizeIdForMongo(id);
-                var filter = Builders<BsonDocument>.Filter.Eq("JobId", normalizedId);
+                var filter = BuildJobIdFilter(id);
                 var count = (int)_logCollection!.CountDocuments(filter);
                 return count;
             }
             catch
             {
-                return 0;
+                try
+                {
+                    var filter = BuildJobIdFilter(id);
+                    int count = 0;
+                    var projection = Builders<BsonDocument>.Projection.Include("_id");
+
+                    using (var cursor = _logCollection!.Find(filter).Project(projection).ToCursor())
+                    {
+                        while (cursor.MoveNext())
+                        {
+                            count += cursor.Current.Count();
+                        }
+                    }
+
+                    return count;
+                }
+                catch
+                {
+                    return 0;
+                }
             }
         }
 
@@ -385,8 +425,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
             
             try
             {
-                var normalizedId = NormalizeIdForMongo(id);
-                var filter = Builders<BsonDocument>.Filter.Eq("JobId", normalizedId);
+                var filter = BuildJobIdFilter(id);
                 var sort = Builders<BsonDocument>.Sort.Ascending("_id");
                 
                 // Use StringBuilder to stream format directly without loading all docs into a list
@@ -447,8 +486,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                 throw new ArgumentException("Path cannot be null or empty", nameof(Id));
             try
             {
-                var normalizedId = NormalizeIdForMongo(Id);
-                var filter = Builders<BsonDocument>.Filter.Eq("JobId", normalizedId);
+                var filter = BuildJobIdFilter(Id);
                 var sort = Builders<BsonDocument>.Sort.Ascending("_id");
                 
                 // First, get the total count efficiently
@@ -555,8 +593,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
 
             try
             {
-                var normalizedId = NormalizeIdForMongo(id);
-                var filter = Builders<BsonDocument>.Filter.Eq("JobId", normalizedId);
+                var filter = BuildJobIdFilter(id);
                 
                 // Sort by _id (ObjectId contains timestamp, so this gives chronological order)
                 var sort = Builders<BsonDocument>.Sort.Ascending("_id");
@@ -645,8 +682,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
 
             try
             {
-                var normalizedJobId = NormalizeIdForMongo(jobId);
-                var filter = Builders<BsonDocument>.Filter.Eq("JobId", normalizedJobId);
+                var filter = BuildJobIdFilter(jobId);
                 var result = _logCollection!.DeleteMany(filter);
                 return result.DeletedCount;
             }

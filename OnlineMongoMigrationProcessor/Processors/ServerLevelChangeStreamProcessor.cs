@@ -20,6 +20,7 @@ using static System.Net.Mime.MediaTypeNames;
 
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
 
+#if !LEGACY_MONGODB_DRIVER
 namespace OnlineMongoMigrationProcessor
 {
     public class ServerLevelChangeStreamProcessor : ChangeStreamProcessor
@@ -267,8 +268,7 @@ namespace OnlineMongoMigrationProcessor
                         latestResumeToken=change.ResumeToken.ToJson();
                         latestTimestamp = GetChangeTime(change);
                         collectionKey = change.CollectionNamespace.ToString();
-                        var id = Helper.GenerateMigrationUnitId(collectionKey);
-                        if (_migrationUnitsToProcess.ContainsKey(id) || _monitorAllCollections)
+                        if (_monitorAllCollections || TryResolveQueuedMigrationUnit(collectionKey, out _))
                         {
                             cancellationToken.ThrowIfCancellationRequested();
                             if (ExecutionCancelled) break;
@@ -318,9 +318,7 @@ namespace OnlineMongoMigrationProcessor
                             latestTimestamp = GetChangeTime(change);
                             collectionKey = change.CollectionNamespace.ToString();
 
-                            var id= Helper.GenerateMigrationUnitId(collectionKey);
-
-                            if (_migrationUnitsToProcess.ContainsKey(id) || _monitorAllCollections)
+                            if (_monitorAllCollections || TryResolveQueuedMigrationUnit(collectionKey, out _))
                             {
                                 cancellationToken.ThrowIfCancellationRequested();
                                 if (ExecutionCancelled) break;
@@ -419,6 +417,20 @@ namespace OnlineMongoMigrationProcessor
             MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
+        private bool TryResolveQueuedMigrationUnit(string collectionKey, out MigrationUnit? migrationUnit)
+        {
+            migrationUnit = null;
+
+            var parts = collectionKey.Split('.');
+            if (parts.Length != 2)
+            {
+                return false;
+            }
+
+            migrationUnit = ResolveMigrationUnitFromNamespace(parts[0], parts[1]);
+            return migrationUnit != null;
+        }
+
         private async Task<(bool success, long counter)> PreProcessChange(ChangeStreamDocument<BsonDocument> change, long counter)
         {
             try
@@ -443,15 +455,11 @@ namespace OnlineMongoMigrationProcessor
                 }
                 else
                 {
-                    // Check if this change belongs to one of our collections with SourceStatus.OK
-                    var id = Helper.GenerateMigrationUnitId(collectionKey);
-                    if (!_migrationUnitsToProcess.ContainsKey(id))
+                    if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
                     {
                         return (true, counter); // Skip changes for collections not in our job
                     }
 
-                    migrationUnit = MigrationJobContext.GetMigrationUnit(Helper.GenerateMigrationUnitId(databaseName, collectionName));
-                    migrationUnit.ParentJob = MigrationJobContext.CurrentlyActiveJob;
                     // Check user filter condition               
                     var userFilterDoc = MongoHelper.GetFilterDoc(migrationUnit.UserFilter);
 
@@ -513,17 +521,11 @@ namespace OnlineMongoMigrationProcessor
             {
                 var collectionKey = kvp.Key;
                 var docs = kvp.Value;
-                //MigrationUnit migrationUnit;
-                bool found = false;
                 int totalChanges = docs.DocsToBeInserted.Count + docs.DocsToBeUpdated.Count + docs.DocsToBeDeleted.Count;
 
                 if (totalChanges > 0)
                 {
-
-                    var muId = Helper.GenerateMigrationUnitId(collectionKey);
-                    var mu = MigrationJobContext.GetMigrationUnit(muId);
-                    mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
-                    if (mu != null)
+                    if (TryResolveQueuedMigrationUnit(collectionKey, out var mu) && mu != null)
                     {
                         migrationUnit = mu;
                         var targetCollection = GetTargetCollection(migrationUnit.DatabaseName, migrationUnit.CollectionName);
@@ -531,7 +533,7 @@ namespace OnlineMongoMigrationProcessor
                         if (_monitorAllCollections)
                         {
                             //since we want the chnages to  be reported to this dummy collection.
-                            muId = Helper.GenerateMigrationUnitId("DUMMY.DUMMY");
+                            var muId = Helper.GenerateMigrationUnitId("DUMMY.DUMMY");
                             migrationUnit = MigrationJobContext.GetMigrationUnit(muId);
                             migrationUnit.ParentJob = MigrationJobContext.CurrentlyActiveJob;
                         }
@@ -604,14 +606,6 @@ namespace OnlineMongoMigrationProcessor
             var bsonDoc = BsonDocument.Parse(documentKey);
             var filter = MongoHelper.BuildFilterFromDocumentKey(bsonDoc);
 
-            // Validate that the collection key is in our migration units
-            var id = Helper.GenerateMigrationUnitId(collectionKey);
-            if (!_migrationUnitsToProcess.ContainsKey(id))
-            {
-                _log.WriteLine($"Collection {collectionKey} for server-level auto replay is not in migration units. Skipping replay.");
-                return true;
-            }
-
             var parts = collectionKey.Split('.');
             if (parts.Length != 2)
             {
@@ -619,8 +613,16 @@ namespace OnlineMongoMigrationProcessor
                 return true;
             }
 
-            var databaseName = parts[0];
-            var collectionName = parts[1];
+            if (!TryResolveQueuedMigrationUnit(collectionKey, out var migrationUnit) || migrationUnit == null)
+            {
+                _log.WriteLine($"Collection {collectionKey} for server-level auto replay is not in migration units. Skipping replay.");
+                return true;
+            }
+
+            var sourceDatabaseName = parts[0];
+            var sourceCollectionName = parts[1];
+            var targetDatabaseName = migrationUnit.GetEffectiveTargetDatabaseName();
+            var targetCollectionName = migrationUnit.GetEffectiveTargetCollectionName();
 
             IMongoDatabase sourceDb;
             IMongoDatabase targetDb;
@@ -629,13 +631,13 @@ namespace OnlineMongoMigrationProcessor
 
             if (!_syncBack)
             {
-                sourceDb = _sourceClient.GetDatabase(databaseName);
-                sourceCollection = sourceDb.GetCollection<BsonDocument>(collectionName);
+                sourceDb = _sourceClient.GetDatabase(sourceDatabaseName);
+                sourceCollection = sourceDb.GetCollection<BsonDocument>(sourceCollectionName);
 
                 if (!MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
                 {
-                    targetDb = _targetClient.GetDatabase(databaseName);
-                    targetCollection = targetDb.GetCollection<BsonDocument>(collectionName);
+                    targetDb = _targetClient.GetDatabase(targetDatabaseName);
+                    targetCollection = targetDb.GetCollection<BsonDocument>(targetCollectionName);
                 }
                 else
                 {
@@ -645,18 +647,21 @@ namespace OnlineMongoMigrationProcessor
             else
             {
                 // For sync back, target is source and vice versa
-                targetDb = _sourceClient.GetDatabase(databaseName);
-                targetCollection = targetDb.GetCollection<BsonDocument>(collectionName);
+                targetDb = _sourceClient.GetDatabase(migrationUnit.DatabaseName);
+                targetCollection = targetDb.GetCollection<BsonDocument>(migrationUnit.CollectionName);
 
-                sourceDb = _targetClient.GetDatabase(databaseName);
-                sourceCollection = sourceDb.GetCollection<BsonDocument>(collectionName);
+                sourceDb = _targetClient.GetDatabase(targetDatabaseName);
+                sourceCollection = sourceDb.GetCollection<BsonDocument>(targetCollectionName);
             }
 
-            var result = sourceCollection.Find(filter).FirstOrDefault();
+            var sourceRawCollection = sourceCollection.Database.GetCollection<RawBsonDocument>(sourceCollection.CollectionNamespace.CollectionName);
+            var targetRawCollection = targetCollection.Database.GetCollection<RawBsonDocument>(targetCollection.CollectionNamespace.CollectionName);
+            var renderedFilter = RenderFilterForRawCollection(filter);
+            var rawFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedFilter);
+            var result = sourceRawCollection.Find(rawFilter).FirstOrDefault();
 
             try
             {
-                var migrationUnit = MigrationJobContext.GetMigrationUnit(Helper.GenerateMigrationUnitId(databaseName, collectionName));
                 migrationUnit.ParentJob = MigrationJobContext.CurrentlyActiveJob;
                 IncrementEventCounter(migrationUnit, operationType);
 
@@ -668,7 +673,7 @@ namespace OnlineMongoMigrationProcessor
                             _log.WriteLine($"No document found for insert operation with document key {documentKey} in {collectionKey}. Skipping insert.");
                             return true;
                         }
-                        targetCollection.InsertOne(result);
+                        targetRawCollection.InsertOne(result);
                         IncrementDocCounter(migrationUnit, operationType);
                         return true;
 
@@ -680,7 +685,7 @@ namespace OnlineMongoMigrationProcessor
                             try
                             {
                                 // Use DocumentKey-based filter for sharded collections
-                                targetCollection.DeleteOne(filter);
+                                targetRawCollection.DeleteOne(rawFilter);
                                 IncrementDocCounter(migrationUnit, ChangeStreamOperationType.Delete);
                             }
                             catch { }
@@ -689,14 +694,14 @@ namespace OnlineMongoMigrationProcessor
                         else
                         {
                             // Use DocumentKey-based filter for sharded collections with upsert
-                            targetCollection.ReplaceOne(filter, result, new ReplaceOptions { IsUpsert = true });
+                            targetRawCollection.ReplaceOne(rawFilter, result, new ReplaceOptions { IsUpsert = true });
                             IncrementDocCounter(migrationUnit, operationType);
                             return true;
                         }
 
                     case ChangeStreamOperationType.Delete:
                         // Use DocumentKey-based filter for sharded collections
-                        targetCollection.DeleteOne(filter);
+                        targetRawCollection.DeleteOne(rawFilter);
                         IncrementDocCounter(migrationUnit, operationType);
                         return true;
 
@@ -912,6 +917,19 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
+        private static BsonDocument RenderFilterForRawCollection(FilterDefinition<BsonDocument> filter)
+        {
+            var serializerRegistry = BsonSerializer.SerializerRegistry;
+            var documentSerializer = serializerRegistry.GetSerializer<BsonDocument>();
+#if LEGACY_MONGODB_DRIVER
+            return filter.Render(documentSerializer, serializerRegistry);
+#else
+            var renderArgs = new RenderArgs<BsonDocument>(documentSerializer, serializerRegistry);
+            return filter.Render(renderArgs);
+#endif
+        }
+
         #endregion
     }
 }
+#endif // !LEGACY_MONGODB_DRIVER

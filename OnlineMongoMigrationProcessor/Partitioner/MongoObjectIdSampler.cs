@@ -259,6 +259,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 var doc = await _collection
                     .Find(rangeFilter)
                     .Sort(Builders<BsonDocument>.Sort.Ascending("_id"))
+                    .Project(Builders<BsonDocument>.Projection.Include("_id"))
                     .Skip((int)recordsPerRange - 1) // Skip to get the boundary document
                     .Limit(1)
                     .FirstOrDefaultAsync(cancellationToken);
@@ -566,6 +567,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             var minDoc = await collection
                 .Find(FilterDefinition<BsonDocument>.Empty)
                 .Sort(Builders<BsonDocument>.Sort.Ascending("_id"))
+                .Project(Builders<BsonDocument>.Projection.Include("_id"))
                 .Limit(1)
                 .FirstOrDefaultAsync(cts.Token);
 
@@ -590,6 +592,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             var maxDoc = await collection
                 .Find(FilterDefinition<BsonDocument>.Empty)
                 .Sort(Builders<BsonDocument>.Sort.Descending("_id"))
+                .Project(Builders<BsonDocument>.Projection.Include("_id"))
                 .Limit(1)
                 .FirstOrDefaultAsync(cts.Token);
 

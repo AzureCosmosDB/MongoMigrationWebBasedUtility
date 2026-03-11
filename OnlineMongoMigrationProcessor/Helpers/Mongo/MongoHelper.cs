@@ -9,7 +9,9 @@ using OnlineMongoMigrationProcessor.Helpers.JobManagement;
 using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -362,8 +364,15 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             {
                 FilterDefinition<BsonDocument> filter = GenerateQueryFilter(gte, lte, dataType, userFilterDoc, skipDataTypeFilter);
 
+                //bool genError= false;
+                //if (genError)
+                //    throw new Exception("Testing timeout");
+
                 // Execute the query and return the count with 10 minute timeout
                 return collection.CountDocuments(filter, new CountOptions { MaxTime = TimeSpan.FromMinutes(10) });
+
+
+                
             }
             catch(Exception ex)
             {
@@ -555,6 +564,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             return version;
         }
 
+#if !LEGACY_MONGODB_DRIVER
         public async static Task ResetCS(MigrationJob job, MigrationUnit mu, bool syncBack)
         {
             MigrationJobContext.AddVerboseLog($"{(syncBack ? "SyncBack: " : string.Empty)}Resetting change stream resume token for {mu.DatabaseName}.{mu.CollectionName}");
@@ -618,8 +628,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     if (!useServerLevel)
                     {
                         //BsonDocument resumeToken = new BsonDocument();
-                        var database = client.GetDatabase(mu.DatabaseName);
-                        collection = database.GetCollection<BsonDocument>(mu.CollectionName);
+                        var collectionDatabaseName = syncBack ? mu.GetEffectiveTargetDatabaseName() : mu.DatabaseName;
+                        var collectionName = syncBack ? mu.GetEffectiveTargetCollectionName() : mu.CollectionName;
+                        var database = client.GetDatabase(collectionDatabaseName);
+                        collection = database.GetCollection<BsonDocument>(collectionName);
 
                         // Initialize with safe defaults; will be overridden below
                     
@@ -898,6 +910,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 ResetCounters(mu, syncBack);
             }
         }
+#endif
 
     
         public static async Task<(bool Exits,bool IsCollection)> CheckIsCollectionAsync(MongoClient client, string databaseName, string collectionName)
@@ -1116,11 +1129,12 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                 // Connect to the target database
                 var targetClient = MongoClientFactory.Create(log,targetConnectionString);
-                var targetDatabaseName = sourceDatabase.DatabaseNamespace.DatabaseName;
+                var targetDatabaseName = mu.GetEffectiveTargetDatabaseName();
                 var targetDatabase = targetClient.GetDatabase(targetDatabaseName);
-                var targetCollectionName = sourceCollectionName;
+                var targetCollectionName = mu.GetEffectiveTargetCollectionName();
+                var namespaceForLog = Log.FormatNamespaceForLog(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName);
 
-			    log.WriteLine($"Creating collection: {targetDatabaseName}.{targetCollectionName}");
+			    log.WriteLine($"Creating collection: {namespaceForLog}");
                 
 
                 // Check if the target collection exists
@@ -1132,14 +1146,14 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 if (targetCollectionExists)
                 {
                     await targetDatabase.DropCollectionAsync(targetCollectionName);
-				    log.WriteLine($"Deleted existing target collection: {targetDatabaseName}.{targetCollectionName}");
+				    log.WriteLine($"Deleted existing target collection: {namespaceForLog}");
                     
                 }
 
                 if (skipIndexes)
                     return true;
 
-			    log.WriteLine($"Creating indexes for: {targetDatabaseName}.{targetCollectionName}");
+                log.WriteLine($"Creating indexes for: {namespaceForLog}");
                 
 
                 // Create the target collection
@@ -1151,7 +1165,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 IndexCopier indexCopier = new IndexCopier();
                 int count=await indexCopier.CopyIndexesAsync(sourceCollection, targetClient, targetDatabaseName, targetCollectionName, log);
                 mu.IndexesMigrated = count;
-                log.WriteLine($"{count} Indexes copied successfully to {targetDatabaseName}.{targetCollectionName}");
+                log.WriteLine($"{count} Indexes copied successfully to {namespaceForLog}");
                 
                 return true;
             }
@@ -1281,7 +1295,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
             if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
             {
-                idConditions.Add($"\\\"$lte\\\": {BsonValueToString(lte, dataType)}");
+                idConditions.Add($"\\\"$lt\\\": {BsonValueToString(lte, dataType)}");
             }
 
             var rootConditions = new List<string>();
@@ -1450,6 +1464,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
 
 
+#if !LEGACY_MONGODB_DRIVER
         /// <summary>
         /// Common function to set resume token properties on either MigrationJob or MigrationUnit
         /// </summary>
@@ -1612,6 +1627,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             mu.CSUpdatesInLastBatch = 0;
 
         }
+#endif
 
         public static BsonTimestamp ConvertToBsonTimestamp(DateTime dateTime)
         {
@@ -1635,6 +1651,232 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 .Any(s => s.Host.Contains("mongo.cosmos.azure.com"));
         }
 
+#if !LEGACY_MONGODB_DRIVER
+        /// <summary>
+        /// Request model for isolated resume token probe process
+        /// </summary>
+        public sealed class ResumeTokenProbeRequest
+        {
+            public string? ConnectionString { get; set; }
+            public string? DatabaseName { get; set; }
+            public string? CollectionName { get; set; }
+            public int TimeoutSeconds { get; set; }
+            public string? StartAtUtc { get; set; }
+            public string? PEMFileContents { get; set; }
+        }
+
+        /// <summary>
+        /// Result model for isolated resume token probe process
+        /// </summary>
+        public sealed class ResumeTokenProbeResult
+        {
+            public bool Success { get; set; }
+            public string? ResumeToken { get; set; }
+            public string? OperationType { get; set; }
+            public string? ResumeDocumentKey { get; set; }
+            public DateTime? CursorUtcTimestamp { get; set; }
+            public string? Error { get; set; }
+        }
+
+        /// <summary>
+        /// Initializes resume token for a collection using an isolated process with hard timeout
+        /// </summary>
+        public async static Task<bool> TryInitializeResumeTokenWithIsolatedProbeAsync(
+            Log log,
+            MigrationJob currentJob,
+            MigrationUnit mu,
+            bool syncBack,
+            CancellationToken token,
+            string? pemFileContents = null)
+        {
+            string syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
+            string probeDllPath = GetResumeTokenProbeDllPath();
+            string probeDatabaseName = syncBack ? mu.GetEffectiveTargetDatabaseName() : mu.DatabaseName;
+            string probeCollectionName = syncBack ? mu.GetEffectiveTargetCollectionName() : mu.CollectionName;
+
+            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}Resolved ResumeTokenProbeExe path for {probeDatabaseName}.{probeCollectionName}: {probeDllPath}");
+            if (string.IsNullOrWhiteSpace(probeDllPath) || !File.Exists(probeDllPath))
+            {
+                log.WriteLine($"{syncBackPrefix}ResumeTokenProbeExe DLL not found. Expected path: {probeDllPath}", LogType.Warning);
+                return false;
+            }
+
+            string connectionString = syncBack
+                ? MigrationJobContext.TargetConnectionString[currentJob.Id]
+                : MigrationJobContext.SourceConnectionString[currentJob.Id];
+
+            DateTime startedOnUtc = syncBack
+                ? (mu.SyncBackChangeStreamStartedOn?.ToUniversalTime() ?? DateTime.UtcNow)
+                : (mu.ChangeStreamStartedOn?.ToUniversalTime() ?? DateTime.UtcNow);
+            DateTime csLastChecked = mu.CSLastChecked?.ToUniversalTime() ?? DateTime.MinValue;
+            if (csLastChecked == DateTime.MinValue)
+            {
+                csLastChecked = startedOnUtc;
+            }
+
+            DateTime effectiveStartTime = (DateTime.UtcNow - startedOnUtc).TotalMinutes <= 10
+                ? startedOnUtc
+                : csLastChecked;
+
+            var request = new ResumeTokenProbeRequest
+            {
+                ConnectionString = connectionString,
+                DatabaseName = probeDatabaseName,
+                CollectionName = probeCollectionName,
+                TimeoutSeconds = 30,
+                StartAtUtc = effectiveStartTime.ToString("O"),
+                PEMFileContents = syncBack ? null : pemFileContents
+            };
+
+            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}Launching ResumeTokenProbeExe for {probeDatabaseName}.{probeCollectionName} with StartAtUtc={request.StartAtUtc}");
+
+            string payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(request)));
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                Arguments = $"\"{probeDllPath}\" \"{payload}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(probeDllPath) ?? AppContext.BaseDirectory
+            };
+
+            using var process = new Process { StartInfo = startInfo };
+            process.Start();
+            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe process started for {mu.DatabaseName}.{mu.CollectionName}, pid={process.Id}");
+
+            Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = process.StandardError.ReadToEndAsync();
+
+            using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            waitCts.CancelAfter(TimeSpan.FromSeconds(30));
+
+            try
+            {
+                await process.WaitForExitAsync(waitCts.Token);
+                MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe process exited for {mu.DatabaseName}.{mu.CollectionName} with code {process.ExitCode}");
+            }
+            catch (OperationCanceledException)
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    log.WriteLine($"{syncBackPrefix}ResumeTokenProbeExe killed after 30 seconds for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                    MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe timeout kill issued for {mu.DatabaseName}.{mu.CollectionName}");
+                }
+            }
+
+            string stdout = await outputTask;
+            string stderr = await errorTask;
+
+            if (string.IsNullOrWhiteSpace(stdout))
+            {
+                if (!string.IsNullOrWhiteSpace(stderr))
+                {
+                    log.WriteLine($"{syncBackPrefix}ResumeTokenProbeExe error for {mu.DatabaseName}.{mu.CollectionName}: {stderr}", LogType.Debug);
+                    MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe stderr for {mu.DatabaseName}.{mu.CollectionName}: {stderr}");
+                }
+                return false;
+            }
+
+            ResumeTokenProbeResult? probeResult;
+            try
+            {
+                probeResult = System.Text.Json.JsonSerializer.Deserialize<ResumeTokenProbeResult>(stdout, new System.Text.Json.JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch (Exception)
+            {
+                log.WriteLine($"{syncBackPrefix}ResumeTokenProbeExe returned invalid JSON for {mu.DatabaseName}.{mu.CollectionName}: {stdout}", LogType.Debug);
+                MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe invalid JSON payload for {mu.DatabaseName}.{mu.CollectionName}");
+                return false;
+            }
+
+            if (probeResult == null || !probeResult.Success || string.IsNullOrWhiteSpace(probeResult.ResumeToken))
+            {
+                if (!string.IsNullOrWhiteSpace(probeResult?.Error))
+                {
+                    log.WriteLine($"{syncBackPrefix}ResumeTokenProbeExe did not set token for {mu.DatabaseName}.{mu.CollectionName}: {probeResult.Error}", LogType.Debug);
+                    MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe non-success result for {mu.DatabaseName}.{mu.CollectionName}: {probeResult.Error}");
+                }
+                return false;
+            }
+
+            // Signal that a change was detected - SetChangeStreamResumeTokenAsync will handle the actual update
+            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe found new change for {mu.DatabaseName}.{mu.CollectionName} (signal-only mode).");
+            return true;
+        }
+
+        /// <summary>
+        /// Locates the ResumeTokenProbeExe.dll in the application directory or search paths
+        /// </summary>
+        private static string GetResumeTokenProbeDllPath()
+        {
+            string primaryPath = Path.Combine(AppContext.BaseDirectory, "ResumeTokenProbeExe.dll");
+            if (File.Exists(primaryPath))
+            {
+                return primaryPath;
+            }
+
+            var searchRoots = new List<string>
+            {
+                AppContext.BaseDirectory,
+                Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..")),
+                Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..")),
+                Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."))
+            };
+
+            var bundledPaths = new List<string>
+            {
+                Path.Combine(AppContext.BaseDirectory, "ResumeTokenProbeArtifacts", "ResumeTokenProbeExe.dll"),
+                Path.Combine(AppContext.BaseDirectory, "ResumeTokenProbeExe", "ResumeTokenProbeExe.dll")
+            };
+
+            foreach (var candidate in bundledPaths)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            foreach (var root in searchRoots.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var candidate = Directory
+                        .EnumerateFiles(root, "ResumeTokenProbeExe.dll", SearchOption.AllDirectories)
+                        .FirstOrDefault();
+
+                    if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+                catch
+                {
+                    // ignore inaccessible paths
+                }
+            }
+
+            string fallbackPath = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory,
+                "..",
+                "..",
+                "..",
+                "..",
+                "ResumeTokenProbeExe",
+                "bin",
+                "Debug",
+                "net9.0",
+                "ResumeTokenProbeExe.dll"));
+
+            return fallbackPath;
+        }
+#endif
 
     }
 }

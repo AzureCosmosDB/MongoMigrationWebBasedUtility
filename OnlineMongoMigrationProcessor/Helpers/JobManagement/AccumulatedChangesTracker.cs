@@ -67,7 +67,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             lock (_lock)
             {
                 _totalEventCount++;
+#if LEGACY_MONGODB_DRIVER
+                var changeCollectionKey = $"{change.CollectionNamespace?.DatabaseNamespace?.DatabaseName}.{change.CollectionNamespace?.CollectionName}";
+#else
                 var changeCollectionKey = $"{change.DatabaseNamespace?.DatabaseName}.{change.CollectionNamespace?.CollectionName}";
+#endif
                 if (changeCollectionKey != _collectionKey)
                     return;
 
@@ -92,7 +96,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             lock (_lock)
             {
                 _totalEventCount++;
+#if LEGACY_MONGODB_DRIVER
+                var changeCollectionKey = $"{change.CollectionNamespace?.DatabaseNamespace?.DatabaseName}.{change.CollectionNamespace?.CollectionName}";
+#else
                 var changeCollectionKey = $"{change.DatabaseNamespace?.DatabaseName}.{change.CollectionNamespace?.CollectionName}";
+#endif
                 if (changeCollectionKey != _collectionKey)
                     return;
 
@@ -115,7 +123,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             lock (_lock)
             {
                 _totalEventCount++;
+#if LEGACY_MONGODB_DRIVER
+                var changeCollectionKey = $"{change.CollectionNamespace?.DatabaseNamespace?.DatabaseName}.{change.CollectionNamespace?.CollectionName}";
+#else
                 var changeCollectionKey = $"{change.DatabaseNamespace?.DatabaseName}.{change.CollectionNamespace?.CollectionName}";
+#endif
                 if (changeCollectionKey != _collectionKey)
                     return;
 
@@ -141,7 +153,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
         private void UpdateMetadata(ChangeStreamDocument<BsonDocument> change)
         {
             DateTime changeTimestamp = DateTime.MinValue;
-            
+
+#if !LEGACY_MONGODB_DRIVER
             // Extract timestamp from ClusterTime or WallTime
             if (change.ClusterTime != null)
             {
@@ -151,6 +164,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             {
                 changeTimestamp = change.WallTime.Value;
             }
+#endif
            
             // Always track latest (last change in batch) - for checkpoint on success
             if (change.ResumeToken != null && change.ResumeToken != BsonNull.Value)

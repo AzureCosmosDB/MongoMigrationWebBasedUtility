@@ -115,6 +115,8 @@ namespace OnlineMongoMigrationProcessor
                     _jobId,
                     _log,
                     MongoToolsFolder,
+                    _config.MongoDumpToolPath,
+                    _config.MongoRestoreToolPath,
                     onMigrationUnitCompleted: OnMigrationUnitCompleted,
                     onPendingTasksCompleted: OnPendingTasksCompleted
                 );

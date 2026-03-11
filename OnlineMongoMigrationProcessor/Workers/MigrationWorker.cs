@@ -20,7 +20,6 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using ZstdSharp.Unsafe;
 
 
 namespace OnlineMongoMigrationProcessor.Workers
@@ -170,7 +169,6 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 dumpRestoreProcessor.AdjustDumpWorkers(newCount);
             }
-            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
         /// <summary>
@@ -183,7 +181,6 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 dumpRestoreProcessor.AdjustRestoreWorkers(newCount);
             }
-            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
         /// <summary>
@@ -363,9 +360,11 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             _migrationProcessor.ProcessRunning = true;
             
+#if !LEGACY_MONGODB_DRIVER
             // Set the delegate to wait for resume token tasks before processing collections
             _migrationProcessor.WaitForResumeTokenTaskDelegate = WaitForResumeTokenTask;
             _log.WriteLine("WaitForResumeTokenTaskDelegate set for migration processor", LogType.Debug);
+#endif
 
             return TaskResult.Success;
         }
@@ -476,6 +475,10 @@ namespace OnlineMongoMigrationProcessor.Workers
 
         private async Task<TaskResult> SetCollectionResumeToken(MigrationUnit mu, bool syncBack, CancellationToken _cts, List<Task> resumeTokenTasks)
         {
+#if LEGACY_MONGODB_DRIVER
+            // Change stream resume tokens not supported with legacy MongoDB driver
+            return TaskResult.Success;
+#else
             _log.WriteLine($"SetCollectionResumeToken called for {mu.DatabaseName}.{mu.CollectionName} - ResetChangeStream: {mu.ResetChangeStream}", LogType.Debug);
             bool useServerLevel = MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && MigrationJobContext.CurrentlyActiveJob.JobType != JobType.RUOptimizedCopy;
             if (useServerLevel)
@@ -514,7 +517,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                         }
 
-                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts,false);                            
+                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts, false);
                     }
                     catch (Exception ex)
                     {
@@ -534,6 +537,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             
            
             return TaskResult.Success;
+#endif
         }
 
         private async Task<TaskResult> PreparePartitionsAsync(CancellationToken _cts, bool skipPartitioning)
@@ -794,6 +798,10 @@ namespace OnlineMongoMigrationProcessor.Workers
 
         private async Task SetupServerLevelResumeTokenAsync(MigrationUnit mu, PartitionPrepContext context, CancellationToken _cts, bool syncBack)
         {
+#if LEGACY_MONGODB_DRIVER
+            // Change stream resume tokens not supported with legacy MongoDB driver
+            return;
+#else
             MigrationJobContext.AddVerboseLog($"SetupServerLevelResumeTokenAsync: mu={mu.DatabaseName}.{mu.CollectionName}, syncBack={syncBack}");
 
             if (!Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob) || !context.UseServerLevel)
@@ -831,6 +839,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 context.ServerLevelResumeTokenSet = true;
             }
+#endif
         }
 
         private async Task<TaskResult> PrepareTargetCollectionAsync(MigrationUnit mu, PartitionPrepContext context, CancellationToken _cts)
@@ -1040,16 +1049,24 @@ namespace OnlineMongoMigrationProcessor.Workers
                 return;
 
             MongoClient? targetClient = MongoClientFactory.Create(_log, MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]);
+            var targetDatabaseName = migrationUnit.GetEffectiveTargetDatabaseName();
+            var targetCollectionName = migrationUnit.GetEffectiveTargetCollectionName();
 
             bool checkExist;
             if (Helper.IsRU(MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]))
-                checkExist = await MongoHelper.CheckRUCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
+                checkExist = await MongoHelper.CheckRUCollectionExistsAsync(targetClient!, targetDatabaseName, targetCollectionName);
             else
-                checkExist = await MongoHelper.CheckCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
+                checkExist = await MongoHelper.CheckCollectionExistsAsync(targetClient!, targetDatabaseName, targetCollectionName);
 
             if (checkExist && !MigrationJobContext.CurrentlyActiveJob.CSPostProcessingStarted)
             {
-                _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} already exists on the target and is ready.", LogType.Debug);
+                var namespaceForLog = Log.FormatNamespaceForLog(
+                    migrationUnit.DatabaseName,
+                    migrationUnit.CollectionName,
+                    targetDatabaseName,
+                    targetCollectionName);
+
+                _log.WriteLine($"{namespaceForLog} already exists on the target and is ready.", LogType.Debug);
             }
         }
 
@@ -2041,14 +2058,36 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 if (MigrationJobContext.CurrentlyActiveJob!.JobType == JobType.MongoDriver && boundary.SegmentBoundaries != null && boundary.SegmentBoundaries.Count > 0)
                 {
-                    _log.WriteLine($"Creating {boundary.SegmentBoundaries.Count} segments for boundary {i}", LogType.Debug);
+                    int totalSegmentsToCreate = boundary.SegmentBoundaries.Count + 1;
+                    _log.WriteLine($"Creating {totalSegmentsToCreate} segments for boundary {i}", LogType.Debug);
+
+                    chunk.Segments ??= new List<Segment>();
+
+                    string chunkStart = chunk.Gte ?? string.Empty;
+                    string chunkEnd = chunk.Lt ?? string.Empty;
+
+                    string firstSegmentEnd = boundary.SegmentBoundaries[0].StartId?.ToString() ?? chunkEnd;
+                    chunk.Segments.Add(new Segment
+                    {
+                        Gte = chunkStart,
+                        Lt = firstSegmentEnd,
+                        IsProcessed = false,
+                        Id = "1"
+                    });
+
                     for (int j = 0; j < boundary.SegmentBoundaries.Count; j++)
                     {
-                        var segment = boundary.SegmentBoundaries[j];
-                        var (segmentStartId, segmentEndId) = GetStartEnd(false, segment, boundary.SegmentBoundaries.Count, j, userFilter, chunk.Lt ?? string.Empty, chunk.Gte ?? string.Empty);
+                        var segmentBoundary = boundary.SegmentBoundaries[j];
+                        string segmentStartId = segmentBoundary.StartId?.ToString() ?? string.Empty;
+                        string segmentEndId = segmentBoundary.EndId?.ToString() ?? chunkEnd;
 
-                        chunk.Segments ??= new List<Segment>();
-                        chunk.Segments.Add(new Segment { Gte = segmentStartId, Lt = segmentEndId, IsProcessed = false, Id = (j + 1).ToString() });
+                        chunk.Segments.Add(new Segment
+                        {
+                            Gte = segmentStartId,
+                            Lt = segmentEndId,
+                            IsProcessed = false,
+                            Id = (j + 2).ToString()
+                        });
                     }
                 }
             }

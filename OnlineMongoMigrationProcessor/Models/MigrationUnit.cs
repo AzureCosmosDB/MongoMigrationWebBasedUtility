@@ -29,6 +29,8 @@ namespace OnlineMongoMigrationProcessor
         public string JobId { get; set; }
         public string DatabaseName { get; set; }
         public string CollectionName { get; set; }
+        public string? TargetDatabaseName { get; set; }
+        public string? TargetCollectionName { get; set; }
         public long CSUpdatesInLastBatch { get; set; }
 
         public double CSAvgReadLatencyInMS { get; set; }
@@ -81,6 +83,16 @@ namespace OnlineMongoMigrationProcessor
             string json = JsonConvert.SerializeObject(this, Formatting.Indented);
 
             return MigrationJobContext.Store.UpsertDocument(filePath, json);
+        }
+
+        public string GetEffectiveTargetDatabaseName()
+        {
+            return string.IsNullOrWhiteSpace(TargetDatabaseName) ? DatabaseName : TargetDatabaseName;
+        }
+
+        public string GetEffectiveTargetCollectionName()
+        {
+            return string.IsNullOrWhiteSpace(TargetCollectionName) ? CollectionName : TargetCollectionName;
         }
 
        
@@ -148,6 +160,8 @@ namespace OnlineMongoMigrationProcessor
         public bool AggressiveCacheDeleted { get; set; } = false;
         public DateTime? AggressiveCacheDeletedOn { get; set; }
 
+        public long MaxDocsPerChunk;
+
         public List<MigrationChunk> MigrationChunks { get; set; }
 
         public MigrationUnit(MigrationJob job, string databaseName, string collectionName, List<MigrationChunk> migrationChunks)
@@ -155,6 +169,8 @@ namespace OnlineMongoMigrationProcessor
             this.Id = Helper.GenerateMigrationUnitId(databaseName, collectionName);            
             this.DatabaseName = databaseName;
             this.CollectionName = collectionName;
+            this.TargetDatabaseName = databaseName;
+            this.TargetCollectionName = collectionName;
             this.MigrationChunks = migrationChunks;
             if (job !=null)
             {
@@ -192,6 +208,8 @@ namespace OnlineMongoMigrationProcessor
             mub.JobId = this.JobId;
             mub.DatabaseName = this.DatabaseName;
             mub.CollectionName = this.CollectionName;
+            mub.TargetDatabaseName = this.TargetDatabaseName;
+            mub.TargetCollectionName = this.TargetCollectionName;
             mub.CSUpdatesInLastBatch = this.CSUpdatesInLastBatch;
             mub.CSAvgReadLatencyInMS = this.CSAvgReadLatencyInMS;
             mub.CSAvgWriteLatencyInMS = this.CSAvgWriteLatencyInMS;

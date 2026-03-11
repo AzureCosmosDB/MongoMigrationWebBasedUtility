@@ -304,6 +304,18 @@
                     // Ensure no duplicates
                     if (!updatedMigrationUnits.Any(x => x.DatabaseName == mu.DatabaseName && x.CollectionName == mu.CollectionName))
                     {
+                        var hasTargetClash = updatedMigrationUnits.Any(x =>
+                            string.Equals(x.GetEffectiveTargetDatabaseName(), mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(x.GetEffectiveTargetCollectionName(), mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase) &&
+                            !(string.Equals(x.DatabaseName, mu.DatabaseName, StringComparison.OrdinalIgnoreCase) &&
+                              string.Equals(x.CollectionName, mu.CollectionName, StringComparison.OrdinalIgnoreCase)));
+
+                        if (hasTargetClash)
+                        {
+                            errorMessage = $"Target namespace clash detected for {mu.GetEffectiveTargetDatabaseName()}.{mu.GetEffectiveTargetCollectionName()}.";
+                            continue;
+                        }
+
                         updatedMigrationUnits.Add(mu);
                     }
                 }
@@ -350,6 +362,12 @@
         if (!string.IsNullOrWhiteSpace(newCollection))
         {
             errorMessage = "You were trying to add collections using the 'Collections To Add' field. Please click 'Add' to add them or clear the text box before submitting.";
+            return;
+        }
+
+        if (!Helper.ValidateNoTargetNamespaceClashes(updatedMigrationUnits, out var clashError))
+        {
+            errorMessage = clashError;
             return;
         }
         

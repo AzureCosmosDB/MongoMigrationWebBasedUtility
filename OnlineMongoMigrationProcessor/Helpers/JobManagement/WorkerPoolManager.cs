@@ -44,7 +44,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             MigrationJobContext.AddVerboseLog($"WorkerPoolManager: Constructor called, poolName={poolName}, initialMaxWorkers={initialMaxWorkers}");
             _log = log ?? throw new ArgumentNullException(nameof(log));
             _poolName = poolName ?? throw new ArgumentNullException(nameof(poolName));
-            _maxWorkers = Math.Max(1, initialMaxWorkers);
+            _maxWorkers = Math.Max(0, initialMaxWorkers);
         }
 
         /// <summary>
@@ -56,7 +56,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
         {
             MigrationJobContext.AddVerboseLog($"WorkerPoolManager.AdjustPoolSize: poolName={_poolName}, newCount={newCount}");
             // Safety limits
-            if (newCount < 1) newCount = 1;
+            if (newCount < 0) newCount = 0;
             if (newCount > 16) newCount = 16;
             
             lock (_lock)

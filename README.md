@@ -322,8 +322,13 @@ This is different from "Time Since Last Change" which shows when the last actual
 These settings are persisted per app instance and affect all jobs:
 
 - Mongo tools download URL
-    - HTTPS ZIP URL to mongo-tools used by Dump/Restore. If your app has no internet egress, upload the ZIP alongside your app content and point this URL to your app’s public URL of the file.
-    - Must start with https:// and end with .zip
+        - Supports either:
+            - Single HTTPS ZIP URL (same package provides both `mongodump` and `mongorestore`), or
+            - JSON with separate URLs:
+                - `{"MongoDumpURL":"https://...dump.zip","MongoRestoreURL":"https://...restore.zip"}`
+        - Use separate URLs when source compatibility requires different versions for dump vs restore (for example, migrations from older MongoDB versions such as 3.4).
+        - If your app has no internet egress, upload ZIP file(s) alongside your app content and point to those hosted URLs.
+        - URLs must start with `https://` and end with `.zip`.
 
 - Binary format utilized for the _id
     - Use when your source uses binary GUIDs for _id.
@@ -360,6 +365,36 @@ These settings are persisted per app instance and affect all jobs:
 Advanced notes:
 - App setting `AllowMongoDump` (see `MongoMigrationWebApp/appsettings.json`) toggles whether the “MongoDump and MongoRestore” option is available in the UI.
 - The app’s working folder defaults to the system temp path, or to `%ResourceDrive%\home\` when present (e.g., on Azure App Service). It stores job state under `migrationjobs` and logs under `migrationlogs`.
+
+#### Exclusive dump/restore modes and tool version split
+
+##### Exclusive dump/restore modes
+
+Use environment variables to run only one side of the pipeline:
+
+- `ExclusiveDumpMode=true`
+    - Runs dump workers only and pauses restore workers (`CurrentRestoreWorkers=0`).
+- `ExclusiveRestoreMode=true`
+    - Runs restore workers only and pauses dump workers (`CurrentDumpWorkers=0`).
+- If both are `true`, both dump and restore are paused.
+
+Set these variables in your hosting platform environment configuration:
+
+- **Azure Web App**: App Settings
+- **Azure Container Apps (ACA)**: Container App environment variables
+
+##### Separate tool versions for dump and restore
+
+You can use different versions of `mongodump` and `mongorestore` when source compatibility requires it (for example, older MongoDB sources such as 3.4).
+
+- **Azure Web App**
+    - Configure **Mongo tools download URL(s)** as JSON in settings:
+    - `{"MongoDumpURL":"https://...dump.zip","MongoRestoreURL":"https://...restore.zip"}`
+    - See [WebApp/README.md](WebApp/README.md).
+
+- **Azure Container Apps (ACA)**
+    - Configure separate versions at image build time in Docker (`MongoDumpURL` and `MongoRestoreURL` build args).
+    - See [ACA/README.md](ACA/README.md).
 
 ## Job lifecycle controls in Job Viewer
 
@@ -762,7 +797,7 @@ When creating or resuming a job, you can tailor behavior via these options:
 
 ## Collections input formats
 
-You can specify collections in two ways:
+You can specify collections in three ways:
 
 1) CSV list
 - Example: `db1.col1,db1.col2,db2.colA`
@@ -772,22 +807,40 @@ You can specify collections in two ways:
 - Example: `db1.*,*.users,*.*`
 - If the collection count is large consider splitting it into multiple jobs.
 
-3) JSON list with optional filters
+3) JSON list with optional target namespace mapping and filters
 - Use the [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format):
 
 Notes:
+- You can optionally remap each source namespace to a different target namespace by providing `TargetDatabaseName` and/or `TargetCollectionName`.
+- If `TargetDatabaseName` or `TargetCollectionName` is omitted/empty, the tool defaults that value to the source `DatabaseName`/`CollectionName`.
+- Target namespace mapping is not supported when the source uses wildcards (`*`). Use explicit source namespaces when remapping.
 - Filters must be valid MongoDB query JSON (as a string). Only supports basic operators (`eq`,`lt`,`lte`,`gt`,`gte`,`in`) on root fields. They apply to both bulk copy and change stream.
 - Specify DataTypeFor_Id if the collection contains only a single data type for the _id field. Supported values are: ObjectId, Int, Int64, Decimal128, Date, BinData, String, and Object.
-- RU-optimized copy does not support filters or DataTypeFor_Id ; provide only DatabaseName and CollectionName.
+- RU-optimized copy does not support filters or DataTypeFor_Id. `TargetDatabaseName` and `TargetCollectionName` are supported.
 - System collections are not supported.
 
 ### CollectionInfoFormat JSON Format
 
  ```JSON
 [
-    { "CollectionName": "Customers", "DatabaseName": "SalesDB", "Filter": "{ \"status\": \"active\"}" },
-    { "CollectionName": "Orders", "DatabaseName": "SalesDB", "Filter": "{ \"orderDate\": { \"$gte\": { \"$date\": \"2024-01-01T00:00:00Z\" } } }" },
-    { "CollectionName": "Products", "DatabaseName": "InventoryDB", "DataTypeFor_Id": "ObjectId" }
+    {
+        "CollectionName": "Customers",
+        "DatabaseName": "SalesDB",
+        "TargetCollectionName": "Customers_v2",
+        "TargetDatabaseName": "SalesDB_Target",
+        "Filter": "{ \"status\": \"active\"}"
+    },
+    {
+        "CollectionName": "Orders",
+        "DatabaseName": "SalesDB",
+        "TargetCollectionName": "Orders_2024",
+        "Filter": "{ \"orderDate\": { \"$gte\": { \"$date\": \"2024-01-01T00:00:00Z\" } } }"
+    },
+    {
+        "CollectionName": "Products",
+        "DatabaseName": "InventoryDB",
+        "DataTypeFor_Id": "ObjectId"
+    }
 ]
 ```
 
@@ -808,7 +861,7 @@ Notes:
 - Choose an appropriate App Service plan (P2v3 recommended for large or high-TPS workloads). You can dedicate a web app per large collection.
 - For driver copy, tune “Mongo driver page size” upward for higher throughput, but watch memory and target write capacity.
 - For online jobs, ensure oplog retention on the source is large enough to cover full bulk copy duration plus catch-up.
-- For Dump/Restore, set chunk size to balance disk IO and memory; ensure sufficient disk space on the working folder drive.
+- For Azure Container Apps deployments using mounted Azure Files storage, configure a sufficiently large file share quota before running migrations because the app does not perform free-space checks for mounted ACA disk scenarios.
 
 ## Troubleshooting
 

@@ -5,7 +5,6 @@ using OnlineMongoMigrationProcessor.Context;
 using OnlineMongoMigrationProcessor.Helpers;
 using OnlineMongoMigrationProcessor.Helpers.Mongo;
 using OnlineMongoMigrationProcessor.Models;
-using SharpCompress.Common;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -16,6 +15,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
@@ -82,6 +82,8 @@ namespace OnlineMongoMigrationProcessor
 
         public static bool CanProceedWithDownloads(string directoryPath,long spaceRequiredInMb, out double folderSizeInGB, out double freeSpaceGB)
         {
+
+            
             
             freeSpaceGB = 0;
             folderSizeInGB = 0;
@@ -216,13 +218,20 @@ namespace OnlineMongoMigrationProcessor
                 return false;
             }
         }
-        public static async Task<string> EnsureMongoToolsAvailableAsync(Log log,string toolsDestinationFolder, MigrationSettings config)
+
+        public static async Task<string> EnsureMongoToolsFromSingleURLAvailableAsync(Log log, string toolsDestinationFolder, MigrationSettings config)
         {
             MigrationJobContext.AddVerboseLog($"EnsureMongoToolsAvailableAsync: toolsDestinationFolder={toolsDestinationFolder}");
-            string toolsDownloadUrl = config.MongoToolsDownloadUrl;
+            string toolsDownloadUrl = config.MongoToolsDownloadUrl ?? string.Empty;
 
             try
             {
+                if (string.IsNullOrWhiteSpace(toolsDownloadUrl))
+                {
+                    log.WriteLine("Mongo tools download URL is empty.", LogType.Error);
+                    return string.Empty;
+                }
+
                 string toolsLaunchFolder = Path.Combine(toolsDestinationFolder, Path.GetFileNameWithoutExtension(toolsDownloadUrl), "bin");
 
                 string mongodumpPath = Path.Combine(toolsLaunchFolder, "mongodump.exe");
@@ -231,20 +240,157 @@ namespace OnlineMongoMigrationProcessor
                 // Check if tools exist
                 if (File.Exists(mongodumpPath) && File.Exists(mongorestorePath))
                 {
+                    config.MongoDumpToolPath = mongodumpPath;
+                    config.MongoRestoreToolPath = mongorestorePath;
+                    _ = config.Save(out _);
                     log.WriteLine("Environment is ready to use.");
-                    
+
                     return toolsLaunchFolder;
                 }
 
                 log.WriteLine("Downloading tools...");
 
-                // Download ZIP file
                 string zipFilePath = Path.Combine(toolsDestinationFolder, "mongo-tools.zip");
                 Directory.CreateDirectory(toolsDestinationFolder);
+                bool extractOk = await DownloadAndExtractZipAsync(log, toolsDownloadUrl, zipFilePath, toolsDestinationFolder);
+                if (!extractOk)
+                {
+                    log.WriteLine("Environment setup failed.", LogType.Error);
+                    return string.Empty;
+                }
 
+                if (File.Exists(mongodumpPath) && File.Exists(mongorestorePath))
+                {
+                    config.MongoDumpToolPath = mongodumpPath;
+                    config.MongoRestoreToolPath = mongorestorePath;
+                    _ = config.Save(out _);
+                    log.WriteLine("Environment is ready to use.");
+
+                    return toolsLaunchFolder;
+                }
+                log.WriteLine("Environment setup failed.", LogType.Error);
+
+                return string.Empty;
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error: {ex}", LogType.Error);
+
+                return string.Empty;
+            }
+        }
+
+        public static async Task<string> EnsureMongoToolsAvailableAsync(Log log, string toolsDestinationFolder, MigrationSettings config)
+        {
+            MigrationJobContext.AddVerboseLog($"EnsureMongoToolsAvailableAsync: toolsDestinationFolder={toolsDestinationFolder}");
+            string toolsDownloadUrl = config.MongoToolsDownloadUrl ?? string.Empty;
+
+            try
+            {
+                //if (!string.IsNullOrWhiteSpace(config.MongoDumpToolPath) && !string.IsNullOrWhiteSpace(config.MongoRestoreToolPath))
+                //{
+                //    if (File.Exists(config.MongoDumpToolPath) && File.Exists(config.MongoRestoreToolPath))
+                //    {
+                //        log.WriteLine("MongoDB tools validated from configured paths.");
+                //        return Path.GetDirectoryName(config.MongoDumpToolPath) ?? string.Empty;
+                //    }
+
+                //    log.WriteLine("Configured MongoDB tool paths not found. Falling back to download.", LogType.Warning);
+                //}
+
+                if (TryParseMongoToolsUrls(toolsDownloadUrl, out var dumpUrl, out var restoreUrl))
+                {
+                    string normalizedDestination = toolsDestinationFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    string toolsRoot = string.Equals(Path.GetFileName(normalizedDestination), "mongo-tools", StringComparison.OrdinalIgnoreCase)
+                        ? normalizedDestination
+                        : Path.Combine(normalizedDestination, "mongo-tools");
+                    string dumpRoot = Path.Combine(toolsRoot, "dump");
+                    string restoreRoot = Path.Combine(toolsRoot, "restore");
+
+                    
+                    Directory.CreateDirectory(dumpRoot);
+                    Directory.CreateDirectory(restoreRoot);
+
+                    string dumpZipPath = Path.Combine(toolsDestinationFolder, "mongo-tools-dump.zip");
+                    string restoreZipPath = Path.Combine(toolsDestinationFolder, "mongo-tools-restore.zip");
+
+                    log.WriteLine("Downloading MongoDump.");
+                    bool dumpOk = await DownloadAndExtractZipAsync(log, dumpUrl, dumpZipPath, dumpRoot);
+                    log.WriteLine("Downloading MongoRestore.");
+                    bool restoreOk = await DownloadAndExtractZipAsync(log, restoreUrl, restoreZipPath, restoreRoot);
+
+                    if (!dumpOk || !restoreOk)
+                    {
+                        log.WriteLine("Environment setup failed.", LogType.Error);
+                        return string.Empty;
+                    }
+
+                    var dumpBin = Directory.GetFiles(dumpRoot, "mongodump.exe", SearchOption.AllDirectories).FirstOrDefault();
+                    var restoreBin = Directory.GetFiles(restoreRoot, "mongorestore.exe", SearchOption.AllDirectories).FirstOrDefault();
+
+                    if (!string.IsNullOrEmpty(dumpBin) && !string.IsNullOrEmpty(restoreBin))
+                    {
+                        config.MongoDumpToolPath = dumpBin;
+                        config.MongoRestoreToolPath = restoreBin;
+                        _ = config.Save(out _);
+                        log.WriteLine("Environment is ready to use.");
+                        return toolsRoot;
+                    }
+
+                    log.WriteLine("Environment setup failed.", LogType.Error);
+                    return string.Empty;
+                }
+
+                return await EnsureMongoToolsFromSingleURLAvailableAsync(log, toolsDestinationFolder, config);
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error: {ex}", LogType.Error);
+
+                return string.Empty;
+            }
+        }
+
+        private static bool TryParseMongoToolsUrls(string toolsDownloadUrl, out string dumpUrl, out string restoreUrl)
+        {
+            dumpUrl = string.Empty;
+            restoreUrl = string.Empty;
+
+            var trimmed = (toolsDownloadUrl ?? string.Empty).Trim();
+            if (!trimmed.StartsWith("{", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            try
+            {
+                var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(trimmed, options);
+                if (dict == null)
+                {
+                    return false;
+                }
+
+                dict.TryGetValue("MongoDumpURL", out var dumpValue);
+                dict.TryGetValue("MongoRestoreURL", out var restoreValue);
+                dumpUrl = dumpValue ?? string.Empty;
+                restoreUrl = restoreValue ?? string.Empty;
+
+                return !string.IsNullOrWhiteSpace(dumpUrl) && !string.IsNullOrWhiteSpace(restoreUrl);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return false;
+            }
+        }
+
+        private static async Task<bool> DownloadAndExtractZipAsync(Log log, string url, string zipFilePath, string extractFolder)
+        {
+            try
+            {
                 using (HttpClient client = new HttpClient())
                 {
-                    using (var response = await client.GetAsync(toolsDownloadUrl))
+                    using (var response = await client.GetAsync(url))
                     {
                         response.EnsureSuccessStatusCode();
                         await using (var fs = new FileStream(zipFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -254,25 +400,14 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-                // Extract ZIP file
-                ZipFile.ExtractToDirectory(zipFilePath, toolsDestinationFolder, overwriteFiles: true);
+                ZipFile.ExtractToDirectory(zipFilePath, extractFolder, overwriteFiles: true);
                 File.Delete(zipFilePath);
-
-                if (File.Exists(mongodumpPath) && File.Exists(mongorestorePath))
-                {
-                    log.WriteLine("Environment is ready to use.");
-                    
-                    return toolsLaunchFolder;
-                }
-                log.WriteLine("Environment setup failed.", LogType.Error);
-                
-                return string.Empty;
+                return true;
             }
             catch (Exception ex)
             {
-                log.WriteLine($"Error: {ex}", LogType.Error);
-                
-                return string.Empty;
+                log.WriteLine($"Error downloading tools from {url}: {ex}", LogType.Error);
+                return false;
             }
         }
 
@@ -467,8 +602,16 @@ namespace OnlineMongoMigrationProcessor
             {
                 foreach (var item in loadedObject)
                 {
+                    var sourceDatabaseName = item.DatabaseName.Trim();
+                    var sourceCollectionName = item.CollectionName.Trim();
+                    var targetDatabaseName = string.IsNullOrWhiteSpace(item.TargetDatabaseName)
+                        ? sourceDatabaseName
+                        : item.TargetDatabaseName.Trim();
+                    var targetCollectionName = string.IsNullOrWhiteSpace(item.TargetCollectionName)
+                        ? sourceCollectionName
+                        : item.TargetCollectionName.Trim();
 
-                    var tmpList = await PopulateJobCollectionsFromCSVAsync(job,$"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}", connectionString,false);
+                    var tmpList = await PopulateJobCollectionsFromCSVAsync(job,$"{sourceDatabaseName}.{sourceCollectionName}", connectionString,false);
                     if (tmpList.Count > 0)
                     {
                         foreach (var mu in tmpList)
@@ -477,6 +620,8 @@ namespace OnlineMongoMigrationProcessor
                             if (!unitsToAdd.Any(x => x.DatabaseName == mu.DatabaseName && x.CollectionName == mu.CollectionName))
                             {
                                 mu.UserFilter = item.Filter;
+                                mu.TargetDatabaseName = targetDatabaseName;
+                                mu.TargetCollectionName = targetCollectionName;
 
 
                                 if (!string.IsNullOrEmpty(item.DataTypeFor_Id) && Enum.TryParse<DataType>(item.DataTypeFor_Id, out var parsedDataType))
@@ -508,6 +653,17 @@ namespace OnlineMongoMigrationProcessor
                 }
             }
 
+            foreach (var mu in unitsToAdd)
+            {
+                mu.TargetDatabaseName = string.IsNullOrWhiteSpace(mu.TargetDatabaseName) ? mu.DatabaseName : mu.TargetDatabaseName;
+                mu.TargetCollectionName = string.IsNullOrWhiteSpace(mu.TargetCollectionName) ? mu.CollectionName : mu.TargetCollectionName;
+            }
+
+            if (!ValidateNoTargetNamespaceClashes(unitsToAdd, out var clashError))
+            {
+                throw new InvalidOperationException(clashError);
+            }
+
 
             return unitsToAdd;
         }
@@ -527,6 +683,22 @@ namespace OnlineMongoMigrationProcessor
                 .Where(mu => !job.MigrationUnitBasics
                 .Any(mub => mub.Id == Helper.GenerateMigrationUnitId(mu.DatabaseName, mu.CollectionName)))
                 .ToList();
+
+            var candidateUnits = job.MigrationUnitBasics
+                .Select(mu =>
+                {
+                    mu.TargetDatabaseName = string.IsNullOrWhiteSpace(mu.TargetDatabaseName) ? mu.DatabaseName : mu.TargetDatabaseName;
+                    mu.TargetCollectionName = string.IsNullOrWhiteSpace(mu.TargetCollectionName) ? mu.CollectionName : mu.TargetCollectionName;
+                    return mu;
+                })
+                .Concat(newUnits.Select(mu => (MigrationUnitBasic)mu))
+                .ToList();
+
+            if (!ValidateNoTargetNamespaceClashes(candidateUnits, out var clashError))
+            {
+                log?.WriteLine(clashError, LogType.Error);
+                return false;
+            }
 
             if (newUnits.Count > 0)
             {
@@ -692,6 +864,21 @@ namespace OnlineMongoMigrationProcessor
 
                 foreach (var item in loadedObject)
                 {                   
+                    var sourceDatabaseName = item.DatabaseName.Trim();
+                    var sourceCollectionName = item.CollectionName.Trim();
+                    var targetDatabaseName = string.IsNullOrWhiteSpace(item.TargetDatabaseName)
+                        ? sourceDatabaseName
+                        : item.TargetDatabaseName.Trim();
+                    var targetCollectionName = string.IsNullOrWhiteSpace(item.TargetCollectionName)
+                        ? sourceCollectionName
+                        : item.TargetCollectionName.Trim();
+
+                    if ((!string.IsNullOrWhiteSpace(item.TargetDatabaseName) || !string.IsNullOrWhiteSpace(item.TargetCollectionName)) &&
+                        (sourceDatabaseName == "*" || sourceCollectionName == "*"))
+                    {
+                        errorMessage = "Target database/collection mapping is not supported with wildcard source namespaces. Please provide explicit source namespaces when using target mapping.";
+                        return new Tuple<bool, string, string>(false, string.Empty, errorMessage);
+                    }
 
                     if(!string.IsNullOrEmpty(item.Filter) && !FilterInspector.HasValidIdFilter(item.Filter))
                     {
@@ -699,19 +886,101 @@ namespace OnlineMongoMigrationProcessor
                         return new Tuple<bool, string, string>(false, string.Empty, errorMessage);
                     }
 
-                    var validationResult = ValidateNamespaceFormatfromCSV($"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}",false);
+                    var validationResult = ValidateNamespaceFormatfromCSV($"{sourceDatabaseName}.{sourceCollectionName}",false);
                     if (!validationResult.Item1)
                     {
                         errorMessage = validationResult.Item2;
                         return new Tuple<bool, string,string>(false, string.Empty, errorMessage);
-                    }                     
+                    }
+
+                    var targetValidationResult = ValidateNamespaceFormatfromCSV($"{targetDatabaseName}.{targetCollectionName}", false);
+                    if (!targetValidationResult.Item1)
+                    {
+                        errorMessage = $"Invalid target namespace format for '{item.DatabaseName}.{item.CollectionName}': {targetValidationResult.Item3}";
+                        return new Tuple<bool, string, string>(false, string.Empty, errorMessage);
+                    }
                 }
+
+                var mappedNamespaces = loadedObject
+                    .Select(item => new
+                    {
+                        Source = $"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}",
+                        Target = $"{(string.IsNullOrWhiteSpace(item.TargetDatabaseName) ? item.DatabaseName.Trim() : item.TargetDatabaseName.Trim())}.{(string.IsNullOrWhiteSpace(item.TargetCollectionName) ? item.CollectionName.Trim() : item.TargetCollectionName.Trim())}"
+                    })
+                    .ToList();
+
+                var collision = mappedNamespaces
+                    .GroupBy(x => x.Target, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault(g => g.Select(v => v.Source).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1);
+
+                if (collision != null)
+                {
+                    var sources = string.Join(", ", collision.Select(x => x.Source).Distinct(StringComparer.OrdinalIgnoreCase));
+                    errorMessage = $"Target namespace clash detected: {collision.Key} is mapped from multiple source namespaces ({sources}).";
+                    return new Tuple<bool, string, string>(false, string.Empty, errorMessage);
+                }
+
                 return new Tuple<bool, string,string >(true, input, errorMessage);
             }
             else
             {
                 return ValidateNamespaceFormatfromCSV(input);
             }
+        }
+
+        public static bool ValidateNoTargetNamespaceClashes(IEnumerable<MigrationUnitBasic> units, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+
+            var collision = units
+                .Select(mu => new
+                {
+                    Source = $"{mu.DatabaseName}.{mu.CollectionName}",
+                    Target = $"{mu.GetEffectiveTargetDatabaseName()}.{mu.GetEffectiveTargetCollectionName()}"
+                })
+                .GroupBy(x => x.Target, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(g => g.Select(v => v.Source).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1);
+
+            if (collision == null)
+            {
+                return true;
+            }
+
+            var sources = string.Join(", ", collision.Select(x => x.Source).Distinct(StringComparer.OrdinalIgnoreCase));
+            errorMessage = $"Target namespace clash detected: {collision.Key} is mapped from multiple source namespaces ({sources}).";
+            return false;
+        }
+
+        public static string BuildNamespaceConfigFromMigrationUnits(IEnumerable<MigrationUnit> migrationUnits)
+        {
+            var units = migrationUnits?.ToList() ?? new List<MigrationUnit>();
+            if (units.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            bool requiresJson = units.Any(mu =>
+                !string.Equals(mu.DatabaseName, mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(mu.CollectionName, mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase) ||
+                !string.IsNullOrWhiteSpace(mu.UserFilter) ||
+                mu.DataTypeFor_Id.HasValue);
+
+            if (!requiresJson)
+            {
+                return string.Join(",", units.Select(mu => $"{mu.DatabaseName}.{mu.CollectionName}"));
+            }
+
+            var collectionInfos = units.Select(mu => new CollectionInfo
+            {
+                DatabaseName = mu.DatabaseName,
+                CollectionName = mu.CollectionName,
+                TargetDatabaseName = string.Equals(mu.DatabaseName, mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase) ? null : mu.GetEffectiveTargetDatabaseName(),
+                TargetCollectionName = string.Equals(mu.CollectionName, mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase) ? null : mu.GetEffectiveTargetCollectionName(),
+                Filter = string.IsNullOrWhiteSpace(mu.UserFilter) ? null : mu.UserFilter,
+                DataTypeFor_Id = mu.DataTypeFor_Id?.ToString()
+            }).ToList();
+
+            return JsonConvert.SerializeObject(collectionInfos, Formatting.Indented);
         }
         private static Tuple<bool, string, string> ValidateNamespaceFormatfromCSV(string input, bool split=true)
         {
@@ -995,6 +1264,65 @@ namespace OnlineMongoMigrationProcessor
         public static bool IsWindows()
         {
             return OperatingSystem.IsWindows();
+        }
+
+        /// <summary>
+        /// Calculates exponential backoff delay for retry attempts
+        /// </summary>
+        /// <param name="attempt">The retry attempt number (1-based)</param>
+        /// <returns>Delay in milliseconds</returns>
+        public static int GetRetryDelayMs(int attempt)
+        {
+            int baseDelayMs = 500;
+            int maxDelayMs = 5000;
+            int delayMs = baseDelayMs * (1 << Math.Min(attempt - 1, 4));
+            return Math.Min(delayMs, maxDelayMs);
+        }
+
+        /// <summary>
+        /// Checks if an exception is a transient count exception (timeout, network issue, etc.)
+        /// </summary>
+        /// <param name="ex">The exception to check</param>
+        /// <returns>True if the exception is transient and retry-able, false otherwise</returns>
+        public static bool IsTransientCountException(Exception ex)
+        {
+            Exception? current = ex;
+            while (current != null)
+            {
+                if (current is MongoExecutionTimeoutException || current is TimeoutException)
+                {
+                    return true;
+                }
+
+                if (current is System.Net.Sockets.SocketException socketEx)
+                {
+                    if (socketEx.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionReset ||
+                        socketEx.SocketErrorCode == System.Net.Sockets.SocketError.TimedOut ||
+                        socketEx.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionAborted ||
+                        socketEx.SocketErrorCode == System.Net.Sockets.SocketError.HostDown ||
+                        socketEx.SocketErrorCode == System.Net.Sockets.SocketError.NetworkDown ||
+                        socketEx.SocketErrorCode == System.Net.Sockets.SocketError.NetworkReset ||
+                        socketEx.SocketErrorCode == System.Net.Sockets.SocketError.NetworkUnreachable ||
+                        socketEx.SocketErrorCode == System.Net.Sockets.SocketError.HostUnreachable)
+                    {
+                        return true;
+                    }
+                }
+
+                string message = current.Message ?? string.Empty;
+                if (message.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
+                    message.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
+                    message.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase) ||
+                    message.Contains("connection reset", StringComparison.OrdinalIgnoreCase) ||
+                    message.Contains("unable to read data from the transport connection", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+
+            return false;
         }
     }
 }

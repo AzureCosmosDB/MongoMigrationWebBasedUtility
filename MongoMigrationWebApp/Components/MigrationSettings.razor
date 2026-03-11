@@ -1,4 +1,6 @@
 ﻿@using OnlineMongoMigrationProcessor
+@using System.Collections.Generic;
+@using System.Text.Json;
 @using System.Text.RegularExpressions;
 
 <div class="modal fade show d-block bg-dark bg-opacity-75" id="myModal" aria-modal="true" role="dialog">
@@ -27,8 +29,10 @@
                     @if (Helper.IsWindows())
                     {
                         <div class="mb-3">
-                            <label for="mongo-url" class="form-label">Mongo tools download URL</label>
-                            <input type="text" id="mongo-url" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).MongoToolsDownloadUrl" />
+                            <label for="mongo-url" class="form-label">Mongo tools download URL(s)</label>
+                            <textarea id="mongo-url" class="form-control" rows="3"
+                                      placeholder="@MongoToolsUrlPlaceholder"
+                                      @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).MongoToolsDownloadUrl"></textarea>
                         </div>
                     }
                     <div class="mb-3">
@@ -53,6 +57,15 @@
                             <option value="UseSampleCommand" title="Use MongoDB's $sample command to generate chunk boundaries.">Use Sample Command</option>
                             <option value="UseTimeBoundaries" title="Generate boundaries based on ObjectId timestamp distribution.">Use Time Boundaries</option>
                             <option value="UseAdjustedTimeBoundaries" title="Generate time-based boundaries and adjust based on actual record counts.">Use Adjusted Time Boundaries</option>
+                            <option value="UsePagination" title="Use pagination to create chunks of same size.">Use Pagination</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="non-objectid-partitioner" class="form-label" title="Choose the method for partitioning non-ObjectId collections into chunks for parallel processing.">
+                            Non ObjectId Partitioner
+                        </label>
+                        <select id="non-objectid-partitioner" value="@SelectedNonObjectIdPartitioner" class="form-select" @onchange="OnNonObjectIdPartitionerChanged">
+                            <option value="UseSampleCommand" title="Use MongoDB's $sample command to generate chunk boundaries.">Use Sample Command</option>
                             <option value="UsePagination" title="Use pagination to create chunks of same size.">Use Pagination</option>
                         </select>
                     </div>
@@ -127,8 +140,10 @@
 
     private string errorMessage = string.Empty;
     private string activeTab = "OfflineDataMovement"; // Track active tab
+    private const string MongoToolsUrlPlaceholder = "Single URL: https://.../mongodb-database-tools-....zip\nJSON: {\"MongoDumpURL\":\"https://...dump.zip\",\"MongoRestoreURL\":\"https://...restore.zip\"}";
 
     private string SelectedObjectIdPartitioner = "UseTimeBoundaries"; // Default partitioner
+    private string SelectedNonObjectIdPartitioner = "UseSampleCommand"; // Default partitioner
 
     private void SwitchToOfflineDataMovementTab()
     {
@@ -157,6 +172,17 @@
         }
     }
 
+    private void OnNonObjectIdPartitionerChanged(ChangeEventArgs e)
+    {
+        var val = e?.Value?.ToString() ?? "UseSampleCommand";
+        SelectedNonObjectIdPartitioner = val;
+
+        if (Enum.TryParse<OnlineMongoMigrationProcessor.PartitionerType>(val, out var partitionerType))
+        {
+            (_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).NonObjectIdPartitioner = partitionerType;
+        }
+    }
+
     private void ClearPem()
     {
         (_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).CACertContentsForSourceServer = string.Empty;
@@ -178,6 +204,7 @@
         
         // Initialize the selected partitioner from the configuration
         SelectedObjectIdPartitioner = _configurationBackup.ObjectIdPartitioner.ToString();
+        SelectedNonObjectIdPartitioner = _configurationBackup.NonObjectIdPartitioner.ToString();
     }
 
 
@@ -236,9 +263,9 @@
             return;
         }
 
-    if (!Regex.Match(_configurationBackup?.MongoToolsDownloadUrl ?? string.Empty, @"^https://.*\.zip$").Success)
+    if (!TryValidateMongoToolsUrl(_configurationBackup?.MongoToolsDownloadUrl, out var toolsUrlError))
         {
-            errorMessage = "URL must start with 'https://' and end with '.zip'.";
+            errorMessage = toolsUrlError;
             return;
         }
 
@@ -258,6 +285,62 @@
         {
             On_configurationSaved.InvokeAsync(null);
         }
+    }
+
+    private bool TryValidateMongoToolsUrl(string? value, out string error)
+    {
+        error = string.Empty;
+        var trimmed = (value ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            error = "Mongo tools URL is required.";
+            return false;
+        }
+
+        var urlRegex = new Regex(@"^https://.*\.zip$", RegexOptions.IgnoreCase);
+        if (trimmed.StartsWith("{", StringComparison.Ordinal))
+        {
+            try
+            {
+                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                var dict = JsonSerializer.Deserialize<Dictionary<string, string>>(trimmed, options);
+                if (dict == null)
+                {
+                    error = "Invalid JSON for Mongo tools URLs.";
+                    return false;
+                }
+
+                dict.TryGetValue("MongoDumpURL", out var dumpUrl);
+                dict.TryGetValue("MongoRestoreURL", out var restoreUrl);
+
+                if (string.IsNullOrWhiteSpace(dumpUrl) || string.IsNullOrWhiteSpace(restoreUrl))
+                {
+                    error = "JSON must include MongoDumpURL and MongoRestoreURL.";
+                    return false;
+                }
+
+                if (!urlRegex.IsMatch(dumpUrl) || !urlRegex.IsMatch(restoreUrl))
+                {
+                    error = "MongoDumpURL and MongoRestoreURL must start with 'https://' and end with '.zip'.";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (JsonException)
+            {
+                error = "Invalid JSON for Mongo tools URLs.";
+                return false;
+            }
+        }
+
+        if (!urlRegex.IsMatch(trimmed))
+        {
+            error = "URL must start with 'https://' and end with '.zip'.";
+            return false;
+        }
+
+        return true;
     }
 }
 

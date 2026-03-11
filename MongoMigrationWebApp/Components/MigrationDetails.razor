@@ -43,7 +43,10 @@
                                     <option value="MongoDump and MongoRestore">MongoDump and MongoRestore</option>
                                 }
                                 <option value="MongoDB Driver">MongoDB Driver</option>
-                                <option value="MongoDB Driver (Cosmos DB RU read optimized)">MongoDB Driver (Cosmos DB RU read optimized)</option>
+                                @if (!MigrationJobContext.IsLegacyDriver)
+                                {
+                                    <option value="MongoDB Driver (Cosmos DB RU read optimized)">MongoDB Driver (Cosmos DB RU read optimized)</option>
+                                }
                             </select>
                         </div>
                     }                
@@ -114,9 +117,12 @@
                         <label for="migration-mode" class="form-label" title="Online migration allows live data replication during the process.">
                             Migration Mode
                         </label>                
-                        <select id="migration-mode" value="@SelectedMode"  class="form-select" @onchange="OnModeSelectionChanged" disabled="@(!NewMode)">
+                        <select id="migration-mode" value="@SelectedMode"  class="form-select" @onchange="OnModeSelectionChanged" disabled="@(!NewMode || MigrationJobContext.IsLegacyDriver)">
                             <option value="Offline">Offline</option>
-                            <option value="Online">Online</option>
+                            @if (!MigrationJobContext.IsLegacyDriver)
+                            {
+                                <option value="Online">Online</option>
+                            }
                             <!--<option value="SyncOnly">Sync Only</option>-->
                         </select>
                     </div>
@@ -179,18 +185,19 @@
                         <div class="row mb-3">
                             <div class="col-md-4">
                                 <label for="maxDumpWorkers" class="form-label" title="Number of parallel mongodump processes. Leave empty for auto-calculation.">Dump Workers</label>
-                                <input type="number" id="maxDumpWorkers" class="form-control" @bind="maxDumpWorkers" min="1" max="16" placeholder="@($"Auto ({defaultDumpWorkers})")" disabled="@(!NewMode)" />
+                                <input type="number" id="maxDumpWorkers" class="form-control" @bind="maxDumpWorkers" min="0" max="16" placeholder="@($"Auto ({defaultDumpWorkers})")" disabled="@(!NewMode)" />
                             </div>
                             <div class="col-md-4">
                                 <label for="maxRestoreWorkers" class="form-label" title="Number of parallel mongorestore processes. Leave empty for auto-calculation.">Restore Workers</label>
-                                <input type="number" id="maxRestoreWorkers" class="form-control" @bind="maxRestoreWorkers" min="1" max="16" placeholder="@($"Auto ({defaultRestoreWorkers})")" disabled="@(!NewMode)" />
+                                <input type="number" id="maxRestoreWorkers" class="form-control" @bind="maxRestoreWorkers" min="0" max="16" placeholder="@($"Auto ({defaultRestoreWorkers})")" disabled="@(!NewMode)" />
                             </div>
                             <div class="col-md-4">
                                 <label for="maxInsertionWorkers" class="form-label" title="Number of insertion threads per mongorestore process. Leave empty for auto-calculation.">Insertion Workers</label>
                                 <input type="number" id="maxInsertionWorkers" class="form-control" @bind="maxInsertionWorkers" min="1" max="16" placeholder="@($"Auto ({defaultInsertionWorkers})")" disabled="@(!NewMode)" />
                             </div>
                         </div>
-                    }                    @if (jobType == JobType.MongoDriver || jobType == JobType.RUOptimizedCopy)
+                    }
+                    @if (jobType == JobType.MongoDriver || jobType == JobType.RUOptimizedCopy)
                     {
                         <div class="row mb-3">
                             <div class="col-md-6">

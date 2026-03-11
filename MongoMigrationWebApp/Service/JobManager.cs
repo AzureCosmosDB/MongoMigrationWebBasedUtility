@@ -261,6 +261,16 @@ namespace MongoMigrationWebApp.Service
             return log.GetLogCount(jobId);
         }
 
+        public byte[] DownloadLogPage(string jobId, int pageNumber, int pageSize)
+        {
+            if (string.IsNullOrWhiteSpace(jobId) || pageNumber < 1 || pageSize < 1)
+                return Array.Empty<byte>();
+
+            int skip = (pageNumber - 1) * pageSize;
+            Log log = new Log();
+            return log.DownloadLogsPaginated(jobId, skip, pageSize);
+        }
+
         #endregion
 
         #region Migration Worker Management

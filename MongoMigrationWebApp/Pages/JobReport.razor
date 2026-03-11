@@ -100,6 +100,10 @@ else
                  <td class="group-cell">
                     <div><span class="lbl">Database:</span> @mu.DatabaseName</div>
                     <div><span class="lbl">Collection:</span> @mu.CollectionName</div>
+                    @if (HasTargetNamespaceMapping(mu))
+                    {
+                        <div><span class="lbl">Target Namespace:</span> @GetTargetNamespace(mu)</div>
+                    }
                 </td>
                 <td class="group-cell">
                     <div><span class="lbl">Source Status:</span> @mu.SourceStatus</div>
@@ -195,6 +199,17 @@ else
             return "N/A";
         var d = end.Value - start.Value;
         return $"{(int)d.TotalHours}h {d.Minutes}m {d.Seconds}s";
+    }
+
+    private static bool HasTargetNamespaceMapping(MigrationUnit mu)
+    {
+        return !string.Equals(mu.DatabaseName, mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(mu.CollectionName, mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetTargetNamespace(MigrationUnit mu)
+    {
+        return $"{mu.GetEffectiveTargetDatabaseName()}.{mu.GetEffectiveTargetCollectionName()}";
     }
 
    

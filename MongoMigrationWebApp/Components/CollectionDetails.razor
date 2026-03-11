@@ -30,6 +30,10 @@
                                 <td class="group">
                                     <div><span class="lbl">Database:</span> @MigrationUnit.DatabaseName</div>
                                     <div><span class="lbl">Collection:</span> @MigrationUnit.CollectionName</div>
+                                    @if (HasTargetNamespaceMapping(MigrationUnit))
+                                    {
+                                        <div><span class="lbl">Target Namespace:</span> @GetTargetNamespace(MigrationUnit)</div>
+                                    }
                                     <div><span class="lbl">Source Status:</span> @MigrationUnit.SourceStatus</div>
                                     @if (!string.IsNullOrEmpty(MigrationUnit.UserFilter))
                                     {
@@ -167,6 +171,17 @@
             return "N/A";
         var d = end.Value - start.Value;
         return $"{(int)d.TotalHours}h {d.Minutes}m {d.Seconds}s";
+    }
+
+    private static bool HasTargetNamespaceMapping(MigrationUnit migrationUnit)
+    {
+        return !string.Equals(migrationUnit.DatabaseName, migrationUnit.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(migrationUnit.CollectionName, migrationUnit.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetTargetNamespace(MigrationUnit migrationUnit)
+    {
+        return $"{migrationUnit.GetEffectiveTargetDatabaseName()}.{migrationUnit.GetEffectiveTargetCollectionName()}";
     }
 
     private static string FormatLong(long value) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:N0}", value);
