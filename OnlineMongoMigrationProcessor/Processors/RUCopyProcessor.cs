@@ -53,8 +53,8 @@ namespace OnlineMongoMigrationProcessor.Processors
             IMongoCollection<BsonDocument>? targetCollection = null;
             if (!MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
             {
-                var targetDatabase = _targetClient!.GetDatabase(ctx.DatabaseName);
-                targetCollection = targetDatabase.GetCollection<BsonDocument>(ctx.CollectionName);
+                var targetDatabase = _targetClient!.GetDatabase(ctx.TargetDatabaseName);
+                targetCollection = targetDatabase.GetCollection<BsonDocument>(ctx.TargetCollectionName);
             }
 
             // Process partitions in sequential batches

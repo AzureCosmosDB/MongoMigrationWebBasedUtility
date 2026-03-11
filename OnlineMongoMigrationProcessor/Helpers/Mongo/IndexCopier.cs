@@ -55,9 +55,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     if (indexDocument.TryGetValue("background", out var background))
                         options.Background = background.ToBoolean();
 
-                    // Hidden
+#if !LEGACY_MONGODB_DRIVER
+                    // Hidden (not available in legacy driver)
                     if (indexDocument.TryGetValue("hidden", out var hidden))
                         options.Hidden = hidden.ToBoolean();
+#endif
 
                     // Partial filter expression (using generic CreateIndexOptions to support it)
                     if (indexDocument.TryGetValue("partialFilterExpression", out var partialFilter))

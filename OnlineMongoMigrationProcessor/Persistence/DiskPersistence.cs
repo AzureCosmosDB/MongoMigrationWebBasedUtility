@@ -398,7 +398,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                             break;
                             
                         int msgLen = br.ReadInt32();
-                        if (msgLen <= 0 || msgLen > 1_000_000)
+                        if (msgLen < 0 || msgLen > 1_000_000)
                             break;
                             
                         long bytesToSkip = msgLen + 1 + 8;
@@ -448,7 +448,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
                             break;
 
                         int msgLen = br.ReadInt32();
-                        if (msgLen <= 0 || msgLen > 1_000_000)
+                        if (msgLen < 0 || msgLen > 1_000_000)
                             break;
 
                         long bytesToSkip = msgLen + 1 + 8;
@@ -651,7 +651,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
 
                         int msgLen = br.ReadInt32();
 
-                        if (msgLen <= 0 || msgLen > 1_000_000)
+                        if (msgLen < 0 || msgLen > 1_000_000)
                             break;
 
                         long bytesToSkip = msgLen + 1 + 8;
@@ -722,7 +722,7 @@ namespace OnlineMongoMigrationProcessor.Persistence
 
                 int len = br.ReadInt32();
 
-                if (len <= 0 || len > MaxReasonableLength)
+                if (len < 0 || len > MaxReasonableLength)
                 {
                     Helper.LogToFile($"Invalid message length: {len}", "DiskPersistence.txt");
                     return null;

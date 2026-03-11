@@ -291,9 +291,9 @@
                                @onclick="() => ShowCollectionDetails(mu)"></i>
                             <i class="bi bi-download me-2 collection-info-icon" title="Download JSON" style="cursor: pointer;"
                                @onclick="() => DownloadMigrationUnit(mu)"></i>
-                            @mu.DatabaseName
+                                     @GetDatabaseDisplayName(mu)
                         </td>
-                        <td>@mu.CollectionName</td>
+                                <td>@GetCollectionDisplayName(mu)</td>
                         <td>
                             @(mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                 : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
@@ -1060,6 +1060,24 @@ else if (@_showLogBackupFile)
         _collectionDetailsDialogOpen = true;
     }
 
+    private static string FormatNameWithTarget(string sourceName, string? targetName)
+    {
+        return string.IsNullOrWhiteSpace(targetName) ||
+               string.Equals(sourceName, targetName, StringComparison.OrdinalIgnoreCase)
+            ? sourceName
+            : $"{sourceName} ({targetName})";
+    }
+
+    private static string GetDatabaseDisplayName(MigrationUnitBasic mu)
+    {
+        return FormatNameWithTarget(mu.DatabaseName, mu.TargetDatabaseName);
+    }
+
+    private static string GetCollectionDisplayName(MigrationUnitBasic mu)
+    {
+        return FormatNameWithTarget(mu.CollectionName, mu.TargetCollectionName);
+    }
+
     private List<MigrationJob> GetMigrations()
     {
         var ids = JobManager.GetMigrationIds();
@@ -1073,7 +1091,7 @@ else if (@_showLogBackupFile)
         {
             return;
         }
-        await Downloader(_logBackupFile, $"Backup_{_logBackupFile}");
+        await Downloader(_logBackupFile);
     }
 
 
@@ -1101,7 +1119,7 @@ else if (@_showLogBackupFile)
         else
         {
             // Direct download for small files
-            await Downloader(JobId, JobId);
+            await Downloader(JobId);
         }
     }
 
@@ -1112,60 +1130,34 @@ else if (@_showLogBackupFile)
             return;
         }
 
-        var url = $"/api/File/download/migrationunit/{JobId}/{mu.Id}";
-        var response = await HttpClient.GetAsync(url);
+        var encodedJobId = Uri.EscapeDataString(JobId);
+        var encodedMigrationUnitId = Uri.EscapeDataString(mu.Id);
+        var url = $"/api/File/download/migrationunit/{encodedJobId}/{encodedMigrationUnitId}";
 
-        if (response.IsSuccessStatusCode)
-        {
-            var fileBytes = await response.Content.ReadAsByteArrayAsync();
-            var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
-            var fileName = $"{mu.DatabaseName}_{mu.CollectionName}_{mu.Id}.json";
-
-            // Use JavaScript to trigger the file download
-            await JS.InvokeVoidAsync("downloadFile", fileBytes, fileName, contentType);
-        }
-        else
-        {
-            await JS.InvokeVoidAsync("open", url, "_blank"); // browser navigates directly
-        }
+        await JS.InvokeVoidAsync("open", url, "_blank");
     }
 
-    private async Task Downloader(string fileName, string displayName)
+    private async Task Downloader(string fileName)
     {
-
-        var url = $"/api/File/download/log/{fileName}";
-
-        var request = new HttpRequestMessage(HttpMethod.Get, url);      
-
-        var response = await HttpClient.GetAsync(url);
-
-        if (response.IsSuccessStatusCode)
+        if (string.IsNullOrWhiteSpace(fileName))
         {
-            var fileBytes = await response.Content.ReadAsByteArrayAsync();
-            var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
+            return;
+        }
 
-            // Use JavaScript to trigger the file download
-            await JS.InvokeVoidAsync("downloadFile", fileBytes, $"{displayName}.json", contentType);
-        }
-        else
-        {
-            await JS.InvokeVoidAsync("open", url, "_blank"); // browser navigates directly
-        }
+        var encodedFileName = Uri.EscapeDataString(fileName);
+        var url = $"/api/File/download/log/{encodedFileName}";
+
+        await JS.InvokeVoidAsync("open", url, "_blank");
     }
 
     private async Task<int> GetLogCount(string jobId)
     {
         try
         {
-            var url = $"/api/File/download/log/{jobId}/count";
-            var response = await HttpClient.GetAsync(url);
+            if (string.IsNullOrWhiteSpace(jobId))
+                return 0;
 
-            if (response.IsSuccessStatusCode)
-            {
-                var content = await response.Content.ReadAsStringAsync();
-                var result = System.Text.Json.JsonSerializer.Deserialize<LogCountResponse>(content);
-                return result?.count ?? 0;
-            }
+            return JobManager.GetLogCount(jobId);
         }
         catch { }
 
@@ -1545,6 +1537,12 @@ else if (@_showLogBackupFile)
 
         if (migrationUnits != null && CurrentlyLoadedMigrationJob != null)
         {
+            if (!Helper.ValidateNoTargetNamespaceClashes(migrationUnits, out var clashError))
+            {
+                _errorMessage = clashError;
+                return;
+            }
+
             // Get IDs for comparison
             var existingIds = CurrentlyLoadedMigrationJob.MigrationUnitBasics.Select(mu => mu.Id).ToHashSet();
             var newIds = migrationUnits.Select(mu => mu.Id).ToHashSet();
@@ -1574,9 +1572,13 @@ else if (@_showLogBackupFile)
             //         Helper.AddMigrationUnit(mu, CurrentlyLoadedMigrationJob);
             //     }
             // }
-            Helper.AddMigrationUnits(migrationUnits, CurrentlyLoadedMigrationJob);
+            if (!Helper.AddMigrationUnits(migrationUnits, CurrentlyLoadedMigrationJob))
+            {
+                _errorMessage = "Target namespace clash detected. Multiple source collections cannot map to the same target collection.";
+                return;
+            }
 
-            CurrentlyLoadedMigrationJob.NameSpaces = string.Join(",", migrationUnits.Select(x => x.DatabaseName + "." + x.CollectionName));
+            CurrentlyLoadedMigrationJob.NameSpaces = Helper.BuildNamespaceConfigFromMigrationUnits(migrationUnits);
 
             MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob);
 
@@ -1676,7 +1678,7 @@ else if (@_showLogBackupFile)
 
     private async Task DecreaseDumpWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentDumpWorkers > 1)
+        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentDumpWorkers > 0)
         {
             int newCount = CurrentlyLoadedMigrationJob.CurrentDumpWorkers - 1;
             JobManager.AdjustDumpWorkers(newCount);
@@ -1696,7 +1698,7 @@ else if (@_showLogBackupFile)
 
     private async Task DecreaseRestoreWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentRestoreWorkers > 1)
+        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentRestoreWorkers > 0)
         {
             int newCount = CurrentlyLoadedMigrationJob.CurrentRestoreWorkers - 1;
             JobManager.AdjustRestoreWorkers(newCount);

@@ -1,5 +1,6 @@
 ﻿using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
+using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
 using OnlineMongoMigrationProcessor.Context;
 using OnlineMongoMigrationProcessor.Helpers.JobManagement;
@@ -24,7 +25,10 @@ namespace OnlineMongoMigrationProcessor.Workers
         private MongoClient _targetClient;
         private IMongoCollection<BsonDocument> _sourceCollection;
         private IMongoCollection<BsonDocument> _targetCollection;
+        private IMongoCollection<RawBsonDocument> _sourceRawCollection;
+        private IMongoCollection<RawBsonDocument> _targetRawCollection;
         private int _pageSize = 5000; // Increased from 500 for better throughput
+        private int _rawFetchByIdChunkSize = 500;
         private int _saveProgressEveryNPages = 20; // Reduce disk I/O by batching saves
         private long _successCount = 0;
         private long _failureCount = 0;
@@ -90,8 +94,13 @@ namespace OnlineMongoMigrationProcessor.Workers
             _log = log;
             _targetClient = targetClient;
             _sourceCollection = sourceCollection;
+            if (_sourceCollection != null)
+                _sourceRawCollection = _sourceCollection.Database.GetCollection<RawBsonDocument>(_sourceCollection.CollectionNamespace.CollectionName);
             if (_targetClient != null)
+            {
                 _targetCollection = _targetClient.GetDatabase(targetDatabase).GetCollection<BsonDocument>(targetCollectionName);
+                _targetRawCollection = _targetClient.GetDatabase(targetDatabase).GetCollection<RawBsonDocument>(targetCollectionName);
+            }
             _pageSize=pageSize;
         }
 
@@ -296,62 +305,56 @@ namespace OnlineMongoMigrationProcessor.Workers
             bool isWriteSimulated,
             string segmentId)
         {
-            var querySuccess = false;
-            int batchCount = 0;
-            List<BsonDocument> batch = new List<BsonDocument>(_pageSize);
-
             try
             {
-                // Use Find with cursor - much faster than Aggregate + Skip/Limit
-                var findOptions = new FindOptions<BsonDocument>
+                _log.WriteLine(
+                    $"[DEBUG] Segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] starting fast-path raw cursor processing.",
+                    LogType.Debug);
+
+                var fastPathResult = await TryProcessSegmentWithRawCursorAsync(
+                    segment,
+                    combinedFilter,
+                    mu,
+                    migrationChunkIndex,
+                    basePercent,
+                    contribFactor,
+                    targetCount,
+                    errors,
+                    cancellationToken,
+                    isWriteSimulated,
+                    segmentId);
+
+                if (fastPathResult.HasValue)
                 {
-                    BatchSize = _pageSize,
-                    NoCursorTimeout = true
-                };
-
-                using var cursor = await _sourceCollection.FindAsync(combinedFilter, findOptions, cancellationToken);
-                querySuccess = true;
-
-                while (await cursor.MoveNextAsync(cancellationToken))
-                {
-                    foreach (var doc in cursor.Current)
-                    {
-                        if (cancellationToken.IsCancellationRequested)
-                            return TaskResult.Canceled;
-
-                        batch.Add(doc);
-
-                        if (batch.Count >= _pageSize)
-                        {
-                            var writeResult = await WriteBatchAsync(batch, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
-                            if (writeResult == TaskResult.Canceled)
-                                return TaskResult.Canceled;
-
-                            batch.Clear();
-                            batchCount++;
-
-                            // Update progress less frequently to reduce I/O
-                            if (batchCount % _saveProgressEveryNPages == 0)
-                            {
-                                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
-                            }
-                        }
-                    }
+                    _log.WriteLine(
+                        $"[DEBUG] Segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] completed via fast-path raw cursor with result {fastPathResult.Value}.",
+                        LogType.Debug);
+                    return fastPathResult.Value;
                 }
 
-                // Process remaining documents
-                if (batch.Count > 0)
-                {
-                    var writeResult = await WriteBatchAsync(batch, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
-                    if (writeResult == TaskResult.Canceled)
-                        return TaskResult.Canceled;
-                }
+                _log.WriteLine(
+                    $"[DEBUG] Segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] switching to fallback _id-based fetch processing.",
+                    LogType.Debug);
 
-                // Final progress update
-                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
-                return TaskResult.Success;
+                return await ProcessSegmentWithIdFallbackAsync(
+                    segment,
+                    combinedFilter,
+                    mu,
+                    migrationChunkIndex,
+                    basePercent,
+                    contribFactor,
+                    targetCount,
+                    errors,
+                    cancellationToken,
+                    isWriteSimulated,
+                    segmentId);
             }
             catch (MongoBulkWriteException<BsonDocument> ex)
+            {
+                HandleBulkWriteException(ex, segment, mu, migrationChunkIndex, segmentId);
+                return TaskResult.HasMore;
+            }
+            catch (MongoBulkWriteException<RawBsonDocument> ex)
             {
                 HandleBulkWriteException(ex, segment, mu, migrationChunkIndex, segmentId);
                 return TaskResult.HasMore;
@@ -370,11 +373,6 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             catch (Exception ex)
             {
-                if (!querySuccess)
-                {
-                    _log.WriteLine($"Error in fetching documents for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] during command execution.", LogType.Warning);
-                    return TaskResult.Retry;
-                }
                 errors.Add(ex);
                 _log.WriteLine(
                     $"Batch processing error encountered during document copy of segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. Details: {ex}.",
@@ -383,8 +381,226 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
         }
 
-        private async Task<TaskResult> WriteBatchAsync(
-            List<BsonDocument> batch,
+        private async Task<TaskResult?> TryProcessSegmentWithRawCursorAsync(
+            Segment segment,
+            FilterDefinition<BsonDocument> combinedFilter,
+            MigrationUnit mu,
+            int migrationChunkIndex,
+            double basePercent,
+            double contribFactor,
+            long targetCount,
+            ConcurrentBag<Exception> errors,
+            CancellationToken cancellationToken,
+            bool isWriteSimulated,
+            string segmentId)
+        {
+            int batchCount = 0;
+            var rawFindOptions = new FindOptions<RawBsonDocument>
+            {
+                BatchSize = _pageSize,
+                NoCursorTimeout = false
+            };
+
+            try
+            {
+                var renderedFilter = RenderFilterForRawCollection(combinedFilter);
+                var rawFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedFilter);
+                List<RawBsonDocument> rawBatch = new List<RawBsonDocument>(_pageSize);
+
+                using var rawCursor = await _sourceRawCollection.FindAsync(rawFilter, rawFindOptions, cancellationToken);
+
+                while (await rawCursor.MoveNextAsync(cancellationToken))
+                {
+                    foreach (var rawDoc in rawCursor.Current)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                            return TaskResult.Canceled;
+
+                        rawBatch.Add(rawDoc);
+
+                        if (rawBatch.Count >= _pageSize)
+                        {
+                            var writeResult = await WriteRawBatchAsync(rawBatch, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                            if (writeResult == TaskResult.Canceled)
+                                return TaskResult.Canceled;
+
+                            rawBatch.Clear();
+                            batchCount++;
+
+                            if (batchCount % _saveProgressEveryNPages == 0)
+                            {
+                                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
+                            }
+                        }
+                    }
+                }
+
+                if (rawBatch.Count > 0)
+                {
+                    var writeResult = await WriteRawBatchAsync(rawBatch, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                    if (writeResult == TaskResult.Canceled)
+                        return TaskResult.Canceled;
+                }
+
+                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
+                return TaskResult.Success;
+            }
+            catch (Exception rawReadEx) when (
+                rawReadEx is not OperationCanceledException &&
+                rawReadEx is not OutOfMemoryException &&
+                rawReadEx is not MongoBulkWriteException<BsonDocument> &&
+                rawReadEx is not MongoBulkWriteException<RawBsonDocument>)
+            {
+                if (!ShouldFallbackToIdBasedFetch(rawReadEx))
+                {
+                    throw;
+                }
+
+                _log.WriteLine(
+                    $"Raw cursor read failed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. Falling back to _id-based fetch. Details: {rawReadEx.Message}",
+                    LogType.Warning);
+                _log.WriteLine(
+                    $"[DEBUG] Segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] fast-path failure matched fallback policy ({rawReadEx.GetType().Name}).",
+                    LogType.Debug);
+                return null;
+            }
+        }
+
+        private static bool ShouldFallbackToIdBasedFetch(Exception ex)
+        {
+            if (ex is MongoCommandException || ex is MongoQueryException || ex is FormatException)
+            {
+                return true;
+            }
+
+            if (ex is InvalidOperationException invalidOperationException)
+            {
+                var message = invalidOperationException.Message ?? string.Empty;
+                return message.Contains("Duplicate element name", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("cannot be deserialized", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("deserializ", StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
+        }
+
+        private static BsonDocument RenderFilterForRawCollection(FilterDefinition<BsonDocument> filter)
+        {
+            var serializerRegistry = BsonSerializer.SerializerRegistry;
+            var documentSerializer = serializerRegistry.GetSerializer<BsonDocument>();
+#if LEGACY_MONGODB_DRIVER
+            return filter.Render(documentSerializer, serializerRegistry);
+#else
+            var renderArgs = new RenderArgs<BsonDocument>(documentSerializer, serializerRegistry);
+            return filter.Render(renderArgs);
+#endif
+        }
+
+        private async Task<TaskResult> ProcessSegmentWithIdFallbackAsync(
+            Segment segment,
+            FilterDefinition<BsonDocument> combinedFilter,
+            MigrationUnit mu,
+            int migrationChunkIndex,
+            double basePercent,
+            double contribFactor,
+            long targetCount,
+            ConcurrentBag<Exception> errors,
+            CancellationToken cancellationToken,
+            bool isWriteSimulated,
+            string segmentId)
+        {
+            int batchCount = 0;
+            List<BsonValue> idBatch = new List<BsonValue>(_pageSize);
+
+            try
+            {
+                _log.WriteLine(
+                    $"[DEBUG] Segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] entered fallback _id-based fetch path.",
+                    LogType.Debug);
+
+                var findOptions = new FindOptions<BsonDocument>
+                {
+                    BatchSize = _pageSize,
+                    NoCursorTimeout = false,
+                    Projection = Builders<BsonDocument>.Projection.Include("_id")
+                };
+
+                using var cursor = await _sourceCollection.FindAsync(combinedFilter, findOptions, cancellationToken);
+
+                while (await cursor.MoveNextAsync(cancellationToken))
+                {
+                    foreach (var doc in cursor.Current)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                            return TaskResult.Canceled;
+
+                        if (!doc.TryGetValue("_id", out var idValue))
+                            continue;
+
+                        idBatch.Add(idValue);
+
+                        if (idBatch.Count >= _pageSize)
+                        {
+                            var rawDocs = await FetchRawDocumentsByIdsAsync(idBatch, cancellationToken);
+                            var writeResult = await WriteRawBatchAsync(rawDocs, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                            if (writeResult == TaskResult.Canceled)
+                                return TaskResult.Canceled;
+
+                            idBatch.Clear();
+                            batchCount++;
+
+                            if (batchCount % _saveProgressEveryNPages == 0)
+                            {
+                                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
+                            }
+                        }
+                    }
+                }
+
+                if (idBatch.Count > 0)
+                {
+                    var rawDocs = await FetchRawDocumentsByIdsAsync(idBatch, cancellationToken);
+                    var writeResult = await WriteRawBatchAsync(rawDocs, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                    if (writeResult == TaskResult.Canceled)
+                        return TaskResult.Canceled;
+                }
+
+                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
+                _log.WriteLine(
+                    $"[DEBUG] Segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] completed fallback _id-based fetch path.",
+                    LogType.Debug);
+                return TaskResult.Success;
+            }
+            catch (Exception ex) when (
+                ex is not OperationCanceledException &&
+                ex is not OutOfMemoryException &&
+                ex is not MongoBulkWriteException<BsonDocument> &&
+                ex is not MongoBulkWriteException<RawBsonDocument>)
+            {
+                _log.WriteLine($"Fallback segment processing failed for {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] during command execution. Details: {ex}", LogType.Warning);
+                return TaskResult.Retry;
+            }
+        }
+
+        private async Task<List<RawBsonDocument>> FetchRawDocumentsByIdsAsync(List<BsonValue> documentIds, CancellationToken cancellationToken)
+        {
+            if (documentIds == null || documentIds.Count == 0)
+                return new List<RawBsonDocument>();
+
+            var documents = new List<RawBsonDocument>(documentIds.Count);
+            for (int index = 0; index < documentIds.Count; index += _rawFetchByIdChunkSize)
+            {
+                var idChunk = documentIds.Skip(index).Take(_rawFetchByIdChunkSize).ToList();
+                var filter = Builders<RawBsonDocument>.Filter.In("_id", idChunk);
+                var chunkDocs = await _sourceRawCollection.Find(filter).ToListAsync(cancellationToken);
+                documents.AddRange(chunkDocs);
+            }
+
+            return documents;
+        }
+
+        private async Task<TaskResult> WriteRawBatchAsync(
+            List<RawBsonDocument> batch,
             Segment segment,
             MigrationUnit mu,
             int migrationChunkIndex,
@@ -397,7 +613,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 if (!isWriteSimulated)
                 {
-                    var writeResult = await WriteDocumentsToTarget(batch, segment, cancellationToken);
+                    var writeResult = await WriteRawDocumentsToTarget(batch, segment, cancellationToken);
                     if (writeResult == TaskResult.Canceled)
                         return TaskResult.Canceled;
                 }
@@ -407,94 +623,11 @@ namespace OnlineMongoMigrationProcessor.Workers
                 }
                 return TaskResult.Success;
             }
-            catch (MongoBulkWriteException<BsonDocument> ex)
+            catch (MongoBulkWriteException<RawBsonDocument> ex)
             {
                 HandleBulkWriteException(ex, segment, mu, migrationChunkIndex, segmentId);
                 return TaskResult.Success; // Continue processing
             }
-        }
-
-        // Keep legacy method for backward compatibility but mark as obsolete
-        [Obsolete("Use ProcessSegmentWithCursorAsync instead for better performance")]
-        private async Task<TaskResult> ProcessSegmentPageAsync(Segment segment,
-            FilterDefinition<BsonDocument> combinedFilter,
-            MigrationUnit mu,
-            int migrationChunkIndex,
-            double basePercent,
-            double contribFactor,
-            long targetCount,
-            ConcurrentBag<Exception> errors,
-            CancellationToken cancellationToken,
-            bool isWriteSimulated,
-            string segmentId,
-            int pageIndex)
-        {
-            var querySuccess = false;
-            try
-            {
-                querySuccess = false;
-
-                // 1. Fetch documents from source
-                var set = await _sourceCollection.Aggregate()
-                    .Match(combinedFilter)
-                    .Skip(pageIndex * _pageSize)
-                    .Limit(_pageSize)
-                    .ToListAsync(cancellationToken);
-
-                querySuccess = true;
-
-                if (set.Count == 0)
-                    return TaskResult.Success;
-
-                // 2. Write to target (unless simulated)
-                if (!isWriteSimulated)
-                {
-                    var writeResult = await WriteDocumentsToTarget(set, segment, cancellationToken);
-                    if (writeResult == TaskResult.Canceled)
-                    {
-                        return TaskResult.Canceled;
-                    }
-                }
-                else
-                {
-                    Interlocked.Add(ref _successCount, set.Count);
-                }
-            }
-            catch (MongoBulkWriteException<BsonDocument> ex)
-            {
-                HandleBulkWriteException(ex, segment, mu, migrationChunkIndex, segmentId);
-            }
-            catch (OutOfMemoryException ex)
-            {
-                _log.WriteLine(
-                    $"Encountered Out Of Memory exception for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. Try reducing _pageSize. Details: {ex}",
-                    LogType.Error);
-                return TaskResult.Retry;
-            }
-            catch (Exception ex) when (ex.ToString().Contains("canceled."))
-            {
-                _log.WriteLine($"Document copy operation for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] was canceled.");
-                return TaskResult.Canceled;
-            }
-            catch (Exception ex)
-            {
-                if (!querySuccess)
-                {
-                    _log.WriteLine($"Error in fetching documents for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] during command execution.", LogType.Warning);
-                    return TaskResult.Retry;
-                }
-                errors.Add(ex);
-                _log.WriteLine(
-                    $"Batch processing error encountered during document copy of segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]. Details: {ex}.",
-                    LogType.Error);
-                return TaskResult.Retry;
-            }
-            finally
-            {
-                UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
-            }
-
-            return TaskResult.HasMore;
         }
 
         private void LogErrors(List<BulkWriteError> exceptions, string location)
@@ -574,7 +707,6 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.CompareChunkDocumentsAsync: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={migrationChunkIndex}");
 
-            var missingDocuments = new List<BsonDocument>();
             int pageIndex = 0;
             const int comparisonPageSize = 100; // Smaller page size for comparison
             long processedCount = 0;
@@ -584,9 +716,9 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                // Get documents from source using chunk filter
-                var sourceDocuments = await _sourceCollection.Aggregate()
-                    .Match(chunkFilter)
+                // Compare by _id only to avoid deserializing full documents that may contain duplicate field names.
+                var sourceDocuments = await _sourceCollection.Find(chunkFilter)
+                    .Project(Builders<BsonDocument>.Projection.Include("_id"))
                     .Skip(pageIndex * comparisonPageSize)
                     .Limit(comparisonPageSize)
                     .ToListAsync(cancellationToken);
@@ -605,12 +737,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                 if (documentIds.Count > 0)
                 {
                     foundMissingCount += await ProcessMissingDocuments(
-                        sourceDocuments, 
                         documentIds, 
                         migrationChunk, 
                         isWriteSimulated, 
-                        cancellationToken, 
-                        missingDocuments);
+                        cancellationToken);
                 }
 
                 pageIndex++;
@@ -748,6 +878,23 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
         }
 
+        private async Task<TaskResult> WriteRawDocumentsToTarget(List<RawBsonDocument> documents, Segment segment, CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return TaskResult.Canceled;
+            }
+
+            if (!MongoHelper.IsCosmosRUEndpoint(_targetCollection))
+            {
+                return await WriteBulkRawDocuments(documents, segment, cancellationToken);
+            }
+            else
+            {
+                return await WriteRawDocumentsWithInsertMany(documents, segment, cancellationToken);
+            }
+        }
+
         private async Task<TaskResult> WriteBulkDocuments(List<BsonDocument> documents, Segment segment, CancellationToken cancellationToken)
         {
             MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.WriteBulkDocuments: documents.Count={documents.Count}, segmentId={segment.Id}");
@@ -808,6 +955,54 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
         }
 
+        private async Task<TaskResult> WriteBulkRawDocuments(List<RawBsonDocument> documents, Segment segment, CancellationToken cancellationToken)
+        {
+            MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.WriteBulkRawDocuments: documents.Count={documents.Count}, segmentId={segment.Id}");
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return TaskResult.Canceled;
+            }
+
+            try
+            {
+                var insertModels = documents.Select(doc => new InsertOneModel<RawBsonDocument>(doc)).ToList();
+
+                var result = await _targetRawCollection.BulkWriteAsync(insertModels, new BulkWriteOptions { IsOrdered = false }, cancellationToken);
+                Interlocked.Add(ref _successCount, result.InsertedCount);
+                segment.ResultDocCount += result.InsertedCount;
+
+                return TaskResult.Success;
+            }
+            catch (OperationCanceledException)
+            {
+                return TaskResult.Canceled;
+            }
+        }
+
+        private async Task<TaskResult> WriteRawDocumentsWithInsertMany(List<RawBsonDocument> documents, Segment segment, CancellationToken cancellationToken)
+        {
+            MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.WriteRawDocumentsWithInsertMany: documents.Count={documents.Count}, segmentId={segment.Id}");
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return TaskResult.Canceled;
+            }
+
+            try
+            {
+                await _targetRawCollection.InsertManyAsync(documents, new InsertManyOptions { IsOrdered = false }, cancellationToken);
+                Interlocked.Add(ref _successCount, documents.Count);
+                segment.ResultDocCount += documents.Count;
+
+                return TaskResult.Success;
+            }
+            catch (OperationCanceledException)
+            {
+                return TaskResult.Canceled;
+            }
+        }
+
         private void HandleBulkWriteException(
             MongoBulkWriteException<BsonDocument> ex,
             Segment segment,
@@ -842,18 +1037,50 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
         }
 
+        private void HandleBulkWriteException(
+            MongoBulkWriteException<RawBsonDocument> ex,
+            Segment segment,
+            MigrationUnit mu,
+            int migrationChunkIndex,
+            string segmentId)
+        {
+            MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.HandleBulkWriteException(Raw): collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={migrationChunkIndex}, segmentId={segmentId}");
+
+            long bulkInserted = ex.Result?.InsertedCount ?? 0;
+            Interlocked.Add(ref _successCount, bulkInserted);
+            segment.ResultDocCount += bulkInserted;
+
+            int dupeCount = ex.WriteErrors.Count(e => e.Code == 11000);
+            if (dupeCount > 0)
+            {
+                Interlocked.Add(ref _skippedCount, dupeCount);
+                segment.ResultDocCount += dupeCount;
+            }
+
+            int otherErrors = ex.WriteErrors.Count(e => e.Code != 11000);
+            if (otherErrors > 0)
+            {
+                Interlocked.Add(ref _failureCount, otherErrors);
+                _log.WriteLine(
+                    $"Document copy encountered errors for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]",
+                    LogType.Error);
+                LogErrors(
+                    ex.WriteErrors.Where(e => e.Code != 11000).ToList(),
+                    $"segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]"
+                );
+            }
+        }
+
         private async Task<long> ProcessMissingDocuments(
-            List<BsonDocument> sourceDocuments,
             List<BsonValue> documentIds,
             MigrationChunk migrationChunk,
             bool isWriteSimulated,
-            CancellationToken cancellationToken,
-            List<BsonDocument> missingDocuments)
+            CancellationToken cancellationToken)
         {
 
             long foundMissingCount = 0;
             
-            _log.WriteLine($"Processing {documentIds.Count} individual documents as bulk insert failed.");
+            _log.WriteLine($"Processing {documentIds.Count} candidate missing documents individually during chunk reconciliation.");
 
             var targetFilter = Builders<BsonDocument>.Filter.In("_id", documentIds);
             var existingTargetDocs = await _targetCollection.Find(targetFilter)
@@ -862,26 +1089,19 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             var existingIds = new HashSet<BsonValue>(existingTargetDocs.Select(doc => doc["_id"]));
 
-            
-            foreach (var sourceDoc in sourceDocuments)
+            foreach (var idValue in documentIds)
             {
-                _log.ShowInMonitor("Processing document with _id : " + sourceDoc["_id"].ToString());
                 if (cancellationToken.IsCancellationRequested)
                     break;
 
-                if (!sourceDoc.Contains("_id"))
-                    continue;
-
-                var idValue = sourceDoc["_id"];
-
                 if (!existingIds.Contains(idValue))
                 {
-                    missingDocuments.Add(sourceDoc);
                     foundMissingCount++;
+                    _log.ShowInMonitor("Processing missing document with _id : " + idValue.ToString());
                     
                     if (!isWriteSimulated)
                     {
-                        await InsertMissingDocument(sourceDoc, idValue, migrationChunk);
+                        await InsertMissingDocument(idValue, migrationChunk);
                     }
                 }
             }
@@ -891,12 +1111,21 @@ namespace OnlineMongoMigrationProcessor.Workers
             return foundMissingCount;
         }
 
-        private async Task InsertMissingDocument(BsonDocument sourceDoc, BsonValue idValue, MigrationChunk migrationChunk)
+        private async Task InsertMissingDocument(BsonValue idValue, MigrationChunk migrationChunk)
         {
             MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.InsertMissingDocument: _id={idValue}");
             try
             {
-                await _targetCollection.InsertOneAsync(sourceDoc, cancellationToken: CancellationToken.None);
+                var sourceFilter = Builders<RawBsonDocument>.Filter.Eq("_id", idValue);
+                var sourceDoc = await _sourceRawCollection.Find(sourceFilter).FirstOrDefaultAsync(CancellationToken.None);
+
+                if (sourceDoc == null)
+                {
+                    _log.WriteLine($"Missing source document could not be fetched for _id: {idValue}", LogType.Warning);
+                    return;
+                }
+
+                await _targetRawCollection.InsertOneAsync(sourceDoc, cancellationToken: CancellationToken.None);
                 Interlocked.Increment(ref _successCount);
                 Interlocked.Decrement(ref _failureCount);
                 UpdateSegmentResultCount(migrationChunk);

@@ -1,10 +1,8 @@
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any
 from pymongo import MongoClient
 from pymongo.database import Database
 from collection_config import CollectionConfig
 from console_utils import Colors, print_warning, print_error, print_success
-import json
-import os
 
 class SchemaMigration:
     """
@@ -114,9 +112,7 @@ class SchemaMigration:
             self,
             source_client: MongoClient,
             dest_client: MongoClient,
-            collection_configs: List[CollectionConfig],
-            shardkey_export_path: Optional[str] = None,
-            shardkey_import_path: Optional[str] = None) -> None:
+            collection_configs: List[CollectionConfig]) -> None:
         """
         Migrate indexes and shard keys from source collections to destination collections.
 
@@ -124,8 +120,6 @@ class SchemaMigration:
         :param dest_client: MongoDB client connected to the destination database.
         :param collection_configs: A list of CollectionConfig objects containing
                                    configuration details for each collection to migrate.
-        :param shardkey_export_path: If provided, export shard key info from source to a JSON file at this path.
-        :param shardkey_import_path: If provided, import shard key info from a JSON file instead of reading from source.
         :raises ConnectionError: If source or destination connection fails.
         """
         # Validate connections before starting migration
@@ -182,20 +176,9 @@ class SchemaMigration:
 
             # Check if shard key should be created
             if collection_config.migrate_shard_key:
-                self._print_verbose(f"migrate_shard_key=True, checking for shard key")
+                self._print_verbose(f"migrate_shard_key=True, checking for shard key on source")
                 try:
-                    collection_ns = f"{db_name}.{collection_name}"
-
-                    # Determine shard key source: import file or live source query
-                    if shardkey_import_path:
-                        source_shard_key = self._import_shard_key(shardkey_import_path, collection_ns)
-                    else:
-                        source_shard_key = self._get_shard_key(source_db, collection_config)
-
-                    # Export shard key if export path is provided
-                    if shardkey_export_path and source_shard_key is not None:
-                        self._export_shard_key(shardkey_export_path, collection_ns, source_shard_key)
-
+                    source_shard_key = self._get_shard_key(source_db, collection_config)
                     if (source_shard_key is not None):
                         # Only single-field shard keys are supported on the destination
                         if len(source_shard_key) > 1:
@@ -213,7 +196,7 @@ class SchemaMigration:
                         self._print_verbose(f"Running shardCollection command on destination")
                         dest_client.admin.command(
                             "shardCollection",
-                            collection_ns,
+                            f"{db_name}.{collection_name}",
                             key=hashed_shard_key)
                         self._print_verbose(f"Shard key applied successfully")
                     else:
@@ -286,16 +269,6 @@ class SchemaMigration:
                         })
                         continue
                     has_text_index = True
-                    # ── Rule: textIndexVersion 3 not supported – cannot downgrade (v3 treats
-                    #    diacritics like fiancée/fiancee as equal; v2 does not) ──
-                    if index_options.get('textIndexVersion') == 3:
-                        self._print_error(f"---- [SKIPPED] Index '{index_name}': textIndexVersion 3 is not supported and cannot be downgraded to version 2 (different diacritic handling).")
-                        self.structural_incompatibilities.append({
-                            'collection': collection_ns,
-                            'index_name': index_name,
-                            'reason': 'textIndexVersion 3 is not supported. Cannot downgrade to version 2 because they differ in diacritic-insensitive matching (e.g. fiancée vs fiancee).'
-                        })
-                        continue
                 
                 # ── Rule: Compound 2dsphere indexes not supported (#3) ──
                 is_2dsphere_compound = self._is_compound_geospatial_index(index_keys)
@@ -377,16 +350,8 @@ class SchemaMigration:
                 created_index_names.add(index_name)
                 self._print_success(f"---- Created index: {index_keys} with options: {index_options}")
                 self._print_verbose(f"  Creating index on destination: {index_keys}")
-                try:
-                    dest_collection.create_index(index_keys, **index_options)
-                    self._print_verbose(f"  Index created successfully")
-                except Exception as e:
-                    self._print_error(f"---- [ERROR] Failed to create index '{index_name}': {e}")
-                    self.structural_incompatibilities.append({
-                        'collection': collection_ns,
-                        'index_name': index_name,
-                        'reason': f'Failed to create index: {e}'
-                    })
+                dest_collection.create_index(index_keys, **index_options)
+                self._print_verbose(f"  Index created successfully")
         
         # Report all incompatible indexes at the end
         self._report_incompatible_indexes()
@@ -664,67 +629,6 @@ class SchemaMigration:
         
         has_wildcard = any(field == '$**' or field.endswith('.$**') for field, _ in index_keys)
         return has_wildcard
-
-    def _export_shard_key(self, export_path: str, collection_ns: str, shard_key: Dict[str, Any]) -> None:
-        """
-        Export shard key info to a JSON file. Each call appends to the file so that
-        all collections are stored in a single JSON file.
-
-        The JSON file has the structure:
-        {
-            "db.collection1": {"field": 1},
-            "db.collection2": {"field": "hashed"}
-        }
-
-        :param export_path: Path to the JSON file.
-        :param collection_ns: The namespace (db.collection) of the collection.
-        :param shard_key: The shard key definition from the source.
-        """
-        # Load existing data if the file already exists
-        data = {}
-        if os.path.exists(export_path):
-            try:
-                with open(export_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                data = {}
-
-        data[collection_ns] = shard_key
-
-        os.makedirs(os.path.dirname(export_path) or '.', exist_ok=True)
-        with open(export_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-
-        self._print_success(f"-- Exported shard key for {collection_ns} to {export_path}")
-        self._print_verbose(f"  Shard key exported: {shard_key}")
-
-    def _import_shard_key(self, import_path: str, collection_ns: str) -> Optional[Dict[str, Any]]:
-        """
-        Import shard key info from a JSON file for a specific collection.
-
-        :param import_path: Path to the JSON file containing shard key definitions.
-        :param collection_ns: The namespace (db.collection) to look up.
-        :return: The shard key definition, or None if not found.
-        """
-        if not os.path.exists(import_path):
-            self._print_error(f"-- Shard key import file not found: {import_path}")
-            return None
-
-        try:
-            with open(import_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            self._print_error(f"-- Failed to read shard key import file: {e}")
-            return None
-
-        shard_key = data.get(collection_ns)
-        if shard_key is not None:
-            self._print_success(f"-- Imported shard key for {collection_ns} from {import_path}: {shard_key}")
-            self._print_verbose(f"  Shard key imported: {shard_key}")
-        else:
-            self._print_verbose(f"  No shard key entry found for {collection_ns} in {import_path}")
-
-        return shard_key
 
     def _get_shard_key(self, source_db: Database, collection_config: CollectionConfig):
         """

@@ -271,6 +271,38 @@ Azure App Service provides various pricing tiers to match your workload requirem
 
 To change the pricing tier, update the `main.bicep` file or modify the App Service Plan in the Azure Portal.
 
+## Mongo Dump/Restore Advanced Configuration
+
+For Dump/Restore jobs, Web App supports both **exclusive execution mode** and **separate tool versions**.
+
+### 1) ExclusiveDumpMode and ExclusiveRestoreMode
+
+Set these as Web App application settings:
+
+- `ExclusiveDumpMode=true` → dump runs, restore is paused
+- `ExclusiveRestoreMode=true` → restore runs, dump is paused
+- if both are `true`, both are paused
+
+Example:
+
+```powershell
+az webapp config appsettings set `
+   --resource-group <resource-group-name> `
+   --name <web-app-name> `
+   --settings ExclusiveDumpMode=true ExclusiveRestoreMode=false
+```
+
+### 2) Separate versions for `mongodump` and `mongorestore`
+
+In the app UI (**Edit Configuration Settings**), set **Mongo tools download URL(s)** as either:
+
+- **Single URL** (same tools package for both):
+   - `https://.../mongodb-database-tools-...zip`
+- **JSON with separate URLs** (recommended for older/non-compatible sources, e.g. Mongo 3.4):
+   - `{"MongoDumpURL":"https://...dump.zip","MongoRestoreURL":"https://...restore.zip"}`
+
+If Web App has no internet egress, host the ZIP file(s) in your app content and use those HTTPS URLs.
+
 ## Monitoring and Troubleshooting
 
 ### View Application Logs

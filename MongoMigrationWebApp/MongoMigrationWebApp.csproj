@@ -25,6 +25,26 @@
 
   <ItemGroup>
     <ProjectReference Include="..\OnlineMongoMigrationProcessor\OnlineMongoMigrationProcessor.csproj" />
+    <ProjectReference Include="..\ResumeTokenProbeExe\ResumeTokenProbeExe.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopyResumeTokenProbeExe" AfterTargets="Build;Publish">
+    <ItemGroup>
+      <ResumeTokenProbeArtifacts Include="..\ResumeTokenProbeExe\bin\$(Configuration)\net9.0\**\*.*"
+                                 Exclude="..\ResumeTokenProbeExe\bin\$(Configuration)\net9.0\**\*.pdb;..\ResumeTokenProbeExe\bin\$(Configuration)\net9.0\**\*.xml" />
+    </ItemGroup>
+
+    <Copy
+      SourceFiles="@(ResumeTokenProbeArtifacts)"
+      DestinationFiles="@(ResumeTokenProbeArtifacts->'$(OutDir)ResumeTokenProbeArtifacts\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true"
+      Condition="Exists('%(ResumeTokenProbeArtifacts.Identity)')" />
+
+    <Copy
+      SourceFiles="@(ResumeTokenProbeArtifacts)"
+      DestinationFiles="@(ResumeTokenProbeArtifacts->'$(PublishDir)ResumeTokenProbeArtifacts\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true"
+      Condition="'$(PublishDir)' != '' and Exists('%(ResumeTokenProbeArtifacts.Identity)')" />
+  </Target>
 
 </Project>

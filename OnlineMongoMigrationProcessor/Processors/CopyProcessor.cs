@@ -91,7 +91,7 @@ namespace OnlineMongoMigrationProcessor
                 _targetClient = MongoClientFactory.Create(_log, ctx.TargetConnectionString);
 
             var documentCopier = new DocumentCopyWorker();
-            documentCopier.Initialize(_log, _targetClient!, ctx.Collection, ctx.DatabaseName, ctx.CollectionName, _config.MongoCopyPageSize);
+            documentCopier.Initialize(_log, _targetClient!, ctx.Collection, ctx.TargetDatabaseName, ctx.TargetCollectionName, _config.MongoCopyPageSize);
             var result = await documentCopier.CopyDocumentsAsync(mu, chunkIndex, initialPercent, contributionFactor, docCount, filter, _cts.Token, MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun);
 
             if (result == TaskResult.Success)

@@ -2,8 +2,6 @@
 using Microsoft.AspNetCore.Mvc;
 using OnlineMongoMigrationProcessor;
 using OnlineMongoMigrationProcessor.Context;
-using SharpCompress.Common;
-using System.IO;
 using System.Text;
 
 [ApiController]

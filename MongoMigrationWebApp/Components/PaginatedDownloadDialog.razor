@@ -1,4 +1,3 @@
-@inject HttpClient HttpClient
 @inject IJSRuntime JS
 
 <div class="modal-backdrop" id="paginatedDownloadModal" aria-modal="true" role="dialog">
@@ -183,22 +182,12 @@
         {
             _downloadingPage = pageNumber;
             StateHasChanged();
-            
-            var url = $"/api/File/download/log/{JobId}/page/{pageNumber}/{PageSize}";
-            var response = await HttpClient.GetAsync(url);
-            
-            if (response.IsSuccessStatusCode)
-            {
-                var fileBytes = await response.Content.ReadAsByteArrayAsync();
-                var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
-                await JS.InvokeVoidAsync("downloadFile", fileBytes, $"{JobId}_page_{pageNumber}.txt", contentType);
-                
-                _downloadedPages.Add(pageNumber);
-            }
-            else
-            {
-                await JS.InvokeVoidAsync("alert", $"Failed to download page {pageNumber}");
-            }
+
+            var encodedJobId = Uri.EscapeDataString(JobId);
+            var url = $"/api/File/download/log/{encodedJobId}/page/{pageNumber}/{PageSize}";
+
+            await JS.InvokeVoidAsync("open", url, "_blank");
+            _downloadedPages.Add(pageNumber);
         }
         catch (Exception ex)
         {

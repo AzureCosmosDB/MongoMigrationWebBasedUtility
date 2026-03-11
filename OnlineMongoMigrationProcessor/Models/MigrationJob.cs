@@ -76,11 +76,13 @@ namespace OnlineMongoMigrationProcessor
         /// <summary>
         /// Current number of active dump workers. Used for runtime monitoring and adjustment.
         /// </summary>
+        [JsonIgnore]
         public int CurrentDumpWorkers { get; set; }
         
         /// <summary>
         /// Current number of active restore workers. Used for runtime monitoring and adjustment.
         /// </summary>
+        [JsonIgnore]
         public int CurrentRestoreWorkers { get; set; }
         
         /// <summary>

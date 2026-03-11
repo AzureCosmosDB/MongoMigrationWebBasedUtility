@@ -48,6 +48,10 @@ namespace OnlineMongoMigrationProcessor.Processors
 
         private Task<TaskResult> SyncBackAttemptAsync()
         {
+#if LEGACY_MONGODB_DRIVER
+            _log.WriteLine("SyncBack is not supported with legacy MongoDB driver.", LogType.Warning);
+            return Task.FromResult(TaskResult.Abort);
+#else
             MigrationJobContext.AddVerboseLog("SyncBackProcessor.SyncBackAttemptAsync: starting");
             if (_cts == null)
             {
@@ -74,11 +78,16 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             var _ = _changeStreamProcessor!.RunChangeStreamProcessorForAllCollections(_cts);
             return Task.FromResult(TaskResult.Success);
+#endif
         }
 
 
         public override async Task<TaskResult> StartProcessAsync(string MigrationUnitId, string sourceConnectionString, string targetConnectionString, string idField = "_id")
         {
+#if LEGACY_MONGODB_DRIVER
+            _log.WriteLine("SyncBack is not supported with legacy MongoDB driver.", LogType.Warning);
+            return TaskResult.Abort;
+#else
             ProcessRunning = true;
 
              MigrationJobContext.CurrentlyActiveJob.IsStarted = true;
@@ -113,6 +122,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             }
 
             return resultStatus;
+#endif
         }
     }
 }

@@ -315,21 +315,8 @@
             return;
         }
 
-        var url = $"/api/File/download/job/{job.Id}";
-        var response = await HttpClient.GetAsync(url);
-
-        if (response.IsSuccessStatusCode)
-        {
-            var fileBytes = await response.Content.ReadAsByteArrayAsync();
-            var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
-            var fileName = $"{job.Name}_{job.Id}.json";
-
-            // Use JavaScript to trigger the file download
-            await JS.InvokeVoidAsync("downloadFile", fileBytes, fileName, contentType);
-        }
-        else
-        {
-            await JS.InvokeVoidAsync("open", url, "_blank"); // browser navigates directly
-        }
+        var encodedJobId = Uri.EscapeDataString(job.Id);
+        var url = $"/api/File/download/job/{encodedJobId}";
+        await JS.InvokeVoidAsync("open", url, "_blank");
     }
 }

@@ -6,7 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 	<AssemblyName>OnlineMongoMigrationProcessor</AssemblyName>
-	<NoWarn>CS8602;CS8603;CS8604;CS8618;CS1998;CS0219;CS0618;CS0105;CS8600;CS8625;CS8619;CS0168;CS8629;CS0472</NoWarn>
+  <NoWarn>CS8602;CS8603;CS8604;CS8618;CS1998;CS0219;CS0618;CS0105;CS8600;CS8625;CS8619;CS0168;CS8629;CS0472;NU1605</NoWarn>
+	<!-- Define LEGACY_MONGODB_DRIVER when using MongoDB.Driver less than 2.19 to disable online migration features (change streams).
+	     Remove this line when upgrading to a newer MongoDB.Driver version. -->
+	<!--<DefineConstants>$(DefineConstants);LEGACY_MONGODB_DRIVER</DefineConstants>-->
   </PropertyGroup>
 
   <ItemGroup>

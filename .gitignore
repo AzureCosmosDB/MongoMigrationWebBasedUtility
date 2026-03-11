@@ -7,6 +7,8 @@
 /OnlineMongoMigrationProcessor/obj
 /MongoMigrationWebApp/obj
 /MongoMigrationWebApp/bin
+/ResumeTokenProbeExe/obj
+/ResumeTokenProbeExe/bin
 /MongoMigrationWebApp/publish
 /OnlineMongoMigrationProcessor/bin
 /publish

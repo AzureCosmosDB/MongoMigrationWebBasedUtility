@@ -187,8 +187,10 @@ namespace OnlineMongoMigrationProcessor
                 // Adjust segments per chunk based on the new sample count
                 segmentCount = Math.Max(1, sampleCount / chunkCount);
 
+                bool usePaginationPartitioner = dataType != DataType.ObjectId && config.NonObjectIdPartitioner == PartitionerType.UsePagination;
+
                 // Optimize for non-dump scenarios
-                if (!optimizeForMongoDump)
+                if (!optimizeForMongoDump && !usePaginationPartitioner)
                 {
                     while (chunkCount > segmentCount && segmentCount < GetMaxSegments())
                     {
@@ -224,6 +226,9 @@ namespace OnlineMongoMigrationProcessor
 
                     if (optimizeForObjectId && dataType == DataType.ObjectId && config.ObjectIdPartitioner == PartitionerType.UseSampleCommand)
                         skipDataTypeFilter = true;
+
+                    if (usePaginationPartitioner)
+                        return GetChunkBoundariesGeneralWithPagination(log, collection, dataType, userFilter, skipDataTypeFilter, sampleCount, segmentCount, chunkCount, docCountByType);
 
                     return GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
                 }
@@ -274,13 +279,6 @@ namespace OnlineMongoMigrationProcessor
                 log.WriteLine($"Chunk Count: {chunkBoundaries.Boundaries.Count} where _id is {dataType}");
 
                 return chunkBoundaries;
-            }
-
-            // Step 1: Build the filter pipeline based on the data type
-            //no need to process user filter in partitioning if it doesn't use _id
-            if (!MongoHelper.UsesIdFieldInFilter(userFilter!))
-            {
-                userFilter = MongoHelper.GetFilterDoc("");
             }
 
             BsonDocument matchCondition = BuildDataTypeCondition(dataType, userFilter, skipDataTypeFilter);
@@ -369,6 +367,132 @@ namespace OnlineMongoMigrationProcessor
             {
                 log.WriteLine($"Total Chunks: {chunkBoundaries.Boundaries.Count} where _id is {dataType}");
             }
+            return chunkBoundaries;
+        }
+
+        private static ChunkBoundaries? GetChunkBoundariesGeneralWithPagination(Log log, IMongoCollection<BsonDocument> collection, DataType dataType, BsonDocument userFilter, bool skipDataTypeFilter, long targetPartitionCount, int segmentCount, int targetChunkCount, long docCountByType)
+        {
+            var rawCollection = collection.Database.GetCollection<RawBsonDocument>(collection.CollectionNamespace.CollectionName);
+
+            Boundary? chunkBoundary = null;
+            targetChunkCount = (int)Math.Max(1, Math.Min((long)targetChunkCount, docCountByType));
+            targetPartitionCount = Math.Max(1, Math.Min(targetPartitionCount, docCountByType));
+            segmentCount = Math.Max(1, segmentCount);
+
+            if (targetChunkCount <= 1 || dataType == DataType.Other)
+            {
+                ChunkBoundaries singleChunkBoundaries = new ChunkBoundaries();
+                chunkBoundary = new Boundary
+                {
+                    StartId = BsonNull.Value,
+                    EndId = BsonNull.Value,
+                    SegmentBoundaries = new List<Boundary>()
+                };
+                singleChunkBoundaries.Boundaries ??= new List<Boundary>();
+                singleChunkBoundaries.Boundaries.Add(chunkBoundary);
+                log.WriteLine($"Chunk Count: {singleChunkBoundaries.Boundaries.Count} where _id is {dataType}");
+                return singleChunkBoundaries;
+            }
+
+            if (!MongoHelper.UsesIdFieldInFilter(userFilter!))
+            {
+                userFilter = MongoHelper.GetFilterDoc("");
+            }
+
+            BsonDocument matchCondition = BuildDataTypeCondition(dataType, userFilter, skipDataTypeFilter);
+            FilterDefinition<RawBsonDocument> baseFilter = (matchCondition != null && matchCondition.ElementCount > 0)
+                ? new BsonDocumentFilterDefinition<RawBsonDocument>(matchCondition)
+                : FilterDefinition<RawBsonDocument>.Empty;
+
+            long recordsPerRange = Math.Max(1, docCountByType / targetPartitionCount);
+            int skipCount = (int)Math.Min(recordsPerRange - 1, int.MaxValue - 1);
+
+            if (skipDataTypeFilter)
+            {
+                log.WriteLine($"Using pagination for {collection.CollectionNamespace} (DataType filtering bypassed), records per range: {recordsPerRange}, target chunk count: {targetChunkCount}, target partition count: {targetPartitionCount}, segment count: {segmentCount}");
+            }
+            else
+            {
+                log.WriteLine($"Using pagination for {collection.CollectionNamespace} where _id is {dataType}, records per range: {recordsPerRange}, target chunk count: {targetChunkCount}, target partition count: {targetPartitionCount}, segment count: {segmentCount}");
+            }
+
+            List<BsonValue> partitionValues = new List<BsonValue>();
+            BsonValue? lastId = null;
+
+            for (long partitionIndex = 0; partitionIndex < targetPartitionCount; partitionIndex++)
+            {
+                try
+                {
+                    FilterDefinition<RawBsonDocument> rangeFilter = baseFilter;
+                    if (lastId != null)
+                    {
+                        rangeFilter = Builders<RawBsonDocument>.Filter.And(
+                            baseFilter,
+                            Builders<RawBsonDocument>.Filter.Gt("_id", lastId));
+                    }
+
+                    var doc = rawCollection
+                        .Find(rangeFilter)
+                        .Sort(Builders<RawBsonDocument>.Sort.Ascending("_id"))
+                        .Project(Builders<RawBsonDocument>.Projection.Include("_id"))
+                        .Skip(skipCount)
+                        .Limit(1)
+                        .FirstOrDefault();
+
+                    if (doc == null || !doc.Contains("_id"))
+                    {
+                        break;
+                    }
+
+                    var currentId = doc["_id"];
+                    if (currentId == BsonNull.Value)
+                    {
+                        break;
+                    }
+
+                    lastId = currentId;
+                    partitionValues.Add(currentId);
+                }
+                catch (Exception ex)
+                {
+                    log.WriteLine($"Encountered error in attempt {partitionIndex} while paginating data where _id is {dataType}: {ex}");
+                }
+            }
+
+            partitionValues = partitionValues
+                .Distinct()
+                .OrderBy(value => value)
+                .ToList();
+
+            if (partitionValues.Count == 0)
+            {
+                if (skipDataTypeFilter)
+                {
+                    log.WriteLine("No data found while generating pagination boundaries (DataType filtering bypassed)");
+                }
+                else
+                {
+                    log.WriteLine($"No data found while generating pagination boundaries where _id is {dataType}");
+                }
+                return null;
+            }
+
+            ChunkBoundaries chunkBoundaries = ConvertToBoundaries(partitionValues, segmentCount);
+
+            if (skipDataTypeFilter)
+            {
+                log.WriteLine($"Total Chunks: {chunkBoundaries.Boundaries.Count} (DataType filtering bypassed) using pagination with segment grouping. Requested chunks: {targetChunkCount}, requested partitions: {targetPartitionCount}, segment count: {segmentCount}");
+            }
+            else
+            {
+                log.WriteLine($"Total Chunks: {chunkBoundaries.Boundaries.Count} where _id is {dataType} using pagination with segment grouping. Requested chunks: {targetChunkCount}, requested partitions: {targetPartitionCount}, segment count: {segmentCount}");
+            }
+
+            if (chunkBoundaries.Boundaries.Count != targetChunkCount)
+            {
+                log.WriteLine($"Pagination created {chunkBoundaries.Boundaries.Count} chunks instead of requested {targetChunkCount}. This can happen when _id boundaries are not unique enough for requested partition count.", LogType.Warning);
+            }
+
             return chunkBoundaries;
         }
 
@@ -600,6 +724,160 @@ namespace OnlineMongoMigrationProcessor
             }
 
             return (gte, lt);
+        }
+
+        /// <summary>
+        /// Samples the collection to find boundary values for splitting chunks.
+        /// Uses MongoDB $sample aggregation stage for efficient sampling.
+        /// </summary>
+        public static async Task<List<BsonDocument>> SampleCollectionForSplitPointAsync(
+            IMongoCollection<BsonDocument> collection,
+            MigrationChunk chunk,
+            BsonDocument? userFilterDoc,
+            int sampleSize)
+        {
+            MigrationJobContext.AddVerboseLog($"SampleCollectionForSplitPointAsync: sampleSize={sampleSize}, idField=_id");
+
+            try
+            {
+                // Build match stage for chunk bounds and user filter
+                var matchStages = new List<BsonDocument>();
+
+                // Get properly parsed bounds using SamplePartitioner (handles type-specific parsing)
+                var bounds = GetChunkBounds(chunk.Gte ?? "", chunk.Lt ?? "", chunk.DataType);
+                BsonValue? gteBsonValue = bounds.gte != null && !(bounds.gte is BsonMaxKey) && !(bounds.gte is BsonNull) ? bounds.gte : null;
+                BsonValue? ltBsonValue = bounds.lt != null && !(bounds.lt is BsonMaxKey) && !(bounds.lt is BsonNull) ? bounds.lt : null;
+
+                // Build range filter for _id
+                BsonDocument rangeFilter = new BsonDocument();
+                if (gteBsonValue != null)
+                {
+                    rangeFilter["$gte"] = gteBsonValue;
+                }
+                if (ltBsonValue != null)
+                {
+                    rangeFilter["$lt"] = ltBsonValue;
+                }
+
+                // Build the combined condition: data type + range + user filter
+                BsonDocument filterCondition = BuildDataTypeCondition(chunk.DataType, userFilterDoc, true);
+                
+                // Add range filter to the condition
+                if (rangeFilter.ElementCount > 0)
+                {
+                    if (filterCondition.Contains("_id") && filterCondition["_id"].IsBsonDocument)
+                    {
+                        // Merge with existing _id filter
+                        var existingIdFilter = filterCondition["_id"].AsBsonDocument;
+                        foreach (var element in rangeFilter)
+                        {
+                            existingIdFilter[element.Name] = element.Value;
+                        }
+                    }
+                    else
+                    {
+                        filterCondition["_id"] = rangeFilter;
+                    }
+                }
+
+                // Add combined filter to match stages
+                if (filterCondition != null && filterCondition.ElementCount > 0)
+                {
+                    matchStages.Add(new BsonDocument("$match", filterCondition));
+                }
+
+                // Add sample stage
+                var sampleStage = new BsonDocument("$sample", new BsonDocument("size", sampleSize));
+
+                // Only project _id to avoid full-document deserialization issues.
+                var projectStage = new BsonDocument("$project", new BsonDocument("_id", 1));
+
+                // Add sort by _id to ensure consistent ordering
+                var sortStage = new BsonDocument("$sort", new BsonDocument("_id", 1));
+
+                // Execute aggregation
+                var pipeline = matchStages.Concat(new[] { sampleStage, projectStage, sortStage }).ToList();
+
+                var samples = await collection.Aggregate<BsonDocument>(pipeline)
+                    .ToListAsync()
+                    .ConfigureAwait(false);
+
+                MigrationJobContext.AddVerboseLog($"Sampled {samples.Count} documents from {collection.CollectionNamespace.CollectionName} for split boundaries");
+                return samples;
+            }
+            catch (Exception ex)
+            {
+                MigrationJobContext.AddVerboseLog($"Error sampling collection for split points: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Creates sub-chunks based on sampled document boundaries.
+        /// Each sub-chunk spans from one sample value (inclusive) to the next (exclusive).
+        /// </summary>
+        public static async Task<List<MigrationChunk>> CreateSubChunksFromSampleAsync(
+            MigrationChunk originalChunk,
+            List<BsonDocument> samples,
+            string databaseName,
+            string collectionName)
+        {
+            MigrationJobContext.AddVerboseLog($"CreateSubChunksFromSampleAsync: creating {samples.Count - 1} sub-chunks from samples");
+
+            var subChunks = new List<MigrationChunk>();
+
+            try
+            {
+                for (int i = 0; i < samples.Count - 1; i++)
+                {
+                    var currentSample = samples[i];
+                    var nextSample = samples[i + 1];
+
+                    string gte = currentSample["_id"].ToJson();
+                    string lt = nextSample["_id"].ToJson();
+
+                    // Create sub-chunk (inherit properties from original)
+                    var subChunk = new MigrationChunk(
+                        gte,
+                        lt,
+                        originalChunk.DataType,
+                        false,
+                        false)
+                    {
+                        Id = i.ToString() // Will be reassigned in ReplaceChunkWithSubChunks
+                    };
+
+                    subChunks.Add(subChunk);
+                }
+
+                // Last sub-chunk goes up to original upper bound
+                if (samples.Count > 0)
+                {
+                    var lastSample = samples[samples.Count - 1];
+                    string lastGte = lastSample["_id"].ToJson();
+                    string lastLt = originalChunk.Lt ?? ""; // Use original upper bound or empty
+
+                    var lastSubChunk = new MigrationChunk(
+                        lastGte,
+                        lastLt,
+                        originalChunk.DataType,
+                        false,
+                        false)
+                    {
+                        Id = (samples.Count - 1).ToString()
+                    };
+
+                    subChunks.Add(lastSubChunk);
+                }
+
+                MigrationJobContext.AddVerboseLog($"Created {subChunks.Count} sub-chunks for {databaseName}.{collectionName} via sample-based splitting");
+                return subChunks;
+            }
+            catch (Exception ex)
+            {
+                MigrationJobContext.AddVerboseLog($"Error creating sub-chunks from samples: {ex.Message}");
+                throw;
+            }
         }
     }
 

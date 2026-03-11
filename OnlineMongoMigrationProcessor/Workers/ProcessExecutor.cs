@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -143,8 +144,25 @@ namespace OnlineMongoMigrationProcessor.Workers
                 {
                     using var stream = StorageStreamFactory.OpenReadAsync(outputFilePath, cancellationToken).GetAwaiter().GetResult();
 
-                    stream.CopyToAsync(_process.StandardInput.BaseStream, cancellationToken).Wait(cancellationToken);
-                    _process.StandardInput.Close(); // signal EOF to mongo restore
+                    try
+                    {
+                        stream.CopyToAsync(_process.StandardInput.BaseStream, cancellationToken).Wait(cancellationToken);
+                    }
+                    catch (Exception copyEx) when (IsBrokenPipe(copyEx))
+                    {
+                        _log.WriteLine($"{processType} stdin stream closed early for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] (broken pipe). Using process exit code and stderr for failure details.", LogType.Warning);
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            _process.StandardInput.Close(); // signal EOF to mongo restore
+                        }
+                        catch
+                        {
+                            // no-op: process may already have exited and closed stdin
+                        }
+                    }
                 }
 
                 // cancellation-aware process wait
@@ -185,6 +203,32 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _log.WriteLine($"Error executing {processType}: {Helper.RedactPii(ex.ToString())}", LogType.Error);
                 return false;
             }
+        }
+
+        private static bool IsBrokenPipe(Exception ex)
+        {
+            if (ex is IOException ioEx)
+            {
+                if (ioEx.InnerException is SocketException socketEx && socketEx.SocketErrorCode == SocketError.Shutdown)
+                    return true;
+
+                if (ioEx.Message.Contains("Broken pipe", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            if (ex is AggregateException aggEx)
+            {
+                foreach (var inner in aggEx.Flatten().InnerExceptions)
+                {
+                    if (IsBrokenPipe(inner))
+                        return true;
+                }
+            }
+
+            if (ex.InnerException != null)
+                return IsBrokenPipe(ex.InnerException);
+
+            return false;
         }
 
 
