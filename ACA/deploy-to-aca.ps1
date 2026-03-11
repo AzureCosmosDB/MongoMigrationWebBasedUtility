@@ -160,14 +160,25 @@ if ($imageExists -eq 'true') {
 
 Write-Host "`nStep 3: Prompting for StateStore connection string..." -ForegroundColor Yellow
 $secureConnString = Read-Host -Prompt "The StateStore keeps track of migration job details in a DocumentDB. You may use the same database as the Target DocumentDB or a separate one. Enter the connection string for the StateStore." -AsSecureString
-$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString)
-try {
-    $connString = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-} catch {
-    Write-Host "`nError: Failed to read the StateStore connection string: $_" -ForegroundColor Red
-    exit 1
-} finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+$isWindowsPlatform = ($env:OS -eq 'Windows_NT') -or ((Get-Variable IsWindows -ErrorAction SilentlyContinue) -and $IsWindows)
+
+if ($isWindowsPlatform) {
+    # Keep the previous Windows behavior to avoid deployment issues observed with PtrToStringBSTR.
+    $connString = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString)
+    )
+    $stateStoreConnectionStringParam = "stateStoreConnectionString=`"$connString`""
+} else {
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString)
+    try {
+        $connString = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $stateStoreConnectionStringParam = "stateStoreConnectionString=$connString"
+    } catch {
+        Write-Host "`nError: Failed to read the StateStore connection string: $_" -ForegroundColor Red
+        exit 1
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
 }
 
 Write-Host "`nStep 4: Deploying Container App with application image..." -ForegroundColor Yellow
@@ -185,7 +196,7 @@ $finalBicepParams = @(
         "vCores=$VCores",
         "memoryGB=$MemoryGB",
         "stateStoreAppID=$StateStoreAppID",
-        "stateStoreConnectionString=$connString",
+        $stateStoreConnectionStringParam,
         "aspNetCoreEnvironment=Development",
         "imageTag=$ImageTag",
         "ownerTag=$OwnerTag",
