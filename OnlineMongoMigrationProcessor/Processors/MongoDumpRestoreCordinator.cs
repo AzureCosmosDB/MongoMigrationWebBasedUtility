@@ -108,7 +108,6 @@ namespace OnlineMongoMigrationProcessor
         private DateTime _lastDiskSpaceCheckedAtUtc = DateTime.MinValue;
         private bool _lastDiskSpaceCheckResult = true;
         private const int DiskSpaceCheckCacheSeconds = 30;
-        private static readonly TimeSpan CleanupRunTimeout = TimeSpan.FromMinutes(10);
 
         private const string ExclusiveDumpModeEnvVar = "ExclusiveDumpMode";
         private const string ExclusiveRestoreModeEnvVar = "ExclusiveRestoreMode";
@@ -2631,7 +2630,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log?.WriteLine($"[Cleanup] Failed to load AllowCleanupForFailedRestore from settings. Cleanup will remain disabled. Details: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed to load AllowCleanupForFailedRestore from settings. Cleanup will remain disabled. Details: {Helper.RedactPii(ex.Message)}", LogType.Debug);
                 return false;
             }
         }
@@ -2688,7 +2687,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 context.State = ProcessState.CleaningUp;
                 _cleanupQueue.Enqueue(context);
-                _log?.WriteLine($"[Cleanup] Queued: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Queued: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
             }
 
             if (Interlocked.CompareExchange(ref _cleanupLoopRunning, 1, 0) == 0)
@@ -2702,7 +2701,10 @@ namespace OnlineMongoMigrationProcessor
         {
             try
             {
-                while (!cancellationToken.IsCancellationRequested && _cleanupQueue.TryDequeue(out var context))
+                while (!cancellationToken.IsCancellationRequested &&
+                       !MigrationJobContext.ControlledPauseRequested &&
+                       MigrationJobContext.CurrentlyActiveJob?.IsCancelled != true &&
+                       _cleanupQueue.TryDequeue(out var context))
                 {
                     // Each cleanup run already performs internal retries.
                     // If it still fails, requeue at tail so other pending chunks can run first.
@@ -2718,7 +2720,10 @@ namespace OnlineMongoMigrationProcessor
                         _cleanupQueueIndex.TryRemove(context.Id, out _);
                     }
 
-                    if (requeue && !cancellationToken.IsCancellationRequested)
+                    if (requeue &&
+                        !cancellationToken.IsCancellationRequested &&
+                        !MigrationJobContext.ControlledPauseRequested &&
+                        MigrationJobContext.CurrentlyActiveJob?.IsCancelled != true)
                     {
                         EnqueueCleanup(context);
                     }
@@ -2729,7 +2734,10 @@ namespace OnlineMongoMigrationProcessor
                 Interlocked.Exchange(ref _cleanupLoopRunning, 0);
 
                 // Restart loop if an item was queued after TryDequeue failed but before we reset running flag.
-                if (!cancellationToken.IsCancellationRequested && !_cleanupQueue.IsEmpty &&
+                if (!cancellationToken.IsCancellationRequested &&
+                    !MigrationJobContext.ControlledPauseRequested &&
+                    MigrationJobContext.CurrentlyActiveJob?.IsCancelled != true &&
+                    !_cleanupQueue.IsEmpty &&
                     Interlocked.CompareExchange(ref _cleanupLoopRunning, 1, 0) == 0)
                 {
                     _ = Task.Run(() => RunCleanupLoopAsync(cancellationToken), cancellationToken);
@@ -2743,7 +2751,7 @@ namespace OnlineMongoMigrationProcessor
             if (mu == null)
             {
                 context.State = ProcessState.Failed;
-                _log?.WriteLine($"[Cleanup] Failed: migration unit not found for MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed: migration unit not found for MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
                 return false;
             }
 
@@ -2751,7 +2759,7 @@ namespace OnlineMongoMigrationProcessor
             if (chunkIndex < 0 || chunkIndex >= mu.MigrationChunks.Count)
             {
                 context.State = ProcessState.Failed;
-                _log?.WriteLine($"[Cleanup] Failed: invalid chunk index for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed: invalid chunk index for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
                 return false;
             }
 
@@ -2759,18 +2767,20 @@ namespace OnlineMongoMigrationProcessor
             string targetCollectionName = mu.GetEffectiveTargetCollectionName();
             int deletePageSize = GetCleanupDeletePageSize();
 
-            _log?.WriteLine($"[Cleanup] Starting: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Info);
+            _log?.WriteLine($"[Cleanup to avoid duplicates] Starting: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Info);
 
             try
             {
+                if (MigrationJobContext.ControlledPauseRequested || MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
                 var targetClient = MongoClientFactory.Create(_log, context.TargetConnectionString);
                 var targetDb = targetClient.GetDatabase(targetDbName);
                 var targetCollection = targetDb.GetCollection<BsonDocument>(targetCollectionName);
 
-                using var cleanupTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                cleanupTimeoutCts.CancelAfter(CleanupRunTimeout);
-
-                bool cleanupSucceeded = await MongoHelper.DeletePotentialDuplicateDocsForRestoreRetryAsync(
+                var cleanupResult = await MongoHelper.DeletePotentialDuplicateDocsForRestoreRetryAsync(
                     mu,
                     chunkIndex,
                     targetCollection,
@@ -2778,41 +2788,41 @@ namespace OnlineMongoMigrationProcessor
                     targetCollectionName,
                     deletePageSize,
                     _log,
-                    cleanupTimeoutCts.Token);
+                    cancellationToken);
+
+                bool cleanupSucceeded = cleanupResult.Succeeded;
 
                 if (cleanupSucceeded)
                 {
                     mu.MigrationChunks[chunkIndex].NeedsCleanup = false;
                     MigrationJobContext.SaveMigrationUnit(mu, true);
                     context.State = ProcessState.Pending;
-                    _log?.WriteLine($"[Cleanup] Completed: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Info);
+                    _log?.WriteLine($"[Cleanup to avoid duplicates] Completed: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}], totalDeleted={cleanupResult.TotalDeleted}", LogType.Info);
                     return false;
                 }
                 else
                 {
                     context.State = ProcessState.CleaningUp;
-                    _log?.WriteLine($"[Cleanup] Incomplete after internal retries. Re-queueing: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
+                    _log?.WriteLine($"[Cleanup to avoid duplicates] Incomplete after internal retries. Re-queueing: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
                     return true;
                 }
             }
             catch (OperationCanceledException)
             {
                 context.State = ProcessState.CleaningUp;
-                if (cancellationToken.IsCancellationRequested)
+                if (cancellationToken.IsCancellationRequested || MigrationJobContext.ControlledPauseRequested || MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true)
                 {
-                    _log?.WriteLine($"[Cleanup] Canceled: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] due to coordinator cancellation.", LogType.Debug);
+                    _log?.WriteLine($"[Cleanup to avoid duplicates] Canceled: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] due to pause/cancellation.", LogType.Debug);
                     return false;
                 }
 
-                _log?.WriteLine(
-                    $"[Cleanup] Timed out after {CleanupRunTimeout.TotalMinutes:F0} minute(s): {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]. Re-queueing.",
-                    LogType.Debug);
-                return true;
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Canceled: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] by cleanup token.", LogType.Debug);
+                return false;
             }
             catch (Exception ex)
             {
                 context.State = ProcessState.CleaningUp;
-                _log?.WriteLine($"[Cleanup] Exception for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Debug);
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Exception for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Debug);
                 return true;
             }
         }
@@ -2836,7 +2846,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log?.WriteLine($"[Cleanup] Failed to load MongoCopyPageSize from settings. Using default 500. Details: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed to load MongoCopyPageSize from settings. Using default 500. Details: {Helper.RedactPii(ex.Message)}", LogType.Debug);
             }
 
             return 500;

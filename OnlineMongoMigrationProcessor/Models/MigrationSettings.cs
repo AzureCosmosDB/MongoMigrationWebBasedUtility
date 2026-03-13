@@ -25,7 +25,7 @@ namespace OnlineMongoMigrationProcessor
         public PartitionerType ObjectIdPartitioner { get; set; }
         public PartitionerType NonObjectIdPartitioner { get; set; }
         public bool LargePartitionsShouldBeSplit { get; set; }
-        public bool AllowCleanupForFailedRestore { get; set; }
+        public bool AllowCleanupForFailedRestore { get; set; } = true;
         
         private string _filePath = string.Empty;
 
@@ -80,7 +80,7 @@ namespace OnlineMongoMigrationProcessor
                     ObjectIdPartitioner = loadedObject.ObjectIdPartitioner;
                     NonObjectIdPartitioner = loadedObject.NonObjectIdPartitioner;
                     LargePartitionsShouldBeSplit = hasLargePartitionsShouldBeSplit ? loadedObject.LargePartitionsShouldBeSplit : true;
-                    AllowCleanupForFailedRestore = hasAllowCleanupForFailedRestore && loadedObject.AllowCleanupForFailedRestore;
+                    AllowCleanupForFailedRestore = hasAllowCleanupForFailedRestore ? loadedObject.AllowCleanupForFailedRestore : true;
                     
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
@@ -111,7 +111,7 @@ namespace OnlineMongoMigrationProcessor
                 ObjectIdPartitioner = PartitionerType.UseSampleCommand;
                 NonObjectIdPartitioner = PartitionerType.UseSampleCommand;
                 LargePartitionsShouldBeSplit = true;
-                AllowCleanupForFailedRestore = false;
+                AllowCleanupForFailedRestore = true;
             }
         }
 

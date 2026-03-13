@@ -1893,17 +1893,28 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             long totalDeleted = 0;
             int pageNumber = 0;
 
+            // Use RawBsonDocument so cleanup can handle malformed documents with duplicate fields
+            // without triggering BsonDocument duplicate-element materialization errors.
+            var rawCollection = targetCollection.Database.GetCollection<RawBsonDocument>(
+                targetCollection.CollectionNamespace.CollectionName);
+
+            var renderedBaseFilter = RenderFilterForRawCollection(baseFilter);
+            var rawBaseFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedBaseFilter);
+
             while (true)
             {
+                ThrowIfCleanupCancellationRequested(cancellationToken);
+
                 pageNumber++;
-                log?.ShowInMonitor($"[Cleanup] Processing  {namespaceAndChunk}: page {pageNumber}");
-                List<BsonDocument> idDocs;
+                
+                List<RawBsonDocument> idDocs;
                 var fetchStopwatch = Stopwatch.StartNew();
                 try
                 {
-                    idDocs = await targetCollection.Find(baseFilter)
-                        .Sort(Builders<BsonDocument>.Sort.Ascending("_id"))
-                        .Project(Builders<BsonDocument>.Projection.Include("_id"))
+                    ThrowIfCleanupCancellationRequested(cancellationToken);
+                    idDocs = await rawCollection.Find(rawBaseFilter)
+                        .Sort(Builders<RawBsonDocument>.Sort.Ascending("_id"))
+                        .Project<RawBsonDocument>(Builders<RawBsonDocument>.Projection.Include("_id"))
                         .Limit(pageSize)
                         .ToListAsync(cancellationToken);
                     fetchStopwatch.Stop();
@@ -1922,6 +1933,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                 if (idDocs.Count == 0)
                     break;
+                var deletedCount = 0;
 
                 var ids = idDocs
                     .Where(doc => doc.Contains("_id"))
@@ -1930,21 +1942,37 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                 if (ids.Count == 0)
                 {
-                    log?.WriteLine($"Paginated cleanup stopped for {namespaceAndChunk} because selected page has no _id values.", LogType.Debug);                   
+                    log?.WriteLine($"Paginated cleanup stopped for {namespaceAndChunk} because selected page has no _id values.", LogType.Debug);
                     break;
                 }
 
-                var pageDeleteFilter = Builders<BsonDocument>.Filter.In("_id", ids);
-                DeleteResult pageDeleteResult;
                 var deleteStopwatch = Stopwatch.StartNew();
                 try
                 {
-                    pageDeleteResult = await targetCollection.DeleteManyAsync(pageDeleteFilter, cancellationToken);
+                    ThrowIfCleanupCancellationRequested(cancellationToken);
+
+                    var filterBuilder = Builders<RawBsonDocument>.Filter;
+                    var models = new List<WriteModel<RawBsonDocument>>(ids.Count);
+
+                    foreach (var id in ids)
+                    {
+                        // Build filter using builder and batch deletes for better throughput.
+                        var filter = filterBuilder.Eq("_id", id);
+                        models.Add(new DeleteOneModel<RawBsonDocument>(filter));
+                    }
+
+                    var result = await rawCollection.BulkWriteAsync(
+                        models,
+                        new BulkWriteOptions { IsOrdered = false },
+                        cancellationToken);
+
+                    deletedCount = (int)result.DeletedCount;
                     deleteStopwatch.Stop();
                 }
+
                 catch (Exception ex)
                 {
-                    deleteStopwatch.Stop();
+                    //deleteStopwatch.Stop();
                     ex.Data["CleanupPhase"] = "DeleteByIds";
                     ex.Data["CleanupPage"] = pageNumber;
                     ex.Data["CleanupIdsCount"] = ids.Count;
@@ -1955,31 +1983,44 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     throw;
                 }
 
-                totalDeleted += pageDeleteResult.DeletedCount;
+                totalDeleted += deletedCount;// pageDeleteResult.DeletedCount;
 
                 log?.ShowInMonitor(
-                    $"Cleanup {namespaceAndChunk}: page {pageNumber}, ids={ids.Count}, deleted={pageDeleteResult.DeletedCount}, totalDeleted={totalDeleted}",
-                    LogType.Info);
+                    $"[Cleanup to avoid duplicates] {namespaceAndChunk}: page {pageNumber}, ids={ids.Count}, deleted={deletedCount}, totalDeleted={totalDeleted}");
 
-                if (pageNumber == 1 || pageNumber % 10 == 0)
-                    log?.WriteLine($"Paginated cleanup progress for {namespaceAndChunk}: page={pageNumber}, idsFetched={ids.Count}, deletedThisPage={pageDeleteResult.DeletedCount}, totalDeleted={totalDeleted}, fetchMs={fetchStopwatch.ElapsedMilliseconds}, deleteMs={deleteStopwatch.ElapsedMilliseconds}.", LogType.Debug);
-
-                if (pageDeleteResult.DeletedCount == 0)
-                {
-                    log?.WriteLine($"Paginated cleanup made no progress for {namespaceAndChunk} on page {pageNumber}; stopping to avoid infinite loop.", LogType.Debug);
-                    break;
-                }
             }
 
             return totalDeleted;
         }
 
+        private static void ThrowIfCleanupCancellationRequested(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (MigrationJobContext.ControlledPauseRequested || MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true)
+            {
+                throw new OperationCanceledException("Cleanup canceled due to pause request.", cancellationToken);
+            }
+        }
+
+        private static BsonDocument RenderFilterForRawCollection(FilterDefinition<BsonDocument> filter)
+        {
+            var serializerRegistry = BsonSerializer.SerializerRegistry;
+            var documentSerializer = serializerRegistry.GetSerializer<BsonDocument>();
+#if LEGACY_MONGODB_DRIVER
+            return filter.Render(documentSerializer, serializerRegistry);
+#else
+            var renderArgs = new RenderArgs<BsonDocument>(documentSerializer, serializerRegistry);
+            return filter.Render(renderArgs);
+#endif
+        }
+
         /// <summary>
         /// Deletes documents in the target collection that fall within the chunk range (or user filter) of a
         /// migration chunk, using paginated deletes to avoid timeout on large data sets.
-        /// Returns <c>true</c> on success, <c>false</c> after all retry attempts are exhausted.
+        /// Returns cleanup success and total documents deleted for the successful attempt.
         /// </summary>
-        public static async Task<bool> DeletePotentialDuplicateDocsForRestoreRetryAsync(
+        public static async Task<(bool Succeeded, long TotalDeleted)> DeletePotentialDuplicateDocsForRestoreRetryAsync(
             MigrationUnit mu,
             int chunkIndex,
             IMongoCollection<BsonDocument> targetCollection,
@@ -2019,6 +2060,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             {
                 try
                 {
+                    ThrowIfCleanupCancellationRequested(cancellationToken);
+
                     var deletedCount = await DeleteInPagesByIdAsync(
                         targetCollection,
                         deleteFilter,
@@ -2028,7 +2071,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                         log);
 
                     log?.WriteLine($"Removed {deletedCount} document(s) from {nsLog}[{chunkIndex}] to avoid duplicates during retry.", LogType.Debug);
-                    return true;
+                    return (true, deletedCount);
                 }
                 catch (OperationCanceledException)
                 {
@@ -2061,7 +2104,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
 
             log?.WriteLine($"Duplicate cleanup failed after {maxCleanupAttempts} attempts for {nsLog}[{chunkIndex}]. Last error: {Helper.RedactPii(lastCleanupError?.ToString() ?? "Unknown error")}", LogType.Debug);
-            return false;
+            return (false, 0);
         }
 
     }
