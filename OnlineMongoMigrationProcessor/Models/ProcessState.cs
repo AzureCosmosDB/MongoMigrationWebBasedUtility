@@ -9,6 +9,7 @@ namespace OnlineMongoMigrationProcessor.Models
     {
         Pending,      // In queue, waiting to be processed
         Processing,   // Currently being processed by a worker
+        CleaningUp,   // Pre-restore duplicate cleanup running in background (no worker slot held)
         Completed,    // Successfully completed
         Failed        // Failed after retries
     }
