@@ -11,18 +11,24 @@ if __name__ == "__main__":
     parser.add_argument("--source-uri", required=True, help="Source MongoDB URI")
     parser.add_argument("--dest-uri", required=True, help="Destination MongoDB URI")
     parser.add_argument("--config-file", required=True, help="Path to the configuration JSON file")
+    parser.add_argument("--workers", type=int, default=5, help="Number of worker threads to process collections in parallel")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output for detailed flow")
     args = parser.parse_args()
 
     source_uri = args.source_uri
     dest_uri = args.dest_uri
     config_file_path = args.config_file
+    workers = args.workers
     verbose = args.verbose
+
+    if workers < 1:
+        raise ValueError("--workers must be greater than or equal to 1")
 
     print_verbose(verbose, "Starting MongoDB Schema Migration Tool")
     print_verbose(verbose, f"Source URI: {source_uri}")
     print_verbose(verbose, f"Destination URI: {dest_uri}")
     print_verbose(verbose, f"Configuration file: {config_file_path}")
+    print_verbose(verbose, f"Workers: {workers}")
 
     # Connect to the source and destination MongoDB instances
     print_verbose(verbose, "Connecting to source MongoDB instance...")
@@ -47,6 +53,6 @@ if __name__ == "__main__":
     # Perform schema migration
     print_verbose(verbose, "Starting schema migration process...")
     schema_migration = SchemaMigration(verbose)
-    schema_migration.migrate_schema(source_client, dest_client, parsed_collection_configs)
+    schema_migration.migrate_schema(source_client, dest_client, parsed_collection_configs, workers=workers)
     
     print_verbose(verbose, "Schema migration completed successfully")
