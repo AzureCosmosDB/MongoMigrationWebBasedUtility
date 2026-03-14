@@ -76,12 +76,6 @@
                         </label>
                     </div>
                     <div class="mb-3">
-                        <label for="allow-cleanup-for-failed-restore" class="form-label" title="When enabled, failed restore retries will delete previously inserted target documents for the chunk before retrying.">
-                            <input type="checkbox" id="allow-cleanup-for-failed-restore" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).AllowCleanupForFailedRestore" />
-                            Allow cleanup for failed restore retries
-                        </label>
-                    </div>
-                    <div class="mb-3">
                         <label for="pem-text" class="form-label">CA certificate file for source server (.pem)</label>
                         <InputFile OnChange="OnPemFileUpload" />
 

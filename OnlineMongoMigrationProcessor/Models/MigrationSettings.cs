@@ -25,7 +25,6 @@ namespace OnlineMongoMigrationProcessor
         public PartitionerType ObjectIdPartitioner { get; set; }
         public PartitionerType NonObjectIdPartitioner { get; set; }
         public bool LargePartitionsShouldBeSplit { get; set; }
-        public bool AllowCleanupForFailedRestore { get; set; } = true;
         
         private string _filePath = string.Empty;
 
@@ -52,12 +51,10 @@ namespace OnlineMongoMigrationProcessor
                 if (loadedObject != null)
                 {
                     bool hasLargePartitionsShouldBeSplit = false;
-                    bool hasAllowCleanupForFailedRestore = false;
                     try
                     {
                         var settingsDoc = JObject.Parse(json);
                         hasLargePartitionsShouldBeSplit = settingsDoc.TryGetValue(nameof(LargePartitionsShouldBeSplit), StringComparison.OrdinalIgnoreCase, out _);
-                        hasAllowCleanupForFailedRestore = settingsDoc.TryGetValue(nameof(AllowCleanupForFailedRestore), StringComparison.OrdinalIgnoreCase, out _);
                     }
                     catch
                     {
@@ -80,7 +77,6 @@ namespace OnlineMongoMigrationProcessor
                     ObjectIdPartitioner = loadedObject.ObjectIdPartitioner;
                     NonObjectIdPartitioner = loadedObject.NonObjectIdPartitioner;
                     LargePartitionsShouldBeSplit = hasLargePartitionsShouldBeSplit ? loadedObject.LargePartitionsShouldBeSplit : true;
-                    AllowCleanupForFailedRestore = hasAllowCleanupForFailedRestore ? loadedObject.AllowCleanupForFailedRestore : true;
                     
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
@@ -111,7 +107,6 @@ namespace OnlineMongoMigrationProcessor
                 ObjectIdPartitioner = PartitionerType.UseSampleCommand;
                 NonObjectIdPartitioner = PartitionerType.UseSampleCommand;
                 LargePartitionsShouldBeSplit = true;
-                AllowCleanupForFailedRestore = true;
             }
         }
 
