@@ -109,18 +109,11 @@ namespace OnlineMongoMigrationProcessor
         private bool _lastDiskSpaceCheckResult = true;
         private const int DiskSpaceCheckCacheSeconds = 30;
 
-        private const string ExclusiveDumpModeEnvVar = "ExclusiveDumpMode";
-        private const string ExclusiveRestoreModeEnvVar = "ExclusiveRestoreMode";
-
-        private bool IsEnvVarTrue(string variableName)
+        private MongoDumpRestoreBehavior GetMongoDumpRestoreBehavior()
         {
-            var value = Environment.GetEnvironmentVariable(variableName);
-            return bool.TryParse(value, out bool enabled) && enabled;
-        }
-
-        private (bool exclusiveDump, bool exclusiveRestore) GetExclusiveModeFlags()
-        {
-            return (IsEnvVarTrue(ExclusiveDumpModeEnvVar), IsEnvVarTrue(ExclusiveRestoreModeEnvVar));
+            var config = new MigrationSettings();
+            config.Load();
+            return config.MongoDumpRestoreBehavior;
         }
 
         private static void ClearQueue<T>(ConcurrentQueue<T> queue)
@@ -396,23 +389,16 @@ namespace OnlineMongoMigrationProcessor
                         maxRestoreWorkers = 1;
                     }
 
-                    var (exclusiveDump, exclusiveRestore) = GetExclusiveModeFlags();
-                    if (exclusiveDump && exclusiveRestore)
-                    {
-                        maxDumpWorkers = 0;
-                        maxRestoreWorkers = 0;
-                        log.WriteLine($"Both {ExclusiveDumpModeEnvVar} and {ExclusiveRestoreModeEnvVar} are true. Dump is paused", LogType.Warning);
-                        log.WriteLine($"Both {ExclusiveDumpModeEnvVar} and {ExclusiveRestoreModeEnvVar} are true. Restore is paused", LogType.Warning);
-                    }
-                    else if (exclusiveDump)
+                    var behavior = GetMongoDumpRestoreBehavior();
+                    if (behavior == MongoDumpRestoreBehavior.DumpOnly)
                     {
                         maxRestoreWorkers = 0;
-                        log.WriteLine($"{ExclusiveDumpModeEnvVar}=true. Running in exclusive dump mode", LogType.Warning);
+                        log.WriteLine($"MongoDumpRestoreBehavior=DumpOnly. Running in dump-only mode", LogType.Warning);
                     }
-                    else if (exclusiveRestore)
+                    else if (behavior == MongoDumpRestoreBehavior.RestoreOnly)
                     {
                         maxDumpWorkers = 0;
-                        log.WriteLine($"{ExclusiveRestoreModeEnvVar}=true. Running in exclusive restore mode", LogType.Warning);
+                        log.WriteLine($"MongoDumpRestoreBehavior=RestoreOnly. Running in restore-only mode", LogType.Warning);
                     }
 
                     // Get or create shared worker pools
@@ -478,10 +464,9 @@ namespace OnlineMongoMigrationProcessor
                     return;
                 }
 
-                var (_, exclusiveRestore) = GetExclusiveModeFlags();
-                if (exclusiveRestore)
+                if (GetMongoDumpRestoreBehavior() == MongoDumpRestoreBehavior.RestoreOnly)
                 {
-                    _log?.WriteLine($"{ExclusiveRestoreModeEnvVar}=true. Dump workers forced to 0", LogType.Warning);
+                    _log?.WriteLine("MongoDumpRestoreBehavior=RestoreOnly. Dump workers forced to 0", LogType.Warning);
                     newCount = 0;
                 }
 
@@ -518,10 +503,9 @@ namespace OnlineMongoMigrationProcessor
                     return;
                 }
 
-                var (exclusiveDump, _) = GetExclusiveModeFlags();
-                if (exclusiveDump)
+                if (GetMongoDumpRestoreBehavior() == MongoDumpRestoreBehavior.DumpOnly)
                 {
-                    _log?.WriteLine($"{ExclusiveDumpModeEnvVar}=true. Restore workers forced to 0", LogType.Warning);
+                    _log?.WriteLine("MongoDumpRestoreBehavior=DumpOnly. Restore workers forced to 0", LogType.Warning);
                     newCount = 0;
                 }
 

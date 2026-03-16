@@ -76,6 +76,16 @@
                         </label>
                     </div>
                     <div class="mb-3">
+                        <label for="dump-restore-behavior" class="form-label" title="Controls whether to run both dump and restore, dump only, or restore only.">
+                            Mongo Dump Restore behavior
+                        </label>
+                        <select id="dump-restore-behavior" value="@SelectedMongoDumpRestoreBehavior" class="form-select" @onchange="OnMongoDumpRestoreBehaviorChanged">
+                            <option value="DumpAndRestore">Dump and Restore</option>
+                            <option value="DumpOnly">Dump Only</option>
+                            <option value="RestoreOnly">Restore Only</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
                         <label for="pem-text" class="form-label">CA certificate file for source server (.pem)</label>
                         <InputFile OnChange="OnPemFileUpload" />
 
@@ -150,6 +160,7 @@
 
     private string SelectedObjectIdPartitioner = "UseTimeBoundaries"; // Default partitioner
     private string SelectedNonObjectIdPartitioner = "UseSampleCommand"; // Default partitioner
+    private string SelectedMongoDumpRestoreBehavior = "DumpAndRestore"; // Default behavior
 
     private void SwitchToOfflineDataMovementTab()
     {
@@ -189,6 +200,17 @@
         }
     }
 
+    private void OnMongoDumpRestoreBehaviorChanged(ChangeEventArgs e)
+    {
+        var val = e?.Value?.ToString() ?? "DumpAndRestore";
+        SelectedMongoDumpRestoreBehavior = val;
+
+        if (Enum.TryParse<OnlineMongoMigrationProcessor.MongoDumpRestoreBehavior>(val, out var behavior))
+        {
+            (_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).MongoDumpRestoreBehavior = behavior;
+        }
+    }
+
     private void ClearPem()
     {
         (_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).CACertContentsForSourceServer = string.Empty;
@@ -211,6 +233,7 @@
         // Initialize the selected partitioner from the configuration
         SelectedObjectIdPartitioner = _configurationBackup.ObjectIdPartitioner.ToString();
         SelectedNonObjectIdPartitioner = _configurationBackup.NonObjectIdPartitioner.ToString();
+        SelectedMongoDumpRestoreBehavior = _configurationBackup.MongoDumpRestoreBehavior.ToString();
     }
 
 
