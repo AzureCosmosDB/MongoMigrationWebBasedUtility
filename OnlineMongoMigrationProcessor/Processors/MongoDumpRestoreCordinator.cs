@@ -440,6 +440,9 @@ namespace OnlineMongoMigrationProcessor
 
                     _coordinatorInitialized = true;
 
+                    // Reset any previously skipped collections to allow retry on job start/resume
+                    ResetSkippedCollectionFlags();
+
                     log.WriteLine($"MongoDumpRestore Cordinator initialized", LogType.Debug);
                 }
             }
@@ -447,6 +450,58 @@ namespace OnlineMongoMigrationProcessor
             {
                 log?.WriteLine($"Error initializing MongoDumpRestoreCordinator: {ex}", LogType.Error);
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Resets the SkippedDueToMaxRetries flag on all collections to allow retry on job restart.
+        /// Call this when starting or resuming a job to enable retrying previously failed collections.
+        /// </summary>
+        public void ResetSkippedCollectionFlags()
+        {
+            MigrationJobContext.AddVerboseLog("MongoDumpRestoreCordinator.ResetSkippedCollectionFlags: resetting skip flags on all collections");
+            try
+            {
+                if (MigrationJobContext.CurrentlyActiveJob == null || MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics == null)
+                {
+                    return;
+                }
+
+                _log?.WriteLine("Resetting skip flags on all collections", LogType.Info);
+
+                int resetCount = 0;
+                foreach (var mub in MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics)
+                {
+                    if (mub.SkippedDueToMaxRetries)
+                    {
+                        mub.SkippedDueToMaxRetries = false;
+                        mub.FailedOperation = null;
+                        resetCount++;
+                        _log?.WriteLine($"Reset skip flag for {mub.DatabaseName}.{mub.CollectionName}", LogType.Info);
+                        
+                        // Get full migration unit and save immediately
+                        var mu = MigrationJobContext.GetMigrationUnit(mub.Id);
+                        if (mu != null)
+                        {
+                            foreach (var chunk in mu.MigrationChunks)
+                            {
+                                chunk.Attempt = 0;
+                            }
+                            mu.SkippedDueToMaxRetries = false;
+                            mu.FailedOperation = null;                            
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                        }
+                    }
+                }
+
+                if (resetCount > 0)
+                {
+                    _log?.WriteLine($"Reset SkippedDueToMaxRetries flag on {resetCount} collection(s)", LogType.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"Error resetting skipped collection flags: {Helper.RedactPii(ex.ToString())}", LogType.Error);
             }
         }
 
@@ -802,6 +857,13 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
+                // Skip if collection was marked as failed due to max retries
+                if (mu.SkippedDueToMaxRetries)
+                {
+                    _log?.WriteLine($"Skipping download preparation for {mu.DatabaseName}.{mu.CollectionName} - marked as failed due to max retries", LogType.Debug);
+                    return;
+                }
+
                 int addedCount = 0;
                 for (int i = 0; i < mu.MigrationChunks.Count; i++)
                 {
@@ -927,6 +989,13 @@ namespace OnlineMongoMigrationProcessor
             //gets called very often hence removing detailed logging
             try
             {
+                // Skip if collection was marked as failed due to max retries
+                if (mu.SkippedDueToMaxRetries)
+                {
+                    _log?.WriteLine($"Skipping restore preparation for {mu.DatabaseName}.{mu.CollectionName} - marked as failed due to max retries", LogType.Debug);
+                    return;
+                }
+
                 int addedCount = 0;
                 string folder = PrepareDumpFolder(mu.DatabaseName, mu.CollectionName);
                 for (int i = 0; i < mu.MigrationChunks.Count; i++)
@@ -1047,6 +1116,15 @@ namespace OnlineMongoMigrationProcessor
                         return;
                     }
 
+                    // Check if the collection is marked as skipped due to max retries
+                    var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                    if (mu != null && mu.SkippedDueToMaxRetries)
+                    {
+                        _log?.WriteLine($"[ProcessPendingDumps] Skipping chunk {context.ChunkIndex} for {mu.DatabaseName}.{mu.CollectionName} - collection marked as failed due to max retries", LogType.Debug);
+                        _downloadManifest.TryRemove(context.Id, out _);
+                        continue;
+                    }
+
                     // Try to acquire a worker slot
                     if (_dumpPool.TryAcquire())
                     {
@@ -1056,7 +1134,6 @@ namespace OnlineMongoMigrationProcessor
                         context.StartedAt = DateTime.UtcNow;
                         spawned++;
 
-                        var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                         _log?.WriteLine($"[ProcessPendingDumps] Spawning dump worker for {mu?.DatabaseName}.{mu?.CollectionName}[{context.ChunkIndex}] (worker {spawned}/{availableWorkers})", LogType.Debug);                        // Spawn worker task
                         var cancellationToken = _processCts?.Token ?? CancellationToken.None;
 
@@ -1229,6 +1306,16 @@ namespace OnlineMongoMigrationProcessor
                         _log?.WriteLine("[ProcessPendingRestores] Controlled pause detected - skipping restore processing", LogType.Debug);
                         return;
                     }
+
+                    // Check if the collection is marked as skipped due to max retries
+                    var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                    if (mu != null && mu.SkippedDueToMaxRetries)
+                    {
+                        _log?.WriteLine($"[ProcessPendingRestores] Skipping chunk {context.ChunkIndex} for {mu.DatabaseName}.{mu.CollectionName} - collection marked as failed due to max retries", LogType.Debug);
+                        _uploadManifest.TryRemove(context.Id, out _);
+                        continue;
+                    }
+
                     // Try to acquire a worker slot
                     if (_restorePool.TryAcquire())
                     {
@@ -1238,7 +1325,6 @@ namespace OnlineMongoMigrationProcessor
                         context.StartedAt = DateTime.UtcNow;
                         spawned++;
 
-                        var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                         _log?.WriteLine($"[ProcessPendingRestores] Spawning restore worker for {mu?.DatabaseName}.{mu?.CollectionName}[{context.ChunkIndex}] (worker {spawned}/{availableWorkers})", LogType.Debug);                        // Spawn worker task
                         var cancellationToken = _processCts?.Token ?? CancellationToken.None;
                         _ = Task.Run(async () => await ProcessChunkForRestore(context), cancellationToken);
@@ -1981,6 +2067,17 @@ namespace OnlineMongoMigrationProcessor
             {
                 _log?.WriteLine($"Coordinator: Starting restore for {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[{chunkIndex}]", LogType.Debug);
 
+                // ===== TEMPORARY TEST CODE - REMOVE THIS BLOCK AFTER TESTING =====
+                // Simulate restore failure for chunk index 1 (2nd chunk) to test skip logic
+                //if (chunkIndex == 1 && sourceColName== "smalldocs_22M"  && context.RetryCount<2)
+                //{
+                //    _log?.WriteLine($"[TEST] Simulating restore failure for chunk 1: {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[1]", LogType.Warning);
+                //    HandleRestoreFailure(context, TaskResult.Retry);
+                //    _restorePool?.Release();
+                //    return;
+                //}
+                // ===== END TEMPORARY TEST CODE =====
+
                 // Check cancellation
                 if (_processCts?.Token.IsCancellationRequested == true)
                 {
@@ -2451,15 +2548,18 @@ namespace OnlineMongoMigrationProcessor
                     var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                     if (mu != null)
                     {
-                        _log.WriteLine($"Max retries for download : {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]", LogType.Error);
+                        // Mark collection as skipped due to max retries instead of pausing
+                        // Do NOT mark as complete - the collection actually failed
+                        mu.SkippedDueToMaxRetries = true;
+                        mu.FailedOperation = "Dump";
+                        
+                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                        _log.WriteLine($"Max retries reached for dump: {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]. Collection marked as skipped. User can restart the job to retry.", LogType.Error);
                     }
                     else
                     {
                         _log.WriteLine($"Max retries for download : MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Error);
                     }
-
-                    // Trigger controlled pause for manual intervention
-                    MigrationJobContext.RequestControlledPause("Max retries for download");
                 }
                 else
                 {
@@ -2531,15 +2631,18 @@ namespace OnlineMongoMigrationProcessor
                     var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                     if (mu != null)
                     {
-                        _log.WriteLine($"Max retries for restore complete: {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]", LogType.Error);
+                        // Mark collection as skipped due to max retries instead of pausing
+                        // Do NOT mark as complete - the collection actually failed
+                        mu.SkippedDueToMaxRetries = true;
+                        mu.FailedOperation = "Restore";
+                        
+                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                        _log.WriteLine($"Max retries reached for restore: {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]. Collection marked as skipped. User can restart the job to retry.", LogType.Error);
                     }
                     else
                     {
                         _log.WriteLine($"Max retries for restore complete: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Error);
                     }
-
-                    // Trigger controlled pause
-                    MigrationJobContext.RequestControlledPause("Max retries for restore");
                 }
                 else
                 {
@@ -2799,6 +2902,7 @@ namespace OnlineMongoMigrationProcessor
                 if (cleanupSucceeded)
                 {
                     mu.MigrationChunks[chunkIndex].NeedsCleanup = false;
+                    mu.MigrationChunks[chunkIndex].Attempt = 0; // Reset attempt so that any future failure will trigger retries up to the max threshold again
                     MigrationJobContext.SaveMigrationUnit(mu, true);
                     context.State = ProcessState.Pending;
                     _log?.WriteLine($"[Cleanup to avoid duplicates] Completed: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}], totalDeleted={cleanupResult.TotalDeleted}", LogType.Info);

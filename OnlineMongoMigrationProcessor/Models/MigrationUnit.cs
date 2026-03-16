@@ -49,6 +49,10 @@ namespace OnlineMongoMigrationProcessor
         public bool ResetChangeStream { get; set; }
         public DataType? DataTypeFor_Id { get; set; } = null;
 
+        // Skip tracking for max retries exceeded
+        public bool SkippedDueToMaxRetries { get; set; } = false;
+        public string? FailedOperation { get; set; } = null; // "Dump" or "Restore"
+
         public bool Remove()
         {
 
@@ -222,6 +226,8 @@ namespace OnlineMongoMigrationProcessor
             mub.SourceStatus = this.SourceStatus;
             mub.ResetChangeStream = this.ResetChangeStream;
             mub.DataTypeFor_Id = this.DataTypeFor_Id;
+            mub.SkippedDueToMaxRetries = this.SkippedDueToMaxRetries;
+            mub.FailedOperation = this.FailedOperation;
             return mub;
         }
 
