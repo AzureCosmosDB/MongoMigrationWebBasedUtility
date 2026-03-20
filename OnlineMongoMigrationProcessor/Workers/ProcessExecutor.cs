@@ -19,6 +19,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 {
     internal class ProcessExecutor
     {
+        private const int MaxDuplicateKeyViolationsPerChunk = 10;
+
         private Log _log;
         private Process? _process = null;
         private readonly object _processLock = new object();
@@ -83,6 +85,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 StringBuilder outputBuffer = new StringBuilder();
                 StringBuilder errorBuffer = new StringBuilder();
+                int duplicateKeyViolationCount = 0;
+                int duplicateThresholdTriggered = 0;
 
                 _process.OutputDataReceived += (sender, args) =>
                 {
@@ -98,7 +102,44 @@ namespace OnlineMongoMigrationProcessor.Workers
                     if (!string.IsNullOrEmpty(args.Data))
                     {
                         errorBuffer.AppendLine(args.Data);
-                        ProcessConsoleOutput(args.Data, processType, mu, chunk, chunkIndex, targetCount);
+                        int duplicateCount;
+                        bool duplicateThresholdReached = ProcessConsoleOutput(
+                            args.Data,
+                            processType,
+                            mu,
+                            chunk,
+                            chunkIndex,
+                            targetCount,
+                            ref duplicateKeyViolationCount,
+                            out duplicateCount);
+
+                        if (processType == "MongoRestore" &&
+                            duplicateThresholdReached &&
+                            Interlocked.CompareExchange(ref duplicateThresholdTriggered, 1, 0) == 0)
+                        {
+                            chunk.NeedsCleanup = true;
+                            chunk.Attempt++;
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+
+                            _log.WriteLine(
+                                $"MongoRestore duplicate-key threshold reached ({MaxDuplicateKeyViolationsPerChunk}) for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] after {duplicateCount} violations. Marked chunk for cleanup and terminating restore.",
+                                LogType.Error);
+
+                            try
+                            {
+                                lock (_processLock)
+                                {
+                                    if (_process != null && !_process.HasExited)
+                                    {
+                                        _process.Kill(entireProcessTree: true);
+                                    }
+                                }
+                            }
+                            catch (Exception killEx)
+                            {
+                                _log.WriteLine($"Error terminating MongoRestore process for duplicate-key threshold on {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]: {Helper.RedactPii(killEx.ToString())}", LogType.Debug);
+                            }
+                        }
 
                         string lowerData = args.Data.ToLower();
                         if (lowerData.Contains("failed to connect") || lowerData.Contains("error parsing") || lowerData.Contains("failed:"))
@@ -187,7 +228,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 onProcessEnded?.Invoke(processId);
 
-                bool success = _process.ExitCode == 0;
+                bool success = _process.ExitCode == 0 && duplicateThresholdTriggered == 0;
                 if (!success)
                     _log.WriteLine($"{processType} process {processId} exited with code {_process.ExitCode}", LogType.Error);
 
@@ -232,8 +273,17 @@ namespace OnlineMongoMigrationProcessor.Workers
         }
 
 
-        private void ProcessConsoleOutput(string data, string processType, MigrationUnit mu, MigrationChunk chunk,int chunkIndex, long targetCount)
+        private bool ProcessConsoleOutput(
+            string data,
+            string processType,
+            MigrationUnit mu,
+            MigrationChunk chunk,
+            int chunkIndex,
+            long targetCount,
+            ref int duplicateKeyViolationCount,
+            out int duplicateCount)
         {
+            duplicateCount = 0;
 
             if (processType == "MongoDump")
             {
@@ -271,6 +321,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                         MigrationJobContext.SaveMigrationUnit(mu, true);
                     }                
                 }
+
+                return false;
             }
             else
             {
@@ -299,16 +351,31 @@ namespace OnlineMongoMigrationProcessor.Workers
                 }
                 else
                 {
-                    if (!data.Contains("continuing through error: Duplicate key violation on the requested collection"))
+                    if (!IsDuplicateKeyViolationLine(data))
                     {
                         MigrationJobContext.AddVerboseLog($"{processType} Response for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}]: {Helper.RedactPii(data)}");
                     }
                     else
                     {
+                        duplicateCount = Interlocked.Increment(ref duplicateKeyViolationCount);
                         MigrationJobContext.AddVerboseLog($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : Duplicate key violation encountered, skipping duplicate documents.: {Helper.RedactPii(data)}");
+
+                        if (duplicateCount >= MaxDuplicateKeyViolationsPerChunk)
+                        {
+                            return true;
+                        }
                     }
                 }
+
+                return false;
             }
+        }
+
+        private static bool IsDuplicateKeyViolationLine(string data)
+        {
+            return data.Contains("continuing through error: Duplicate key violation on the requested collection", StringComparison.OrdinalIgnoreCase)
+                || data.Contains("Duplicate key violation on the requested collection", StringComparison.OrdinalIgnoreCase)
+                || data.Contains("Duplicate key violation", StringComparison.OrdinalIgnoreCase);
         }
 
 

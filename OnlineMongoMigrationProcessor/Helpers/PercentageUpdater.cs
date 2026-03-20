@@ -254,7 +254,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             }
 
             string operationType = isRestore ? "Restore" : "Dump";
-            MigrationJobContext.AddVerboseLog($"{mu.DatabaseName}.{mu.CollectionName} {operationType} Total: {totalPercent:F2}%\n{strLog}");
+            // Uncomment the line below to enable detailed logging of percentage calculations for each chunk
+            //MigrationJobContext.AddVerboseLog($"{mu.DatabaseName}.{mu.CollectionName} {operationType} Total: {totalPercent:F2}%\n{strLog}");
             return Math.Min(100, totalPercent);
         }
 

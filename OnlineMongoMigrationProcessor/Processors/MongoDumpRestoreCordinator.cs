@@ -90,6 +90,10 @@ namespace OnlineMongoMigrationProcessor
         private readonly ConcurrentDictionary<string, byte> _uploadBacklogIndex = new();
         private readonly ConcurrentQueue<ProcessorContext> _pendingMigrationUnits = new();
         private readonly ConcurrentDictionary<string, byte> _pendingMigrationUnitIndex = new();
+        // Serial cleanup queue - restore failures enqueue here; one loop processes cleanup in order.
+        private readonly ConcurrentQueue<DumpRestoreProcessContext> _cleanupQueue = new();
+        private readonly ConcurrentDictionary<string, byte> _cleanupQueueIndex = new();
+        private int _cleanupLoopRunning = 0; // 0 = idle, 1 = running
         private System.Timers.Timer? _processTimer;
         private readonly int _timerIntervalMs = 2000; // Check every 2 seconds
         private bool _coordinatorInitialized = false;
@@ -105,18 +109,11 @@ namespace OnlineMongoMigrationProcessor
         private bool _lastDiskSpaceCheckResult = true;
         private const int DiskSpaceCheckCacheSeconds = 30;
 
-        private const string ExclusiveDumpModeEnvVar = "ExclusiveDumpMode";
-        private const string ExclusiveRestoreModeEnvVar = "ExclusiveRestoreMode";
-
-        private bool IsEnvVarTrue(string variableName)
+        private MongoDumpRestoreBehavior GetMongoDumpRestoreBehavior()
         {
-            var value = Environment.GetEnvironmentVariable(variableName);
-            return bool.TryParse(value, out bool enabled) && enabled;
-        }
-
-        private (bool exclusiveDump, bool exclusiveRestore) GetExclusiveModeFlags()
-        {
-            return (IsEnvVarTrue(ExclusiveDumpModeEnvVar), IsEnvVarTrue(ExclusiveRestoreModeEnvVar));
+            var config = new MigrationSettings();
+            config.Load();
+            return config.MongoDumpRestoreBehavior;
         }
 
         private static void ClearQueue<T>(ConcurrentQueue<T> queue)
@@ -189,6 +186,8 @@ namespace OnlineMongoMigrationProcessor
 
         private void RefillUploadWorkingSet()
         {
+            var needsCleanup = new List<DumpRestoreProcessContext>();
+
             lock (_workingSetLock)
             {
                 while (_uploadManifest.Count < MaxManifestWorkingSetSize && _uploadBacklog.TryDequeue(out var context))
@@ -198,8 +197,17 @@ namespace OnlineMongoMigrationProcessor
                     if (_uploadManifest.ContainsKey(context.Id))
                         continue;
 
-                    _uploadManifest.TryAdd(context.Id, context);
+                    if (_uploadManifest.TryAdd(context.Id, context) && GetChunkNeedsCleanup(context))
+                    {
+                        needsCleanup.Add(context);
+                    }
                 }
+            }
+
+            // Start cleanup processing for restored backlog entries that already require cleanup.
+            foreach (var context in needsCleanup)
+            {
+                EnqueueCleanup(context);
             }
         }
 
@@ -381,23 +389,16 @@ namespace OnlineMongoMigrationProcessor
                         maxRestoreWorkers = 1;
                     }
 
-                    var (exclusiveDump, exclusiveRestore) = GetExclusiveModeFlags();
-                    if (exclusiveDump && exclusiveRestore)
-                    {
-                        maxDumpWorkers = 0;
-                        maxRestoreWorkers = 0;
-                        log.WriteLine($"Both {ExclusiveDumpModeEnvVar} and {ExclusiveRestoreModeEnvVar} are true. Dump is paused", LogType.Warning);
-                        log.WriteLine($"Both {ExclusiveDumpModeEnvVar} and {ExclusiveRestoreModeEnvVar} are true. Restore is paused", LogType.Warning);
-                    }
-                    else if (exclusiveDump)
+                    var behavior = GetMongoDumpRestoreBehavior();
+                    if (behavior == MongoDumpRestoreBehavior.DumpOnly)
                     {
                         maxRestoreWorkers = 0;
-                        log.WriteLine($"{ExclusiveDumpModeEnvVar}=true. Running in exclusive dump mode", LogType.Warning);
+                        log.WriteLine($"MongoDumpRestoreBehavior=DumpOnly. Running in dump-only mode", LogType.Warning);
                     }
-                    else if (exclusiveRestore)
+                    else if (behavior == MongoDumpRestoreBehavior.RestoreOnly)
                     {
                         maxDumpWorkers = 0;
-                        log.WriteLine($"{ExclusiveRestoreModeEnvVar}=true. Running in exclusive restore mode", LogType.Warning);
+                        log.WriteLine($"MongoDumpRestoreBehavior=RestoreOnly. Running in restore-only mode", LogType.Warning);
                     }
 
                     // Get or create shared worker pools
@@ -439,6 +440,9 @@ namespace OnlineMongoMigrationProcessor
 
                     _coordinatorInitialized = true;
 
+                    // Reset any previously skipped collections to allow retry on job start/resume
+                    ResetSkippedCollectionFlags();
+
                     log.WriteLine($"MongoDumpRestore Cordinator initialized", LogType.Debug);
                 }
             }
@@ -446,6 +450,58 @@ namespace OnlineMongoMigrationProcessor
             {
                 log?.WriteLine($"Error initializing MongoDumpRestoreCordinator: {ex}", LogType.Error);
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Resets the SkippedDueToMaxRetries flag on all collections to allow retry on job restart.
+        /// Call this when starting or resuming a job to enable retrying previously failed collections.
+        /// </summary>
+        public void ResetSkippedCollectionFlags()
+        {
+            MigrationJobContext.AddVerboseLog("MongoDumpRestoreCordinator.ResetSkippedCollectionFlags: resetting skip flags on all collections");
+            try
+            {
+                if (MigrationJobContext.CurrentlyActiveJob == null || MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics == null)
+                {
+                    return;
+                }
+
+                _log?.WriteLine("Resetting skip flags on all collections", LogType.Info);
+
+                int resetCount = 0;
+                foreach (var mub in MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics)
+                {
+                    if (mub.SkippedDueToMaxRetries)
+                    {
+                        mub.SkippedDueToMaxRetries = false;
+                        mub.FailedOperation = null;
+                        resetCount++;
+                        _log?.WriteLine($"Reset skip flag for {mub.DatabaseName}.{mub.CollectionName}", LogType.Info);
+                        
+                        // Get full migration unit and save immediately
+                        var mu = MigrationJobContext.GetMigrationUnit(mub.Id);
+                        if (mu != null)
+                        {
+                            foreach (var chunk in mu.MigrationChunks)
+                            {
+                                chunk.Attempt = 0;
+                            }
+                            mu.SkippedDueToMaxRetries = false;
+                            mu.FailedOperation = null;                            
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                        }
+                    }
+                }
+
+                if (resetCount > 0)
+                {
+                    _log?.WriteLine($"Reset SkippedDueToMaxRetries flag on {resetCount} collection(s)", LogType.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"Error resetting skipped collection flags: {Helper.RedactPii(ex.ToString())}", LogType.Error);
             }
         }
 
@@ -463,10 +519,9 @@ namespace OnlineMongoMigrationProcessor
                     return;
                 }
 
-                var (_, exclusiveRestore) = GetExclusiveModeFlags();
-                if (exclusiveRestore)
+                if (GetMongoDumpRestoreBehavior() == MongoDumpRestoreBehavior.RestoreOnly)
                 {
-                    _log?.WriteLine($"{ExclusiveRestoreModeEnvVar}=true. Dump workers forced to 0", LogType.Warning);
+                    _log?.WriteLine("MongoDumpRestoreBehavior=RestoreOnly. Dump workers forced to 0", LogType.Warning);
                     newCount = 0;
                 }
 
@@ -503,10 +558,9 @@ namespace OnlineMongoMigrationProcessor
                     return;
                 }
 
-                var (exclusiveDump, _) = GetExclusiveModeFlags();
-                if (exclusiveDump)
+                if (GetMongoDumpRestoreBehavior() == MongoDumpRestoreBehavior.DumpOnly)
                 {
-                    _log?.WriteLine($"{ExclusiveDumpModeEnvVar}=true. Restore workers forced to 0", LogType.Warning);
+                    _log?.WriteLine("MongoDumpRestoreBehavior=DumpOnly. Restore workers forced to 0", LogType.Warning);
                     newCount = 0;
                 }
 
@@ -653,6 +707,9 @@ namespace OnlineMongoMigrationProcessor
                     ClearQueue(_downloadBacklog);
                     ClearQueue(_uploadBacklog);
                     ClearQueue(_pendingMigrationUnits);
+                    ClearQueue(_cleanupQueue);
+                    _cleanupQueueIndex.Clear();
+                    _cleanupLoopRunning = 0;
 
                     // Dispose worker pools
                     _dumpPool?.Dispose();
@@ -719,6 +776,7 @@ namespace OnlineMongoMigrationProcessor
                 { 
                     TryActivatePendingMigrationUnits();
                     RefillManifestWorkingSets();
+                    QueuePendingCleanupContexts();
                     ProcessPendingDumps();
                     ProcessPendingRestores();
                 }
@@ -799,6 +857,13 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
+                // Skip if collection was marked as failed due to max retries
+                if (mu.SkippedDueToMaxRetries)
+                {
+                    _log?.WriteLine($"Skipping download preparation for {mu.DatabaseName}.{mu.CollectionName} - marked as failed due to max retries", LogType.Debug);
+                    return;
+                }
+
                 int addedCount = 0;
                 for (int i = 0; i < mu.MigrationChunks.Count; i++)
                 {
@@ -891,15 +956,12 @@ namespace OnlineMongoMigrationProcessor
         private string GetDumpFilePath(MigrationUnit mu, int chunkIndex, bool overwrite = false)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.GetDumpFilePath: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}, overwrite={overwrite}");
-            string folder = PrepareDumpFolder(mu.DatabaseName, mu.CollectionName);
             return GetDumpFilePath(mu.DatabaseName, mu.CollectionName, chunkIndex, overwrite);
         }
 
         private string GetDumpFilePath(string databaseName, string collectionName, int chunkIndex, bool overwrite = false)
         {
-            string folder = PrepareDumpFolder(databaseName, collectionName);
-            // Get dump folder and file path                        
-            string dumpFilePath = Path.Combine(folder, $"{chunkIndex}.bson");
+            string dumpFilePath = Path.Combine(PrepareDumpFolder(databaseName, collectionName), $"{chunkIndex}.bson");
             if (overwrite)
             {
                 //Ensure previous dump file(if any) is removed before fresh dump
@@ -924,6 +986,13 @@ namespace OnlineMongoMigrationProcessor
             //gets called very often hence removing detailed logging
             try
             {
+                // Skip if collection was marked as failed due to max retries
+                if (mu.SkippedDueToMaxRetries)
+                {
+                    _log?.WriteLine($"Skipping restore preparation for {mu.DatabaseName}.{mu.CollectionName} - marked as failed due to max retries", LogType.Debug);
+                    return;
+                }
+
                 int addedCount = 0;
                 string folder = PrepareDumpFolder(mu.DatabaseName, mu.CollectionName);
                 for (int i = 0; i < mu.MigrationChunks.Count; i++)
@@ -961,8 +1030,15 @@ namespace OnlineMongoMigrationProcessor
 
                         if (TryAddUploadContext(context))
                         {
-                            _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName}[{i}] accepted for restore processing", LogType.Debug);
                             addedCount++;
+                            if (GetChunkNeedsCleanup(context))
+                            {
+                                EnqueueCleanup(context);
+                            }
+                            else
+                            {
+                                _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName}[{i}] accepted for restore processing", LogType.Debug);
+                            }
                         }
                     }
                 }
@@ -1037,6 +1113,15 @@ namespace OnlineMongoMigrationProcessor
                         return;
                     }
 
+                    // Check if the collection is marked as skipped due to max retries
+                    var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                    if (mu != null && mu.SkippedDueToMaxRetries)
+                    {
+                        _log?.WriteLine($"[ProcessPendingDumps] Skipping chunk {context.ChunkIndex} for {mu.DatabaseName}.{mu.CollectionName} - collection marked as failed due to max retries", LogType.Debug);
+                        _downloadManifest.TryRemove(context.Id, out _);
+                        continue;
+                    }
+
                     // Try to acquire a worker slot
                     if (_dumpPool.TryAcquire())
                     {
@@ -1046,7 +1131,6 @@ namespace OnlineMongoMigrationProcessor
                         context.StartedAt = DateTime.UtcNow;
                         spawned++;
 
-                        var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                         _log?.WriteLine($"[ProcessPendingDumps] Spawning dump worker for {mu?.DatabaseName}.{mu?.CollectionName}[{context.ChunkIndex}] (worker {spawned}/{availableWorkers})", LogType.Debug);                        // Spawn worker task
                         var cancellationToken = _processCts?.Token ?? CancellationToken.None;
 
@@ -1143,26 +1227,75 @@ namespace OnlineMongoMigrationProcessor
                 // Get available worker capacity
                 int availableWorkers = _restorePool.CurrentAvailable;
                 int totalWorkers = _restorePool.MaxWorkers;
-                int busyWorkers = totalWorkers - availableWorkers;
-
-
                 if (availableWorkers <= 0)
                 {
                     return; // No workers available
                 }
 
-                // Find pending restore contexts (not already processing)
-                var pendingContexts = _uploadManifest.Values
-                    .Where(ctx => ctx.State == ProcessState.Pending)
+                // Only dispatch contexts whose pre-restore cleanup has completed.
+                var readyToDispatch = _uploadManifest.Values
+                    .Where(ctx => ctx.State == ProcessState.Pending && !GetChunkNeedsCleanup(ctx))
                     .OrderBy(ctx => ctx.QueuedAt)
-                    .Take(availableWorkers)
                     .ToList();
 
-                if (pendingContexts.Count > 0)
-                    MigrationJobContext.AddVerboseLog($"[ProcessPendingRestores] Found {pendingContexts.Count} pending contexts to process (capacity: {availableWorkers})");
+                if (readyToDispatch.Count == 0)
+                {
+                    return;
+                }
+
+                // Split into fresh (Attempt=0) and retry-ready (Attempt>0, cleanup done).
+                var fresh = readyToDispatch.Where(ctx => !IsRetryContext(ctx)).ToList();
+                var retryReady = readyToDispatch.Where(ctx => IsRetryContext(ctx)).ToList();
+
+                int retrySlotCap;
+                if (fresh.Count > 0)
+                {
+                    int processingRetries = _uploadManifest.Values
+                        .Count(ctx => ctx.State == ProcessState.Processing && IsRetryContext(ctx));
+                    int maxRetryWorkers = Math.Max(1, (int)Math.Floor(totalWorkers * 0.25));
+                    retrySlotCap = Math.Max(0, maxRetryWorkers - processingRetries);
+                }
+                else
+                {
+                    // If all remaining chunks are retries, allow full worker usage.
+                    retrySlotCap = availableWorkers;
+                }
+
+                // Reserve retry slots first, then fill the rest with fresh chunks.
+                // This guarantees mixed processing when both sets are available.
+                int retryTarget = Math.Min(retryReady.Count, Math.Min(retrySlotCap, availableWorkers));
+                int freshTarget = Math.Min(fresh.Count, Math.Max(0, availableWorkers - retryTarget));
+
+                var toDispatch = new List<DumpRestoreProcessContext>(availableWorkers);
+                for (int i = 0; i < freshTarget; i++)
+                {
+                    toDispatch.Add(fresh[i]);
+                }
+
+                for (int i = 0; i < retryTarget; i++)
+                {
+                    toDispatch.Add(retryReady[i]);
+                }
+
+                // Backfill any remaining capacity after initial target allocation.
+                // Prefer remaining fresh first, then retries.
+                for (int i = freshTarget; i < fresh.Count && toDispatch.Count < availableWorkers; i++)
+                {
+                    toDispatch.Add(fresh[i]);
+                }
+                for (int i = retryTarget; i < retryReady.Count && toDispatch.Count < availableWorkers; i++)
+                {
+                    toDispatch.Add(retryReady[i]);
+                }
+
+                if (toDispatch.Count > 0)
+                {
+                    MigrationJobContext.AddVerboseLog(
+                        $"[ProcessPendingRestores] Dispatching {toDispatch.Count} restore context(s). Fresh={fresh.Count}, RetryReady={retryReady.Count}, RetrySlots={retrySlotCap}, Capacity={availableWorkers}");
+                }
 
                 int spawned = 0;
-                foreach (var context in pendingContexts)
+                foreach (var context in toDispatch)
                 {
                     // Check for controlled pause before spawning any workers
                     if (MigrationJobContext.ControlledPauseRequested)
@@ -1170,6 +1303,16 @@ namespace OnlineMongoMigrationProcessor
                         _log?.WriteLine("[ProcessPendingRestores] Controlled pause detected - skipping restore processing", LogType.Debug);
                         return;
                     }
+
+                    // Check if the collection is marked as skipped due to max retries
+                    var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                    if (mu != null && mu.SkippedDueToMaxRetries)
+                    {
+                        _log?.WriteLine($"[ProcessPendingRestores] Skipping chunk {context.ChunkIndex} for {mu.DatabaseName}.{mu.CollectionName} - collection marked as failed due to max retries", LogType.Debug);
+                        _uploadManifest.TryRemove(context.Id, out _);
+                        continue;
+                    }
+
                     // Try to acquire a worker slot
                     if (_restorePool.TryAcquire())
                     {
@@ -1179,7 +1322,6 @@ namespace OnlineMongoMigrationProcessor
                         context.StartedAt = DateTime.UtcNow;
                         spawned++;
 
-                        var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                         _log?.WriteLine($"[ProcessPendingRestores] Spawning restore worker for {mu?.DatabaseName}.{mu?.CollectionName}[{context.ChunkIndex}] (worker {spawned}/{availableWorkers})", LogType.Debug);                        // Spawn worker task
                         var cancellationToken = _processCts?.Token ?? CancellationToken.None;
                         _ = Task.Run(async () => await ProcessChunkForRestore(context), cancellationToken);
@@ -1299,7 +1441,7 @@ namespace OnlineMongoMigrationProcessor
         private string PrepareDumpFolder(string dbName, string colName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.PrepareDumpFolder: database={dbName}, collection={colName}");
-            string folder = Path.Combine(_mongoDumpOutputFolder, _jobId ?? "", Helper.SafeFileName($"{dbName}.{colName}"));
+            string folder = Path.Combine(_mongoDumpOutputFolder, _jobId ?? "", Helper.EncodeStoragePathSegment($"{dbName}.{colName}"));
             StorageStreamFactory.EnsureDirectoryExists(folder);
             return folder;
         }
@@ -1324,11 +1466,11 @@ namespace OnlineMongoMigrationProcessor
             if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
             {
                 var embeddedConnStr = Helper.EmbedDatabaseNameInConnectionString(sourceConnectionString, dbName);
-                args = $" --uri=\"{embeddedConnStr}\" --gzip --collection=\"{colName}\" --archive";
+                args = $" --uri={QuoteMongoToolArgument(embeddedConnStr)} --gzip --collection={QuoteMongoToolArgument(colName)} --archive";
             }
             else
             {
-                args = $" --uri=\"{sourceConnectionString}\" --gzip --db={dbName} --collection=\"{colName}\" --archive";
+                args = $" --uri={QuoteMongoToolArgument(sourceConnectionString)} --gzip --db={QuoteMongoToolArgument(dbName)} --collection={QuoteMongoToolArgument(colName)} --archive";
             }
 
 
@@ -1801,9 +1943,34 @@ namespace OnlineMongoMigrationProcessor
             // Handle timeout by splitting chunk if needed
             long maxDocsPerChunk = GetMaxDocsPerChunk(mu);
 
-            if (!countSuccess || docCount > maxDocsPerChunk)
+            bool countTimedOut = !countSuccess;
+            bool chunkTooLarge = countSuccess && docCount > maxDocsPerChunk;
+            bool shouldSplitLargeChunk = true;
+
+            if (chunkTooLarge)
             {
-                var result = await HandleCountTimeoutWithChunkSplitAsync(mu, chunkIndex, sourceCollection, userFilterDoc, sourceConnectionString, targetConnectionString,!countSuccess);
+                var config = new MigrationSettings();
+                config.Load();
+                shouldSplitLargeChunk = config.LargePartitionsShouldBeSplit;
+
+                if (!shouldSplitLargeChunk)
+                {
+                    _log?.WriteLine(
+                        $"{mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] is too large ({docCount} docs, max {maxDocsPerChunk}) but LargePartitionsShouldBeSplit is disabled. Continuing without split.",
+                        LogType.Debug);
+                }
+            }
+
+            if (countTimedOut || (chunkTooLarge && shouldSplitLargeChunk))
+            {
+                var result = await HandleCountTimeoutWithChunkSplitAsync(
+                    mu,
+                    chunkIndex,
+                    sourceCollection,
+                    userFilterDoc,
+                    sourceConnectionString,
+                    targetConnectionString,
+                    countTimedOut);
                 docCount = result.docCount;
                 gte = result.gte;
                 lt = result.lt;
@@ -1896,6 +2063,17 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 _log?.WriteLine($"Coordinator: Starting restore for {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[{chunkIndex}]", LogType.Debug);
+
+                // ===== TEMPORARY TEST CODE - REMOVE THIS BLOCK AFTER TESTING =====
+                // Simulate restore failure for chunk index 1 (2nd chunk) to test skip logic
+                //if (chunkIndex == 1 && sourceColName== "smalldocs_22M"  && context.RetryCount<2)
+                //{
+                //    _log?.WriteLine($"[TEST] Simulating restore failure for chunk 1: {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[1]", LogType.Warning);
+                //    HandleRestoreFailure(context, TaskResult.Retry);
+                //    _restorePool?.Release();
+                //    return;
+                //}
+                // ===== END TEMPORARY TEST CODE =====
 
                 // Check cancellation
                 if (_processCts?.Token.IsCancellationRequested == true)
@@ -2066,8 +2244,8 @@ namespace OnlineMongoMigrationProcessor
             string targetCollectionName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.BuildRestoreArguments: source={sourceDatabaseName}.{sourceCollectionName}, target={targetDatabaseName}.{targetCollectionName}, chunkIndex={chunkIndex}");
-            string args = $" --uri=\"{targetConnectionString}\" --gzip --archive --noIndexRestore";
-            args = $"{args} --nsFrom=\"{sourceDatabaseName}.{sourceCollectionName}\" --nsTo=\"{targetDatabaseName}.{targetCollectionName}\"";
+            string args = $" --uri={QuoteMongoToolArgument(targetConnectionString)} --gzip --archive --noIndexRestore";
+            args = $"{args} --nsFrom={QuoteMongoToolArgument($"{sourceDatabaseName}.{sourceCollectionName}")} --nsTo={QuoteMongoToolArgument($"{targetDatabaseName}.{targetCollectionName}")}";
 
             //removed as we built indexes and collections earlier
             /*
@@ -2102,6 +2280,16 @@ namespace OnlineMongoMigrationProcessor
             }
 
             return (args, docCount);
+        }
+
+        private static string QuoteMongoToolArgument(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return "\"\"";
+            }
+
+            return $"\"{value.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
         }
 
         /// <summary>
@@ -2367,15 +2555,18 @@ namespace OnlineMongoMigrationProcessor
                     var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                     if (mu != null)
                     {
-                        _log.WriteLine($"Max retries for download : {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]", LogType.Error);
+                        // Mark collection as skipped due to max retries instead of pausing
+                        // Do NOT mark as complete - the collection actually failed
+                        mu.SkippedDueToMaxRetries = true;
+                        mu.FailedOperation = "Dump";
+                        
+                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                        _log.WriteLine($"Max retries reached for dump: {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]. Collection marked as skipped. User can restart the job to retry.", LogType.Error);
                     }
                     else
                     {
                         _log.WriteLine($"Max retries for download : MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Error);
                     }
-
-                    // Trigger controlled pause for manual intervention
-                    MigrationJobContext.RequestControlledPause("Max retries for download");
                 }
                 else
                 {
@@ -2407,6 +2598,29 @@ namespace OnlineMongoMigrationProcessor
 
             if (MigrationJobContext.ControlledPauseRequested)
             {
+                // If an in-flight restore was cancelled during immediate/controlled pause,
+                // persist cleanup intent so resume can clean and retry safely.
+                if (result == TaskResult.Canceled || context.State == ProcessState.Processing)
+                {
+                    try
+                    {
+                        var pausedMu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                        if (pausedMu != null && context.ChunkIndex >= 0 && context.ChunkIndex < pausedMu.MigrationChunks.Count)
+                        {
+                            pausedMu.MigrationChunks[context.ChunkIndex].Attempt++;
+                            pausedMu.MigrationChunks[context.ChunkIndex].NeedsCleanup = true;
+                            MigrationJobContext.SaveMigrationUnit(pausedMu, true);
+                            _log?.WriteLine(
+                                $"Restore cancelled due to controlled pause for {pausedMu.DatabaseName}.{pausedMu.CollectionName}[{context.ChunkIndex}]. Marked for cleanup and retry.",
+                                LogType.Warning);
+                        }
+                    }
+                    catch (Exception pauseEx)
+                    {
+                        _log?.WriteLine($"Error persisting paused restore cleanup state: {Helper.RedactPii(pauseEx.ToString())}", LogType.Error);
+                    }
+                }
+
                 _uploadManifest.TryRemove(context.Id, out _);
                 return;
             }
@@ -2424,35 +2638,333 @@ namespace OnlineMongoMigrationProcessor
                     var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                     if (mu != null)
                     {
-                        _log.WriteLine($"Max retries for restore complete: {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]", LogType.Error);
+                        // Mark collection as skipped due to max retries instead of pausing
+                        // Do NOT mark as complete - the collection actually failed
+                        mu.SkippedDueToMaxRetries = true;
+                        mu.FailedOperation = "Restore";
+                        
+                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                        _log.WriteLine($"Max retries reached for restore: {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]. Collection marked as skipped. User can restart the job to retry.", LogType.Error);
                     }
                     else
                     {
                         _log.WriteLine($"Max retries for restore complete: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Error);
                     }
-
-                    // Trigger controlled pause
-                    MigrationJobContext.RequestControlledPause("Max retries for restore");
                 }
                 else
                 {
                     // Reset to pending for retry
-                    context.State = ProcessState.Pending;
                     var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
                     if (mu != null)
                     {
-                        _log.WriteLine($"Restore will retry ({context.RetryCount}/{MaxRetries}): {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]", LogType.Warning);
+                        if (context.ChunkIndex >= 0 && context.ChunkIndex < mu.MigrationChunks.Count)
+                        {
+                            // Keep chunk attempt in sync with context retries; ProcessExecutor may have
+                            // already incremented Attempt for threshold-triggered duplicate-key failures.
+                            if (mu.MigrationChunks[context.ChunkIndex].Attempt < context.RetryCount)
+                            {
+                                mu.MigrationChunks[context.ChunkIndex].Attempt = context.RetryCount;
+                            }
+                            mu.MigrationChunks[context.ChunkIndex].NeedsCleanup = true;
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            _log.WriteLine(
+                                $"Restore will retry ({context.RetryCount}/{MaxRetries}): {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]. Cleanup queued.",
+                                LogType.Warning);
+                        }
+                        else
+                        {
+                            _log.WriteLine($"Restore will retry ({context.RetryCount}/{MaxRetries}): {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]", LogType.Warning);
+                        }
                     }
                     else
                     {
                         _log.WriteLine($"Restore will retry ({context.RetryCount}/{MaxRetries}): MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Warning);
                     }
+
+                    context.State = ProcessState.Pending;
+                    EnqueueCleanup(context);
                 }
             }
             catch (Exception handlerEx)
             {
                 _log?.WriteLine($"Error handling restore failure: {Helper.RedactPii(handlerEx.ToString())}", LogType.Error);
             }
+        }
+
+        private bool GetChunkNeedsCleanup(DumpRestoreProcessContext context)
+        {
+            try
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                if (mu == null || context.ChunkIndex < 0 || context.ChunkIndex >= mu.MigrationChunks.Count)
+                {
+                    return false;
+                }
+
+                return mu.MigrationChunks[context.ChunkIndex].NeedsCleanup;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool IsRetryContext(DumpRestoreProcessContext context)
+        {
+            try
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                if (mu == null || context.ChunkIndex < 0 || context.ChunkIndex >= mu.MigrationChunks.Count)
+                {
+                    return false;
+                }
+
+                return mu.MigrationChunks[context.ChunkIndex].Attempt > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void QueuePendingCleanupContexts()
+        {
+            try
+            {
+                // Queue cleanup proactively for persisted retry chunks at startup/resume,
+                // instead of waiting for a new restore failure event.
+                var candidates = _uploadManifest.Values
+                    .Concat(_uploadBacklog.ToArray())
+                    .Where(ctx => (ctx.State == ProcessState.Pending || ctx.State == ProcessState.CleaningUp) && GetChunkNeedsCleanup(ctx))
+                    .OrderBy(ctx => ctx.QueuedAt)
+                    .ToList();
+
+                foreach (var context in candidates)
+                {
+                    EnqueueCleanup(context);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"Error queueing pending cleanup contexts: {Helper.RedactPii(ex.ToString())}", LogType.Error);
+            }
+        }
+
+        private void EnqueueCleanup(DumpRestoreProcessContext context)
+        {
+            if (!GetChunkNeedsCleanup(context))
+            {
+                return;
+            }
+
+            if (_cleanupQueueIndex.TryAdd(context.Id, 0))
+            {
+                context.State = ProcessState.CleaningUp;
+                _cleanupQueue.Enqueue(context);
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Queued: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
+            }
+
+            if (Interlocked.CompareExchange(ref _cleanupLoopRunning, 1, 0) == 0)
+            {
+                var ct = _processCts?.Token ?? CancellationToken.None;
+                _ = Task.Run(() => RunCleanupLoopAsync(ct), ct);
+            }
+        }
+
+        private async Task RunCleanupLoopAsync(CancellationToken cancellationToken)
+        {
+            int maxParallelCleanupWorkers = GetCleanupParallelWorkerCount();
+            var inFlightCleanupTasks = new List<Task>(maxParallelCleanupWorkers);
+
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested &&
+                       !MigrationJobContext.ControlledPauseRequested &&
+                       MigrationJobContext.CurrentlyActiveJob?.IsCancelled != true)
+                {
+                    while (inFlightCleanupTasks.Count < maxParallelCleanupWorkers &&
+                           _cleanupQueue.TryDequeue(out var context))
+                    {
+                        inFlightCleanupTasks.Add(ProcessCleanupContextAsync(context, cancellationToken));
+                    }
+
+                    if (inFlightCleanupTasks.Count == 0)
+                    {
+                        break;
+                    }
+
+                    var completedCleanupTask = await Task.WhenAny(inFlightCleanupTasks);
+                    inFlightCleanupTasks.Remove(completedCleanupTask);
+                    await completedCleanupTask;
+                }
+
+                // Wait for in-flight cleanup tasks to observe cancellation/pause and unwind.
+                if (inFlightCleanupTasks.Count > 0)
+                {
+                    await Task.WhenAll(inFlightCleanupTasks);
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _cleanupLoopRunning, 0);
+
+                // Restart loop if an item was queued after TryDequeue failed but before we reset running flag.
+                if (!cancellationToken.IsCancellationRequested &&
+                    !MigrationJobContext.ControlledPauseRequested &&
+                    MigrationJobContext.CurrentlyActiveJob?.IsCancelled != true &&
+                    !_cleanupQueue.IsEmpty &&
+                    Interlocked.CompareExchange(ref _cleanupLoopRunning, 1, 0) == 0)
+                {
+                    _ = Task.Run(() => RunCleanupLoopAsync(cancellationToken), cancellationToken);
+                }
+            }
+        }
+
+        private async Task ProcessCleanupContextAsync(DumpRestoreProcessContext context, CancellationToken cancellationToken)
+        {
+            bool requeue = false;
+
+            try
+            {
+                // Each cleanup run already performs internal retries.
+                // If it still fails, requeue at tail so other pending chunks can run first.
+                requeue = await RunCleanupForRestoreRetryAsync(context, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                context.State = ProcessState.CleaningUp;
+                requeue = true;
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Unexpected exception for MU:{context.MigrationUnitId}[{context.ChunkIndex}] (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Debug);
+            }
+            finally
+            {
+                // Keep the index entry for the full cleanup run so periodic scans
+                // do not enqueue duplicate work while this context is in progress.
+                _cleanupQueueIndex.TryRemove(context.Id, out _);
+            }
+
+            if (requeue &&
+                !cancellationToken.IsCancellationRequested &&
+                !MigrationJobContext.ControlledPauseRequested &&
+                MigrationJobContext.CurrentlyActiveJob?.IsCancelled != true)
+            {
+                EnqueueCleanup(context);
+            }
+        }
+
+        private int GetCleanupParallelWorkerCount()
+        {
+            // Match dump/restore default worker math: one worker per 2.5 CPU cores.
+            int calculatedWorkers = Math.Max(1, (int)(Environment.ProcessorCount / 2.5));
+            return WorkerCountHelper.ValidateDumpRestoreWorkerCount(calculatedWorkers);
+        }
+
+        private async Task<bool> RunCleanupForRestoreRetryAsync(DumpRestoreProcessContext context, CancellationToken cancellationToken)
+        {
+            var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+            if (mu == null)
+            {
+                context.State = ProcessState.Failed;
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed: migration unit not found for MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
+                return false;
+            }
+
+            int chunkIndex = context.ChunkIndex;
+            if (chunkIndex < 0 || chunkIndex >= mu.MigrationChunks.Count)
+            {
+                context.State = ProcessState.Failed;
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed: invalid chunk index for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
+                return false;
+            }
+
+            string targetDbName = mu.GetEffectiveTargetDatabaseName();
+            string targetCollectionName = mu.GetEffectiveTargetCollectionName();
+            int deletePageSize = GetCleanupDeletePageSize();
+
+            _log?.WriteLine($"[Cleanup to avoid duplicates] Starting: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Info);
+
+            try
+            {
+                if (MigrationJobContext.ControlledPauseRequested || MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                var targetClient = MongoClientFactory.Create(_log, context.TargetConnectionString);
+                var targetDb = targetClient.GetDatabase(targetDbName);
+                var targetCollection = targetDb.GetCollection<BsonDocument>(targetCollectionName);
+
+                var cleanupResult = await MongoHelper.DeletePotentialDuplicateDocsForRestoreRetryAsync(
+                    mu,
+                    chunkIndex,
+                    targetCollection,
+                    targetDbName,
+                    targetCollectionName,
+                    deletePageSize,
+                    _log,
+                    cancellationToken);
+
+                bool cleanupSucceeded = cleanupResult.Succeeded;
+
+                if (cleanupSucceeded)
+                {
+                    mu.MigrationChunks[chunkIndex].NeedsCleanup = false;
+                    mu.MigrationChunks[chunkIndex].Attempt = 0; // Reset attempt so that any future failure will trigger retries up to the max threshold again
+                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                    context.State = ProcessState.Pending;
+                    _log?.WriteLine($"[Cleanup to avoid duplicates] Completed: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}], totalDeleted={cleanupResult.TotalDeleted}", LogType.Info);
+                    return false;
+                }
+                else
+                {
+                    context.State = ProcessState.CleaningUp;
+                    _log?.WriteLine($"[Cleanup to avoid duplicates] Incomplete after internal retries. Re-queueing: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
+                    return true;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                context.State = ProcessState.CleaningUp;
+                if (cancellationToken.IsCancellationRequested || MigrationJobContext.ControlledPauseRequested || MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true)
+                {
+                    _log?.WriteLine($"[Cleanup to avoid duplicates] Canceled: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] due to pause/cancellation.", LogType.Debug);
+                    return false;
+                }
+
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Canceled: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] by cleanup token.", LogType.Debug);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                context.State = ProcessState.CleaningUp;
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Exception for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Debug);
+                return true;
+            }
+        }
+
+        private int GetCleanupDeletePageSize()
+        {
+            try
+            {
+                var config = new MigrationSettings();
+                config.Load();
+
+                // Keep cleanup paging aligned with regular Mongo copy page sizing.
+                if (config.MongoCopyPageSize > 0)
+                {
+                    return config.MongoCopyPageSize;
+                }
+                else
+                {
+                    return 100;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed to load MongoCopyPageSize from settings. Using default 500. Details: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+            }
+
+            return 500;
         }
 
         /// <summary>

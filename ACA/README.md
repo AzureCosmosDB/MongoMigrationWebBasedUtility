@@ -147,13 +147,13 @@ The script supports flexible resource allocation to match your workload requirem
 -VCores 4 -MemoryGB 16
 
 # Default production workload  
-# (uses defaults: 8 vCores, 32GB - no parameters needed)
+# (uses defaults: 8 vCores, 32GB, 100GB file share - no parameters needed)
 
 # Large workload (high-performance migration)
--VCores 16 -MemoryGB 64
+-VCores 16 -MemoryGB 64 -FileShareSizeGB 500
 
 # Maximum workload (enterprise-scale migration)
--VCores 32 -MemoryGB 64
+-VCores 32 -MemoryGB 64 -FileShareSizeGB 1024
 ```
 
 ---
