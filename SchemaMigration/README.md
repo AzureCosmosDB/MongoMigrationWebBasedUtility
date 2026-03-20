@@ -173,6 +173,14 @@ Before running the assessment, ensure that the client machine meets the followin
     - Detailed decision-making logic (e.g., why certain indexes are optimized or skipped)
     - Success/failure status for each operation
 
+    **Optional: Run collection migrations in parallel** (recommended for large collection counts):
+
+    ```cmd
+    python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string> --workers 16
+    ```
+
+    The `--workers` flag controls how many collections are processed concurrently. Use `1` for sequential behavior. Default is `5`.
+
 This process will generate an Azure DocumentDB-optimized schema with index and sharding recommendations based on your workload.
 
 
@@ -192,5 +200,6 @@ This process will generate an Azure DocumentDB-optimized schema with index and s
 | **--config-file** | Yes | Path to the JSON configuration file that defines collections to migrate and their migration settings. |
 | **--source-uri** | Yes | MongoDB connection string for the source database (e.g., `mongodb://localhost:27017`). |
 | **--dest-uri** | Yes | MongoDB/DocumentDB connection string for the destination database. |
+| **--workers** | No | Number of worker threads used to process collections in parallel. Default is `5`. Use `1` for sequential behavior. Increase this value for faster migrations with many collections. |
 | **--verbose** | No | Enable verbose output mode. When set, displays detailed logging of all operations including connection status, configuration parsing, collection enumeration, and step-by-step migration progress. Useful for debugging and monitoring long-running migrations. |
 

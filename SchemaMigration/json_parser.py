@@ -2,6 +2,7 @@ from typing import List
 from pymongo import MongoClient
 from collection_config import CollectionConfig
 from console_utils import print_verbose as console_print_verbose, print_warning
+from namespace_validator import try_parse_namespace_pattern
 
 class JsonParser:
     """
@@ -64,6 +65,14 @@ class JsonParser:
             for collection in collections_to_migrate:
                 if collection in collection_configs:
                     raise ValueError(f"Duplicate collection entry found: {collection}")
+
+                # Validate namespace format (database.collection)
+                is_valid, normalized_ns, error_msg = try_parse_namespace_pattern(collection)
+                if not is_valid:
+                    raise ValueError(
+                        f"Invalid namespace format: '{collection}'. "
+                        f"Use 'database.collection', '*.collection', 'database.*', or '*.*' for wildcards. {error_msg}"
+                    )
 
                 db_name, collection_name = collection.split(".", 1)
                 collection_config = CollectionConfig(

@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using OnlineMongoMigrationProcessor.Context;
 using System;
 using System.IO;
@@ -23,6 +24,8 @@ namespace OnlineMongoMigrationProcessor
         public int CompareSampleSize { get; set; }
         public PartitionerType ObjectIdPartitioner { get; set; }
         public PartitionerType NonObjectIdPartitioner { get; set; }
+        public bool LargePartitionsShouldBeSplit { get; set; }
+        public MongoDumpRestoreBehavior MongoDumpRestoreBehavior { get; set; }
         
         private string _filePath = string.Empty;
 
@@ -48,6 +51,17 @@ namespace OnlineMongoMigrationProcessor
                 var loadedObject = JsonConvert.DeserializeObject<MigrationSettings>(json);
                 if (loadedObject != null)
                 {
+                    bool hasLargePartitionsShouldBeSplit = false;
+                    try
+                    {
+                        var settingsDoc = JObject.Parse(json);
+                        hasLargePartitionsShouldBeSplit = settingsDoc.TryGetValue(nameof(LargePartitionsShouldBeSplit), StringComparison.OrdinalIgnoreCase, out _);
+                    }
+                    catch
+                    {
+                        // Preserve existing behavior when this field is missing or document is malformed.
+                    }
+
                     ReadBinary = loadedObject.ReadBinary;
                     MongoToolsDownloadUrl = loadedObject.MongoToolsDownloadUrl;
                     MongoDumpToolPath = loadedObject.MongoDumpToolPath;
@@ -63,6 +77,8 @@ namespace OnlineMongoMigrationProcessor
                     CACertContentsForSourceServer = loadedObject.CACertContentsForSourceServer;
                     ObjectIdPartitioner = loadedObject.ObjectIdPartitioner;
                     NonObjectIdPartitioner = loadedObject.NonObjectIdPartitioner;
+                    LargePartitionsShouldBeSplit = hasLargePartitionsShouldBeSplit ? loadedObject.LargePartitionsShouldBeSplit : true;
+                    MongoDumpRestoreBehavior = loadedObject.MongoDumpRestoreBehavior;
                     
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
@@ -92,6 +108,8 @@ namespace OnlineMongoMigrationProcessor
                 LogPageSize = 5000;
                 ObjectIdPartitioner = PartitionerType.UseSampleCommand;
                 NonObjectIdPartitioner = PartitionerType.UseSampleCommand;
+                LargePartitionsShouldBeSplit = true;
+                MongoDumpRestoreBehavior = MongoDumpRestoreBehavior.DumpAndRestore;
             }
         }
 

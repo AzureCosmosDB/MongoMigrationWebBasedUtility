@@ -984,9 +984,6 @@ namespace OnlineMongoMigrationProcessor
         }
         private static Tuple<bool, string, string> ValidateNamespaceFormatfromCSV(string input, bool split=true)
         {
-            // Regular expression pattern to match db1.col1, db2.col2, db3.col4 format, with support for wildcards
-            // Allow * for database name or collection name
-            string pattern = @"^([^\/\\\.\x00\""\<\>\|\?\s]+|\*)\.{1}([^\/\\\x00\""\<\>\|\?]+|\*)$";
             string[] items;
 
             if (!split)            
@@ -1000,14 +997,14 @@ namespace OnlineMongoMigrationProcessor
             foreach (string mu in items)
             {
                 string trimmedItem = mu.Trim(); // Remove any extra whitespace
-                if (Regex.IsMatch(trimmedItem, pattern))
+                if (TryParseNamespacePattern(trimmedItem, out var normalizedNamespace, out var validationError))
                 {
-                    //Console.WriteLine($"'{trimmedItem}' matches the pattern.");
-                    validItems.Add(trimmedItem); // HashSet ensures uniqueness
+                    validItems.Add(normalizedNamespace); // HashSet ensures uniqueness
                 }
                 else
                 {
-                    string errorMessage = $"Invalid namespace format: '{trimmedItem}'. Use 'database.collection', '*.collection', 'database.*', or '*.*' for wildcards.";
+                    string suffix = string.IsNullOrWhiteSpace(validationError) ? string.Empty : $" {validationError}";
+                    string errorMessage = $"Invalid namespace format: '{trimmedItem}'. Use 'database.collection', '*.collection', 'database.*', or '*.*' for wildcards.{suffix}";
                     return new Tuple<bool, string,string>(false, string.Empty,errorMessage);
                 }
             }
@@ -1015,6 +1012,107 @@ namespace OnlineMongoMigrationProcessor
             // Join valid items into a cleaned comma-separated list
             var cleanedNamespace = string.Join(",", validItems);
             return new Tuple<bool, string,string>(true, cleanedNamespace,string.Empty);
+        }
+
+        private static bool TryParseNamespacePattern(string value, out string normalizedNamespace, out string validationError)
+        {
+            normalizedNamespace = string.Empty;
+            validationError = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                validationError = "Namespace cannot be empty.";
+                return false;
+            }
+
+            int firstDotIndex = value.IndexOf('.');
+            if (firstDotIndex <= 0 || firstDotIndex >= value.Length - 1)
+            {
+                validationError = "Expected exactly one database prefix before the first '.'.";
+                return false;
+            }
+
+            string databaseName = value.Substring(0, firstDotIndex);
+            string collectionName = value.Substring(firstDotIndex + 1);
+
+            if (!IsValidDatabasePattern(databaseName, out validationError))
+            {
+                return false;
+            }
+
+            if (!IsValidCollectionPattern(collectionName, out validationError))
+            {
+                return false;
+            }
+
+            normalizedNamespace = $"{databaseName}.{collectionName}";
+            return true;
+        }
+
+        private static bool IsValidDatabasePattern(string databaseName, out string validationError)
+        {
+            validationError = string.Empty;
+
+            if (databaseName == "*")
+            {
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(databaseName))
+            {
+                validationError = "Database name cannot be empty.";
+                return false;
+            }
+
+            if (databaseName.IndexOf('\0') >= 0)
+            {
+                validationError = "Database name cannot contain null characters.";
+                return false;
+            }
+
+            if (databaseName.Any(char.IsWhiteSpace))
+            {
+                validationError = "Database name cannot contain whitespace.";
+                return false;
+            }
+
+            if (databaseName.IndexOfAny(new[] { '/', '\\', '.', '"', '$', '*', '<', '>', ':', '|', '?', ',' }) >= 0)
+            {
+                validationError = "Database name contains unsupported characters.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsValidCollectionPattern(string collectionName, out string validationError)
+        {
+            validationError = string.Empty;
+
+            if (collectionName == "*")
+            {
+                return true;
+            }
+
+            if (string.IsNullOrEmpty(collectionName))
+            {
+                validationError = "Collection name cannot be empty.";
+                return false;
+            }
+
+            if (collectionName.IndexOf('\0') >= 0)
+            {
+                validationError = "Collection name cannot contain null characters.";
+                return false;
+            }
+
+            if (collectionName.Contains(','))
+            {
+                validationError = "Collection name cannot contain ','.";
+                return false;
+            }
+
+            return true;
         }
 
         public static string RedactPii(string input)
@@ -1042,6 +1140,26 @@ namespace OnlineMongoMigrationProcessor
                 sanitizedFileName = sanitizedFileName.Substring(0, 255);
             }
             return sanitizedFileName;
+        }
+
+        public static string EncodeStoragePathSegment(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            return Uri.EscapeDataString(value);
+        }
+
+        public static string DecodeStoragePathSegment(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            return Uri.UnescapeDataString(value);
         }
 
         //public static bool WriteAtomicFile(string filePath, string content, int maxRetries = 5)

@@ -297,6 +297,7 @@
                         <td>
                             @(mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                 : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                 : (mu.DumpComplete ? "Success" : $"{mu.DumpPercent:F1}%"))
 
                         </td>
@@ -306,6 +307,7 @@
                             <td>
                                 @(mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                     : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                    : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                     : (mu.RestoreComplete || mu.RestorePercent == 100 ? "Success" : $"{mu.RestorePercent:F1}%"))
 
                             </td>
