@@ -956,15 +956,12 @@ namespace OnlineMongoMigrationProcessor
         private string GetDumpFilePath(MigrationUnit mu, int chunkIndex, bool overwrite = false)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.GetDumpFilePath: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}, overwrite={overwrite}");
-            string folder = PrepareDumpFolder(mu.DatabaseName, mu.CollectionName);
             return GetDumpFilePath(mu.DatabaseName, mu.CollectionName, chunkIndex, overwrite);
         }
 
         private string GetDumpFilePath(string databaseName, string collectionName, int chunkIndex, bool overwrite = false)
         {
-            string folder = PrepareDumpFolder(databaseName, collectionName);
-            // Get dump folder and file path                        
-            string dumpFilePath = Path.Combine(folder, $"{chunkIndex}.bson");
+            string dumpFilePath = Path.Combine(PrepareDumpFolder(databaseName, collectionName), $"{chunkIndex}.bson");
             if (overwrite)
             {
                 //Ensure previous dump file(if any) is removed before fresh dump
@@ -1444,7 +1441,7 @@ namespace OnlineMongoMigrationProcessor
         private string PrepareDumpFolder(string dbName, string colName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.PrepareDumpFolder: database={dbName}, collection={colName}");
-            string folder = Path.Combine(_mongoDumpOutputFolder, _jobId ?? "", Helper.SafeFileName($"{dbName}.{colName}"));
+            string folder = Path.Combine(_mongoDumpOutputFolder, _jobId ?? "", Helper.EncodeStoragePathSegment($"{dbName}.{colName}"));
             StorageStreamFactory.EnsureDirectoryExists(folder);
             return folder;
         }
@@ -1469,11 +1466,11 @@ namespace OnlineMongoMigrationProcessor
             if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
             {
                 var embeddedConnStr = Helper.EmbedDatabaseNameInConnectionString(sourceConnectionString, dbName);
-                args = $" --uri=\"{embeddedConnStr}\" --gzip --collection=\"{colName}\" --archive";
+                args = $" --uri={QuoteMongoToolArgument(embeddedConnStr)} --gzip --collection={QuoteMongoToolArgument(colName)} --archive";
             }
             else
             {
-                args = $" --uri=\"{sourceConnectionString}\" --gzip --db={dbName} --collection=\"{colName}\" --archive";
+                args = $" --uri={QuoteMongoToolArgument(sourceConnectionString)} --gzip --db={QuoteMongoToolArgument(dbName)} --collection={QuoteMongoToolArgument(colName)} --archive";
             }
 
 
@@ -2247,8 +2244,8 @@ namespace OnlineMongoMigrationProcessor
             string targetCollectionName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.BuildRestoreArguments: source={sourceDatabaseName}.{sourceCollectionName}, target={targetDatabaseName}.{targetCollectionName}, chunkIndex={chunkIndex}");
-            string args = $" --uri=\"{targetConnectionString}\" --gzip --archive --noIndexRestore";
-            args = $"{args} --nsFrom=\"{sourceDatabaseName}.{sourceCollectionName}\" --nsTo=\"{targetDatabaseName}.{targetCollectionName}\"";
+            string args = $" --uri={QuoteMongoToolArgument(targetConnectionString)} --gzip --archive --noIndexRestore";
+            args = $"{args} --nsFrom={QuoteMongoToolArgument($"{sourceDatabaseName}.{sourceCollectionName}")} --nsTo={QuoteMongoToolArgument($"{targetDatabaseName}.{targetCollectionName}")}";
 
             //removed as we built indexes and collections earlier
             /*
@@ -2283,6 +2280,16 @@ namespace OnlineMongoMigrationProcessor
             }
 
             return (args, docCount);
+        }
+
+        private static string QuoteMongoToolArgument(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return "\"\"";
+            }
+
+            return $"\"{value.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
         }
 
         /// <summary>
