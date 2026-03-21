@@ -345,7 +345,7 @@ namespace OnlineMongoMigrationProcessor
             if (optimizeForMongoDump && partitionValues.Count > chunkCount)
             {
                 var quantileBoundaries = new List<BsonValue>();
-                for (int k = 1; k < chunkCount; k++)
+                for (int k = 0; k < chunkCount; k++)
                 {
                     int idx = (int)((long)k * partitionValues.Count / chunkCount);
                     quantileBoundaries.Add(partitionValues[idx]);
