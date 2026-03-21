@@ -150,12 +150,10 @@ namespace OnlineMongoMigrationProcessor
                     // DumpAndRestore: oversample then pick equidistant quantile boundaries
                     chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
                     segmentCount = 1;
+                    adjustedMaxSamples = (int)Math.Min((long)Math.Floor(docCountByType * 0.04), 500000);
 
-                    // Oversample ~200 per chunk, cap at 4% of doc count and hard cap
-                    long estimatedAvgObjSize = docCountByType > 0 ? Math.Max(1, minDocsPerChunk > 0 ? minDocsPerChunk : 1024) : 1024;
-                    sampleCount = (int)Math.Min(
-                        (long)chunkCount * 200,
-                        Math.Min((long)Math.Floor(docCountByType * 0.04), adjustedMaxSamples));
+                    // Oversample ~200 per chunk, capped by adjustedMaxSamples
+                    sampleCount = (int)Math.Min((long)chunkCount * 200, adjustedMaxSamples);
                     sampleCount = Math.Max(sampleCount, chunkCount); // at least chunkCount samples
 
                     MigrationJobContext.AddVerboseLog($"SamplePartitioner DumpAndRestore: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, sampleCount={sampleCount}");
