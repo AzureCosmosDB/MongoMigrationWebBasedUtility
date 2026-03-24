@@ -78,7 +78,7 @@
                     <div class="mb-3">
                         <label for="ignore-duplicates-and-continue-restore" class="form-label" title="When enabled, MongoRestore will continue after the duplicate-key threshold is reached instead of stopping and queuing duplicate cleanup.">
                             <input type="checkbox" id="ignore-duplicates-and-continue-restore" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).IgnoreDuplicatesAndContinueRestore" />
-                            Ignore duplicates during Restore (Restore will be slower)
+                            Ignore duplicates during Restore (Restore may be slower)
                         </label>
                     </div>
                     <div class="mb-3">
