@@ -76,6 +76,12 @@
                         </label>
                     </div>
                     <div class="mb-3">
+                        <label for="ignore-duplicates-and-continue-restore" class="form-label" title="When enabled, MongoRestore will continue after the duplicate-key threshold is reached instead of stopping and queuing duplicate cleanup.">
+                            <input type="checkbox" id="ignore-duplicates-and-continue-restore" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).IgnoreDuplicatesAndContinueRestore" />
+                            Ignore duplicates during Restore (Restore will be slower)
+                        </label>
+                    </div>
+                    <div class="mb-3">
                         <label for="dump-restore-behavior" class="form-label" title="Controls whether to run both dump and restore, dump only, or restore only.">
                             Mongo Dump Restore behavior
                         </label>
@@ -85,6 +91,7 @@
                             <option value="RestoreOnly">Restore Only</option>
                         </select>
                     </div>
+                    
                     <div class="mb-3">
                         <label for="pem-text" class="form-label">CA certificate file for source server (.pem)</label>
                         <InputFile OnChange="OnPemFileUpload" />
