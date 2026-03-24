@@ -26,6 +26,7 @@ namespace OnlineMongoMigrationProcessor
         public PartitionerType NonObjectIdPartitioner { get; set; }
         public bool LargePartitionsShouldBeSplit { get; set; }
         public MongoDumpRestoreBehavior MongoDumpRestoreBehavior { get; set; }
+        public bool IgnoreDuplicatesAndContinueRestore { get; set; }
         
         private string _filePath = string.Empty;
 
@@ -79,6 +80,7 @@ namespace OnlineMongoMigrationProcessor
                     NonObjectIdPartitioner = loadedObject.NonObjectIdPartitioner;
                     LargePartitionsShouldBeSplit = hasLargePartitionsShouldBeSplit ? loadedObject.LargePartitionsShouldBeSplit : true;
                     MongoDumpRestoreBehavior = loadedObject.MongoDumpRestoreBehavior;
+                    IgnoreDuplicatesAndContinueRestore = loadedObject.IgnoreDuplicatesAndContinueRestore;
                     
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
@@ -110,6 +112,7 @@ namespace OnlineMongoMigrationProcessor
                 NonObjectIdPartitioner = PartitionerType.UseSampleCommand;
                 LargePartitionsShouldBeSplit = true;
                 MongoDumpRestoreBehavior = MongoDumpRestoreBehavior.DumpAndRestore;
+                IgnoreDuplicatesAndContinueRestore = false;
             }
         }
 

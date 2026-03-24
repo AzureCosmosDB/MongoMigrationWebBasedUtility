@@ -68,11 +68,19 @@
                     <div class="mb-3">
                         <label for="sourceConnectionString" class="form-label">Source Connection String</label>
                         <input type="password" id="sourceConnectionString" placeholder="@(NewMode ? "" : "For " + sourceEndpoint)" class="form-control" @bind="sourceConnectionString" />
+                        @if (!string.IsNullOrWhiteSpace(CurrentSourceEndpoint))
+                        {
+                            <div class="form-text">Source endpoint: @CurrentSourceEndpoint</div>
+                        }
                     </div>
 
                     <div class="mb-3">
                         <label for="targetConnectionString" class="form-label">Target Connection String</label>
                         <input type="password" id="targetConnectionString" placeholder="@(NewMode ? "For [account name].mongocluster.cosmos.azure.com" : "For " + targetEndpoint)" class="form-control" @bind="targetConnectionString" />
+                        @if (!string.IsNullOrWhiteSpace(CurrentTargetEndpoint))
+                        {
+                            <div class="form-text">Target endpoint: @CurrentTargetEndpoint</div>
+                        }
                     </div>
 
                     <div class="mb-3">
@@ -289,6 +297,8 @@
     private string targetConnectionString { get; set; } = string.Empty;
     private bool AllowMongoDump => Configuration.GetValue<bool>("AllowMongoDump");
     private bool overwrite = false; // Flag to indicate if the target collections should be overwritten
+    private string CurrentSourceEndpoint => GetDisplayedEndpoint(sourceConnectionString, sourceEndpoint);
+    private string CurrentTargetEndpoint => GetDisplayedEndpoint(targetConnectionString, targetEndpoint);
 
     // File upload state
     private bool isFileUploaded = false;
@@ -299,6 +309,17 @@
     {
         var value = e?.Value?.ToString() ?? string.Empty;
         isTextAreaUsed = !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static string GetDisplayedEndpoint(string connectionString, string fallbackEndpoint)
+    {
+        var extractedEndpoint = Helper.ExtractHost(connectionString);
+        if (!string.IsNullOrWhiteSpace(extractedEndpoint))
+        {
+            return extractedEndpoint;
+        }
+
+        return string.IsNullOrWhiteSpace(connectionString) ? fallbackEndpoint : string.Empty;
     }
 
     private void SwitchToBasicTab()

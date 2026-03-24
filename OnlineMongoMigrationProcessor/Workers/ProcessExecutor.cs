@@ -25,6 +25,20 @@ namespace OnlineMongoMigrationProcessor.Workers
         private Process? _process = null;
         private readonly object _processLock = new object();
         private CancellationToken _cancellationToken;
+
+        private static bool ShouldIgnoreDuplicatesAndContinueRestore()
+        {
+            try
+            {
+                var settings = new MigrationSettings();
+                settings.Load();
+                return settings.IgnoreDuplicatesAndContinueRestore;
+            }
+            catch
+            {
+                return false;
+            }
+        }
         
         public ProcessExecutor(Log log)
         {
@@ -62,6 +76,17 @@ namespace OnlineMongoMigrationProcessor.Workers
             MigrationJobContext.AddVerboseLog($"ProcessExecutor.Execute: mu={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}, exePath={exePath}");
             _cancellationToken = cancellationToken;
             string processType = exePath.ToLower().Contains("restore") ? "MongoRestore" : "MongoDump";
+            bool ignoreDuplicatesAndContinueRestore = ShouldIgnoreDuplicatesAndContinueRestore();
+
+            if (processType == "MongoRestore")
+            {
+                string action = ignoreDuplicatesAndContinueRestore
+                    ? "continue restore when duplicate threshold is reached"
+                    : "cancel restore and queue duplicate cleanup when duplicate threshold is reached";
+                _log.WriteLine(
+                    $"MongoRestore duplicate-threshold setting: IgnoreDuplicatesAndContinueRestore={ignoreDuplicatesAndContinueRestore} for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] (threshold={MaxDuplicateKeyViolationsPerChunk}, action={action}).",
+                    LogType.Info);
+            }
 
 
             try
@@ -117,6 +142,14 @@ namespace OnlineMongoMigrationProcessor.Workers
                             duplicateThresholdReached &&
                             Interlocked.CompareExchange(ref duplicateThresholdTriggered, 1, 0) == 0)
                         {
+                            if (ignoreDuplicatesAndContinueRestore)
+                            {
+                                _log.WriteLine(
+                                    $"MongoRestore duplicate-key threshold reached ({MaxDuplicateKeyViolationsPerChunk}) for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] after {duplicateCount} violations. IgnoreDuplicatesAndContinueRestore=true, so restore will continue without duplicate cleanup.",
+                                    LogType.Warning);
+                                return;
+                            }
+
                             chunk.NeedsCleanup = true;
                             chunk.Attempt++;
                             MigrationJobContext.SaveMigrationUnit(mu, true);
