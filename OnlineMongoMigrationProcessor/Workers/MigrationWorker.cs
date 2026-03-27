@@ -258,6 +258,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (string.IsNullOrWhiteSpace(MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]))
                 return TaskResult.FailedAfterRetries;
 
+                _log.WriteLine($"IgnoreDuplicatesAndContinueRestore={_config.IgnoreDuplicatesAndContinueRestore}", LogType.Warning);
             _sourceClient = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], false, _config.CACertContentsForSourceServer ?? string.Empty);
             _log.WriteLine($"Source client initialized,  JobType: {MigrationJobContext.CurrentlyActiveJob.JobType}, IsSimulated: {MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun}");
             if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
