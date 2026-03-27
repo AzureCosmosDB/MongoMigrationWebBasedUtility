@@ -19,26 +19,10 @@ namespace OnlineMongoMigrationProcessor.Workers
 {
     internal class ProcessExecutor
     {
-        private const int MaxDuplicateKeyViolationsPerChunk = 10;
-
         private Log _log;
         private Process? _process = null;
         private readonly object _processLock = new object();
         private CancellationToken _cancellationToken;
-
-        private static bool ShouldIgnoreDuplicatesAndContinueRestore()
-        {
-            try
-            {
-                var settings = new MigrationSettings();
-                settings.Load();
-                return settings.IgnoreDuplicatesAndContinueRestore;
-            }
-            catch
-            {
-                return false;
-            }
-        }
         
         public ProcessExecutor(Log log)
         {
@@ -70,13 +54,14 @@ namespace OnlineMongoMigrationProcessor.Workers
             string arguments,
             string outputFilePath,
             CancellationToken cancellationToken,
+            bool ignoreDuplicatesAndContinueRestore,
+            TimeSpan continuousDuplicateThreshold,
             Action<int>? onProcessStarted = null,
             Action<int>? onProcessEnded = null)
         {
             MigrationJobContext.AddVerboseLog($"ProcessExecutor.Execute: mu={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}, exePath={exePath}");
             _cancellationToken = cancellationToken;
             string processType = exePath.ToLower().Contains("restore") ? "MongoRestore" : "MongoDump";
-            bool ignoreDuplicatesAndContinueRestore = ShouldIgnoreDuplicatesAndContinueRestore();
 
 
             try
@@ -100,7 +85,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 StringBuilder outputBuffer = new StringBuilder();
                 StringBuilder errorBuffer = new StringBuilder();
-                int duplicateKeyViolationCount = 0;
+                DateTime? continuousDuplicateStart = null;
+                int totalDuplicateCount = 0;
                 int duplicateThresholdTriggered = 0;
 
                 _process.OutputDataReceived += (sender, args) =>
@@ -125,7 +111,9 @@ namespace OnlineMongoMigrationProcessor.Workers
                             chunk,
                             chunkIndex,
                             targetCount,
-                            ref duplicateKeyViolationCount,
+                            continuousDuplicateThreshold,
+                            ref continuousDuplicateStart,
+                            ref totalDuplicateCount,
                             out duplicateCount);
 
                         if (processType == "MongoRestore" &&
@@ -135,7 +123,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                             if (ignoreDuplicatesAndContinueRestore)
                             {
                                 _log.WriteLine(
-                                    $"MongoRestore duplicate-key threshold reached ({MaxDuplicateKeyViolationsPerChunk}) for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] after {duplicateCount} violations. IgnoreDuplicatesAndContinueRestore=true, so restore will continue without duplicate cleanup.",
+                                    $"MongoRestore continuous duplicate-key threshold ({continuousDuplicateThreshold.TotalSeconds}s) reached for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] after {duplicateCount} total violations. IgnoreDuplicatesAndContinueRestore=true, so restore will continue without duplicate cleanup.",
                                     LogType.Warning);
                                 return;
                             }
@@ -145,7 +133,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                             MigrationJobContext.SaveMigrationUnit(mu, true);
 
                             _log.WriteLine(
-                                $"MongoRestore duplicate-key threshold reached ({MaxDuplicateKeyViolationsPerChunk}) for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] after {duplicateCount} violations. Marked chunk for cleanup and terminating restore.",
+                                $"MongoRestore continuous duplicate-key threshold ({continuousDuplicateThreshold.TotalSeconds}s) reached for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] after {duplicateCount} total violations. Marked chunk for cleanup and terminating restore.",
                                 LogType.Error);
 
                             try
@@ -303,7 +291,9 @@ namespace OnlineMongoMigrationProcessor.Workers
             MigrationChunk chunk,
             int chunkIndex,
             long targetCount,
-            ref int duplicateKeyViolationCount,
+            TimeSpan continuousDuplicateThreshold,
+            ref DateTime? continuousDuplicateStart,
+            ref int totalDuplicateCount,
             out int duplicateCount)
         {
             duplicateCount = 0;
@@ -370,22 +360,37 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 if (isRestoreProgressWithBytes)
                 {
+                    // Don't reset continuousDuplicateStart here - byte-size progress lines are periodic
+                    // status output from mongorestore and don't indicate duplicates have stopped
                     _log.ShowInMonitor($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {data}");
                 }
                 else
                 {
                     if (!IsDuplicateKeyViolationLine(data))
                     {
+                        continuousDuplicateStart = null; // Non-duplicate output, reset continuous duplicate timer
                         MigrationJobContext.AddVerboseLog($"{processType} Response for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}]: {Helper.RedactPii(data)}");
                     }
                     else
                     {
-                        duplicateCount = Interlocked.Increment(ref duplicateKeyViolationCount);
-                        MigrationJobContext.AddVerboseLog($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : Duplicate key violation encountered, skipping duplicate documents.: {Helper.RedactPii(data)}");
+                        duplicateCount = Interlocked.Increment(ref totalDuplicateCount);                       
 
-                        if (duplicateCount >= MaxDuplicateKeyViolationsPerChunk)
+                        if (duplicateCount==1 || duplicateCount==1000||duplicateCount % 10000 == 0)
                         {
-                            return true;
+                            _log.WriteLine($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {duplicateCount} duplicate key violations so far (continuous for {(continuousDuplicateStart.HasValue ? (int)(DateTime.UtcNow - continuousDuplicateStart.Value).TotalSeconds : 0)}s)", LogType.Warning);
+                        }
+                        else
+                        {
+                            MigrationJobContext.AddVerboseLog($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : Duplicate key violation #{duplicateCount} (continuous for {(continuousDuplicateStart.HasValue ? (int)(DateTime.UtcNow - continuousDuplicateStart.Value).TotalSeconds : 0)}s): {Helper.RedactPii(data)}");
+                        }
+
+                        if (continuousDuplicateStart == null)
+                        {
+                            continuousDuplicateStart = DateTime.UtcNow;
+                        }
+                        else if (DateTime.UtcNow - continuousDuplicateStart.Value >= continuousDuplicateThreshold)
+                        {
+                            return true; // Continuous duplicates for 5 minutes
                         }
                     }
                 }

@@ -104,6 +104,10 @@ namespace OnlineMongoMigrationProcessor
 
         private bool _processNewTasks = true;
 
+        // Cached duplicate settings (read once at Initialize)
+        private bool _ignoreDuplicatesAndContinueRestore = false;
+        private TimeSpan _continuousDuplicateThreshold = TimeSpan.FromMinutes(5);
+
         private DateTime _downLoadPausedTill = DateTime.MinValue;
         private DateTime _lastDiskSpaceCheckedAtUtc = DateTime.MinValue;
         private bool _lastDiskSpaceCheckResult = true;
@@ -439,6 +443,22 @@ namespace OnlineMongoMigrationProcessor
                     _processTimer.AutoReset = true;
 
                     _coordinatorInitialized = true;
+
+                    // Cache duplicate settings once
+                    try
+                    {
+                        var dupSettings = new MigrationSettings();
+                        dupSettings.Load();
+                        _ignoreDuplicatesAndContinueRestore = dupSettings.IgnoreDuplicatesAndContinueRestore;
+                        _continuousDuplicateThreshold = dupSettings.ContinuousDuplicateThresholdInSeconds > 0
+                            ? TimeSpan.FromSeconds(dupSettings.ContinuousDuplicateThresholdInSeconds)
+                            : TimeSpan.FromMinutes(5);
+                    }
+                    catch
+                    {
+                        _ignoreDuplicatesAndContinueRestore = false;
+                        _continuousDuplicateThreshold = TimeSpan.FromMinutes(5);
+                    }
 
                     // Reset any previously skipped collections to allow retry on job start/resume
                     ResetSkippedCollectionFlags();
@@ -1507,6 +1527,8 @@ namespace OnlineMongoMigrationProcessor
                 args,
                 dumpFilePath,
                 _processCts?.Token ?? CancellationToken.None,
+                _ignoreDuplicatesAndContinueRestore,
+                _continuousDuplicateThreshold,
                 onProcessStarted: pid => MigrationJobContext.ActiveDumpProcessIds.Add(pid),
                 onProcessEnded: pid => MigrationJobContext.ActiveDumpProcessIds.Remove(pid)
             ), _processCts?.Token ?? CancellationToken.None);
@@ -2353,6 +2375,8 @@ namespace OnlineMongoMigrationProcessor
                 args,
                 dumpFilePath,
                 _processCts?.Token ?? CancellationToken.None,
+                _ignoreDuplicatesAndContinueRestore,
+                _continuousDuplicateThreshold,
                 onProcessStarted: pid => MigrationJobContext.ActiveRestoreProcessIds.Add(pid),
                 onProcessEnded: pid => MigrationJobContext.ActiveRestoreProcessIds.Remove(pid)
             ), _processCts?.Token ?? CancellationToken.None);
