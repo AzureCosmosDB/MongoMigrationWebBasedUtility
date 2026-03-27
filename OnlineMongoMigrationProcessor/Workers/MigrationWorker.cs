@@ -258,6 +258,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (string.IsNullOrWhiteSpace(MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]))
                 return TaskResult.FailedAfterRetries;
 
+            
+
             _sourceClient = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], false, _config.CACertContentsForSourceServer ?? string.Empty);
             _log.WriteLine($"Source client initialized,  JobType: {MigrationJobContext.CurrentlyActiveJob.JobType}, IsSimulated: {MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun}");
             if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
@@ -285,7 +287,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                     }
                 }
             }
-
+            if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.DumpAndRestore)
+            {
+                _log.WriteLine($"IgnoreDuplicatesAndContinueRestore={_config.IgnoreDuplicatesAndContinueRestore}", LogType.Info);
+            }
             _log.WriteLine("Verifying source server connectivity...", LogType.Debug);
             try
             {
@@ -543,7 +548,7 @@ namespace OnlineMongoMigrationProcessor.Workers
         private async Task<TaskResult> PreparePartitionsAsync(CancellationToken _cts, bool skipPartitioning)
         {
             _log.WriteLine($"PreparePartitionsAsync started - SkipPartitioning: {skipPartitioning}", LogType.Debug);
-            
+
             var validationResult = ValidateAndInitialize();
             if (!validationResult.IsValid)
             {

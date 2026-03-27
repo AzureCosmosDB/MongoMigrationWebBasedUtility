@@ -27,6 +27,7 @@ namespace OnlineMongoMigrationProcessor
         public bool LargePartitionsShouldBeSplit { get; set; }
         public MongoDumpRestoreBehavior MongoDumpRestoreBehavior { get; set; }
         public bool IgnoreDuplicatesAndContinueRestore { get; set; }
+        public int ContinuousDuplicateThresholdInSeconds { get; set; }
         
         private string _filePath = string.Empty;
 
@@ -81,6 +82,7 @@ namespace OnlineMongoMigrationProcessor
                     LargePartitionsShouldBeSplit = hasLargePartitionsShouldBeSplit ? loadedObject.LargePartitionsShouldBeSplit : true;
                     MongoDumpRestoreBehavior = loadedObject.MongoDumpRestoreBehavior;
                     IgnoreDuplicatesAndContinueRestore = loadedObject.IgnoreDuplicatesAndContinueRestore;
+                    ContinuousDuplicateThresholdInSeconds = loadedObject.ContinuousDuplicateThresholdInSeconds <= 0 ? 300 : loadedObject.ContinuousDuplicateThresholdInSeconds;
                     
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
@@ -113,6 +115,7 @@ namespace OnlineMongoMigrationProcessor
                 LargePartitionsShouldBeSplit = true;
                 MongoDumpRestoreBehavior = MongoDumpRestoreBehavior.DumpAndRestore;
                 IgnoreDuplicatesAndContinueRestore = false;
+                ContinuousDuplicateThresholdInSeconds = 300;
             }
         }
 
