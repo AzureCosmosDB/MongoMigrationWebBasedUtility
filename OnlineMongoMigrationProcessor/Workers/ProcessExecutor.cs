@@ -78,16 +78,6 @@ namespace OnlineMongoMigrationProcessor.Workers
             string processType = exePath.ToLower().Contains("restore") ? "MongoRestore" : "MongoDump";
             bool ignoreDuplicatesAndContinueRestore = ShouldIgnoreDuplicatesAndContinueRestore();
 
-            if (processType == "MongoRestore")
-            {
-                string action = ignoreDuplicatesAndContinueRestore
-                    ? "continue restore when duplicate threshold is reached"
-                    : "cancel restore and queue duplicate cleanup when duplicate threshold is reached";
-                _log.WriteLine(
-                    $"MongoRestore duplicate-threshold setting: IgnoreDuplicatesAndContinueRestore={ignoreDuplicatesAndContinueRestore} for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] (threshold={MaxDuplicateKeyViolationsPerChunk}, action={action}).",
-                    LogType.Info);
-            }
-
 
             try
             {
