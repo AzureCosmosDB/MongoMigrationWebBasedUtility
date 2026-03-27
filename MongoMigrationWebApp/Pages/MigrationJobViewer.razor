@@ -626,6 +626,7 @@ else if (@_showLogBackupFile)
             // Source Status / Download Status
             var sourceStatus = mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                 : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                 : (mu.DumpComplete ? "Success" : $"{mu.DumpPercent:F1}%");
             if (sourceStatus.Contains(searchText, StringComparison.OrdinalIgnoreCase))
                 return true;
@@ -635,6 +636,7 @@ else if (@_showLogBackupFile)
             {
                 var uploadStatus = mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                     : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                    : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                     : (mu.RestoreComplete || mu.RestorePercent == 100 ? "Success" : $"{mu.RestorePercent:F1}%");
                 if (uploadStatus.Contains(searchText, StringComparison.OrdinalIgnoreCase))
                     return true;
@@ -759,6 +761,9 @@ else if (@_showLogBackupFile)
 
         if (mu.SourceStatus == CollectionStatus.IsView)
             return "0_Skipped (VIEW)"; // Sort skipped items first
+
+        if (mu.SkippedDueToMaxRetries)
+            return "0_Skipped (Max Retries)"; // Sort skipped items first
 
         if (isUploadStatus)
         {

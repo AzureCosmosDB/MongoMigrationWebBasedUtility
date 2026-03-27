@@ -1060,6 +1060,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             string databaseName, string collectionName,
             int timeoutSeconds, CancellationToken cancellationToken)
         {
+            const int hardTimeoutSeconds = 300; // 5-minute absolute ceiling via Task.WhenAny
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
             
@@ -1068,7 +1069,17 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             BsonDocument stats;
             try
             {
-                stats = await database.RunCommandAsync<BsonDocument>(statsCommand, cancellationToken: linkedCts.Token);
+                var commandTask = database.RunCommandAsync<BsonDocument>(statsCommand, cancellationToken: linkedCts.Token);
+                var hardTimeoutTask = Task.Delay(TimeSpan.FromSeconds(hardTimeoutSeconds), cancellationToken);
+
+                var completed = await Task.WhenAny(commandTask, hardTimeoutTask);
+
+                if (completed == hardTimeoutTask)
+                {
+                    throw new TimeoutException($"GetCollectionStatsAsync hard timeout: did not complete within {hardTimeoutSeconds} seconds for {databaseName}.{collectionName}");
+                }
+
+                stats = await commandTask; // re-await to propagate any exception from the command
                 MigrationJobContext.AddVerboseLog($"collStats command completed for {databaseName}.{collectionName}");
             }
             catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
