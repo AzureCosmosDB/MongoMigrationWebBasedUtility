@@ -143,62 +143,46 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-                if (chunkCount > adjustedMaxSamples)
-                {
-                    int count = 2;
-                    long newCount = docCountByType / ((long)minDocsPerSegment * count);
-                    while (newCount > adjustedMaxSamples)
-                    {
-                        count++;
-
-                        // Check for potential overflow before multiplication
-                        long multiplier = (long)minDocsPerSegment * count;
-                        if (multiplier <= 0 || multiplier > docCountByType)
-                        {                           
-                            break;
-                        }
-                        newCount = docCountByType / multiplier;
-                        MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating adjustedMaxSamples: collection={collection.CollectionNamespace}, newCount={newCount}, dataType={dataType}, docCountByType={docCountByType}, multiplier={multiplier}");
-                    }
-                    
-
-                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {adjustedMaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Warning);
-                    chunkCount = (int)newCount;
-                }
-
-
-                // Ensure minimum documents per chunk
-                chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
-                docsInChunk = docCountByType / chunkCount;
-
-                // Calculate segments based on documents per chunk
-                segmentCount = Math.Min(
-                    Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
-                    GetMaxSegments()
-                );
-
-
-                // Calculate the total sample count
-                sampleCount = Math.Min(chunkCount * segmentCount, adjustedMaxSamples);
-
-
-                MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating sampleCount: collection={collection.CollectionNamespace}, dataType={dataType}, segmentCount={segmentCount}, sampleCount{sampleCount}");
-
-                // Adjust segments per chunk based on the new sample count
-                segmentCount = Math.Max(1, sampleCount / chunkCount);
-
                 bool usePaginationPartitioner = dataType != DataType.ObjectId && config.NonObjectIdPartitioner == PartitionerType.UsePagination;
 
-                // Optimize for non-dump scenarios
-                if (!optimizeForMongoDump && !usePaginationPartitioner)
+                if (optimizeForMongoDump)
                 {
-                    while (chunkCount > segmentCount && segmentCount < GetMaxSegments())
+                    // DumpAndRestore: oversample then pick equidistant quantile boundaries
+                    chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
+                    segmentCount = 1;
+                    adjustedMaxSamples = (int)Math.Min((long)Math.Floor(docCountByType * 0.04), 500000);
+
+                    // Oversample ~200 per chunk, capped by adjustedMaxSamples
+                    sampleCount = (int)Math.Min((long)chunkCount * 200, adjustedMaxSamples);
+                    sampleCount = Math.Max(sampleCount, chunkCount); // at least chunkCount samples
+
+                    MigrationJobContext.AddVerboseLog($"SamplePartitioner DumpAndRestore: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, sampleCount={sampleCount}");
+                }
+                else
+                {
+                    // MongoDriver path: compute segments for parallel writes within each chunk
+                    chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
+                    docsInChunk = docCountByType / chunkCount;
+
+                    segmentCount = Math.Min(
+                        Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
+                        GetMaxSegments()
+                    );
+
+                    sampleCount = Math.Min(chunkCount * segmentCount, adjustedMaxSamples);
+                    segmentCount = Math.Max(1, sampleCount / chunkCount);
+
+                    if (!usePaginationPartitioner)
                     {
-                        chunkCount--;
-                        segmentCount++;
+                        while (chunkCount > segmentCount && segmentCount < GetMaxSegments())
+                        {
+                            chunkCount--;
+                            segmentCount++;
+                        }
+                        chunkCount = sampleCount / segmentCount;
                     }
 
-                    chunkCount = sampleCount / segmentCount;
+                    MigrationJobContext.AddVerboseLog($"SamplePartitioner MongoDriver: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, segmentCount={segmentCount}, sampleCount={sampleCount}");
                 }
 
                 MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating chunkCount: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}");
@@ -355,6 +339,17 @@ namespace OnlineMongoMigrationProcessor
                 return null;
             }
             // Step 3: Calculate partition boundaries
+            // For DumpAndRestore: pick equidistant quantile boundaries from oversampled sorted list
+            if (optimizeForMongoDump && partitionValues.Count > chunkCount)
+            {
+                var quantileBoundaries = new List<BsonValue>();
+                for (int k = 0; k < chunkCount; k++)
+                {
+                    int idx = (int)((long)k * partitionValues.Count / chunkCount);
+                    quantileBoundaries.Add(partitionValues[idx]);
+                }
+                partitionValues = quantileBoundaries;
+            }
 
             chunkBoundaries = ConvertToBoundaries(partitionValues, segmentCount);
 
