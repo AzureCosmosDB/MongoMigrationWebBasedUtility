@@ -92,6 +92,16 @@ cd c:\Work\GitHub\repos\MongoMigrationWebBasedUtility
   -Location "eastus" `
   -OwnerTag "yourname@company.com" `
   -UseEntraIdForAzureStorage
+
+# Deployment with existing ACR in different region
+# Use this when you have a centralized ACR in one region but want to deploy Container App to another region
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "MongoMigrationRGTest" `
+  -ContainerAppName "mongomigration-westus" `
+  -AcrName "centralizedacr" `
+  -AcrLocation "eastus" `
+  -Location "westus2" `
+  -OwnerTag "yourname@company.com"
 ```
 
 **Using Existing Azure Resources:**
@@ -232,13 +242,15 @@ Remove-Variable connString, secureConnString
 |-----------|------|---------|-------------|
 | `AcrName` | string | `<ContainerAppName>acr` | Name of the Azure Container Registry (must be globally unique, alphanumeric only). Uses existing ACR if found, otherwise creates new. |
 | `AcrRepository` | string | `<ContainerAppName>` | Repository name within ACR for storing images. Allows multiple apps to share the same ACR. |
-| `StorageAccountName` | string | `<ContainerAppName>stg` | Name of the Storage Account. Uses existing account if found, otherwise creates new. |
+| `AcrLocation` | string | `$Location` | Azure region for the Azure Container Registry. **Use this when reusing an existing ACR in a different region than the Container App.** Defaults to the same region as the Container App (`$Location`). This parameter is useful for organizations with a centralized container registry in one region serving deployments in multiple regions. |
+| `StorageAccountName` | string | `<ContainerAppName>stg` | Name of the Storage Account to create or use. **Only used when `StorageAccountResourceId` is not provided.** Uses existing account if found, otherwise creates new. **Mutually exclusive with `StorageAccountResourceId`.** |
+| `StorageAccountResourceId` | string | `""` (empty) | Full resource ID of a pre-configured storage account to use instead of creating a new one. Example: `/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Storage/storageAccounts/{name}`. **Requires `-UseEntraIdForAzureStorage`.** Supports accounts in different resource groups or regions. **Mutually exclusive with `StorageAccountName`.** See [Pre-configured Storage with Private Endpoints](#pre-configured-storage-with-private-endpoints) section. |
 | `StateStoreAppID` | string | `<ContainerAppName>` | Application identifier for state storage in DocumentDB. |
 | `ImageTag` | string | `latest` | Docker image tag to deploy. Script checks if image exists before building. |
 | `VCores` | int | `8` (range: 1-32) | Number of vCores for the container. |
 | `MemoryGB` | int | `32` (range: 2-64) | Memory in GB for the container. |
 | `InfrastructureSubnetResourceId` | string | `""` (empty) | Resource ID of the subnet for VNet integration. **Must be provided at environment creation time**. See [VNet Integration](#vnet-integration) section. |
-| `UseEntraIdForAzureStorage` | switch | `$false` | Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When enabled, no volume is mounted and the app uses `BlobServiceClient` with Managed Identity. **Recommended when your organization blocks storage account key-based access**. |
+| `UseEntraIdForAzureStorage` | switch | `$false` | Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When enabled, no volume is mounted and the app uses `BlobServiceClient` with Managed Identity. **Required when using `StorageAccountResourceId`.** **Recommended when your organization blocks storage account key-based access**. |
 
 ## Naming Constraints
 
@@ -393,6 +405,100 @@ Azure Container Apps with Dedicated Plan provides configurable high-performance 
 # - Create environment with VNet integration (if subnet provided)
 ```
 
+### Cross-Region ACR Deployment
+
+For organizations with a centralized Azure Container Registry in one region serving deployments across multiple regions, use the `-AcrLocation` parameter:
+
+```powershell
+# Deploy Container Apps in multiple regions using a centralized ACR
+# Container App in westus2, ACR in centralus
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "rg-mongomig-westus" `
+  -ContainerAppName "mongomigration-westus" `
+  -AcrName "centralizedacr" `
+  -AcrLocation "centralus" `
+  -Location "westus2" `
+  -VCores 16 `
+  -MemoryGB 64 `
+  -ImageTag "v1.0" `
+  -OwnerTag "yourname@company.com"
+
+# Container App in northeurope, same centralized ACR
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "rg-mongomig-eu" `
+  -ContainerAppName "mongomigration-eu" `
+  -AcrName "centralizedacr" `
+  -AcrLocation "centralus" `
+  -Location "northeurope" `
+  -VCores 16 `
+  -MemoryGB 64 `
+  -ImageTag "v1.0" `
+  -OwnerTag "yourname@company.com"
+
+# Script will:
+# - Use existing ACR "centralizedacr" in "centralus"
+# - Deploy Container App Environment in "westus2" (or "northeurope")
+# - Pull container images from the centralized ACR across regions
+# - Build/push images to the ACR in centralus (only once, reused by both deployments)
+```
+
+**Benefits of centralized ACR:**
+- ✅ Single image repository for multiple deployments across regions
+- ✅ Consistent image versioning across all regions
+- ✅ Reduced storage costs (one copy of the image instead of per-region)
+- ✅ Simplified image management and compliance
+- ✅ When image already exists, deployments in other regions skip the build process entirely
+
+**Important Notes:**
+- `-AcrLocation` is **only needed** when the ACR is in a different region than the Container App
+- Defaults to same region as Container App if not specified
+- Must be a region that exists and where ACR is available
+- Image pull across regions has minimal latency through Azure backbone network
+
+### ACR with Private Endpoints
+
+The deployment script is fully compatible with ACR Private Endpoints. However, **if your ACR has Private Endpoints enabled and the public endpoint is disabled**, you must run the `deploy-to-aca.ps1` script from a machine that has network access to the ACR's private endpoint.
+
+**Scenario: PE-enabled ACR**
+- ACR must be accessible from the machine running the script
+- If running from outside the VNet, you'll receive connection errors when the script tries to run `az acr repository show-tags` and `az acr build`
+- **Solution**: Run the script from a machine within the same VNet as the ACR's private endpoint, or temporarily enable public endpoint access during deployment
+
+**Scenario: ACR with public endpoint enabled (default)**
+- Script can run from any machine with internet access
+- No special network configuration needed
+- Container App at runtime properly resolves to private endpoint (via VNet integration and linked private DNS zones)
+
+### High-Performance Migration with Pre-configured PE-enabled Storage
+
+```powershell
+# Deploy with existing storage account in different resource group (cross-RG with Private Endpoint)
+# Container App: westus2
+# Storage Account (with PE):
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "rg-mongomig-perf" `
+  -ContainerAppName "mongomigration-perf" `
+  -AcrName "sharedproductionacr" `
+  -AcrRepository "mongomig-perf" `
+  -StorageAccountResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}" `
+  -StateStoreAppID "perf-migration-01" `
+  -Location "westus2" `
+  -AcrLocation "centralus" `
+  -VCores 32 `
+  -MemoryGB 64 `
+  -ImageTag "v1.0" `
+  -UseEntraIdForAzureStorage `
+  -OwnerTag "yourname@company.com"
+
+# Script will:
+# - Use existing ACR "sharedproductionacr" in "centralus"
+# - Store image in "mongomig-perf" repository
+# - Use existing storage account "{storage-account-name}" from "{rg-name}" resource group
+# - Automatically create Managed Identity and assign role for cross-RG access   
+# - Create Container App Environment in westus2 with Blob SDK access to PE-enabled storage
+# - Storage access uses Managed Identity (no keys), suitable for PE-enabled accounts
+```
+
 ## VNet Integration
 
 ### Overview
@@ -430,7 +536,7 @@ Use the `-InfrastructureSubnetResourceId` parameter during initial deployment:
   -Location "eastus" `
   -VCores 16 `
   -MemoryGB 64 `
-  -InfrastructureSubnetResourceId "/subscriptions/220fc532-6091-423c-8ba0-66c2397d591b/resourceGroups/MyRG/providers/Microsoft.Network/virtualNetworks/my-vnet/subnets/aca-subnet"
+  -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
 ```
 
 **What happens:**
@@ -667,6 +773,153 @@ Your application can access the persistent storage using the environment variabl
 var resourceDrive = Environment.GetEnvironmentVariable("ResourceDrive"); // Returns: "/app/migration-data"
 // Store migration files in this directory - they persist across deployments
 ```
+
+## Pre-configured Storage with Private Endpoints
+
+If you have a pre-configured Azure Storage Account with Private Endpoints in a different resource group, you can use it instead of creating a new storage account. This is useful for:
+- **Security**: Using existing PE-enabled infrastructure
+- **Cost**: Reusing existing storage accounts across multiple deployments
+- **Organization**: Maintaining centralized storage in a different resource group
+- **Compliance**: Using pre-approved storage accounts with specific encryption and policies
+
+### Prerequisites for Pre-configured Storage
+
+1. **Existing Azure Storage Account** with:
+   - Private Endpoint(s) configured
+   - A `migration-data` blob container (created automatically if not present)
+   - Location: Can be in the same region or different region as Container App
+   - Can be in the same or different resource group
+
+2. **Storage Account must allow Managed Identity access**:
+   - If using firewall rules, ensure the Container App's Managed Identity can access the account
+   - Or disable public access and rely solely on the Private Endpoint
+
+3. **Entra ID must be enabled**:
+   - `-UseEntraIdForAzureStorage` is **required** when using `-StorageAccountResourceId`
+   - This uses Managed Identity (no storage account keys) for access
+   - Aligns with organizational policies that block key-based access
+
+### Using Pre-configured Storage
+
+Instead of `-StorageAccountName`, use `-StorageAccountResourceId` with the full resource ID of the storage account:
+
+```powershell
+# Deploy with pre-configured PE-enabled storage account
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "{rg-name}" `
+  -ContainerAppName "mongomigration-prod" `
+  -Location "westus2" `
+  -StorageAccountResourceId "/subscriptions/{sub-id}/resourceGroups/{storage-rg}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}" `
+  -UseEntraIdForAzureStorage `
+  -VCores 16 `
+  -MemoryGB 64 `
+  -OwnerTag "yourname@company.com"
+```
+
+**Key points:**
+- ✅ `StorageAccountResourceId` and `StorageAccountName` are **mutually exclusive** — use one or the other
+- ✅ Account can be in a **different resource group**
+- ✅ Account can be in a **different subscription** (if you have permissions)
+- ✅ The script extracts the account name from the resource ID automatically
+- ✅ Requires `-UseEntraIdForAzureStorage` for Managed Identity authentication
+- ✅ Blob container `migration-data` is created automatically if not present
+- ✅ Role assignment (Storage Blob Data Contributor) is created automatically via a Bicep module
+
+### Finding the Storage Account Resource ID
+
+**Method 1: Azure Portal**
+1. Navigate to your Storage Account
+2. Click **Properties** in the left menu  
+3. Copy the **Resource ID** field
+4. Use this value for `-StorageAccountResourceId`
+
+**Method 2: Azure CLI**
+```powershell
+# Get resource ID of a specific storage account
+az storage account show `
+  --name "{storage-account-name}" `
+  --resource-group "{rg-name}" `
+  --query "id" `
+  --output tsv
+
+# Output: /subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}
+
+# List all storage accounts in a resource group with their IDs
+az storage account list `
+  --resource-group "{rg-name}" `
+  --query "[].{Name:name, ResourceId:id}" `
+  --output table
+```
+
+**Method 3: PowerShell**
+```powershell
+# Get resource ID using Az PowerShell
+(Get-AzStorageAccount -Name "{storage-account-name}" -ResourceGroupName "{rg-name}").Id
+```
+
+### Cross-Resource-Group Storage Example
+
+Deploy Container App in one resource group using storage from another resource group:
+
+```powershell
+# Container App in "{deployment-rg}" 
+# Storage Account in "{storage-rg}" (different RG, same subscription)
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName "{deployment-rg}" `
+  -ContainerAppName "mongomigration-prod" `
+  -Location "westus2" `
+  -AcrName "myacr" `
+  -StorageAccountResourceId "/subscriptions/{sub-id}/resourceGroups/{storage-rg}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}" `
+  -UseEntraIdForAzureStorage `
+  -VCores 16 `
+  -MemoryGB 64 `
+  -OwnerTag "yourname@company.com"
+```
+
+**What happens:**
+- Container App Environment is created in `{deployment-rg}`
+- Storage Account `{storage-account-name}` is referenced from `{storage-rg}` resource group
+- Managed Identity in `{deployment-rg}` gets `Storage Blob Data Contributor` role on the storage account
+- Role assignment is deployed via Bicep module scoped to the storage account's resource group
+- Container App can read/write to the storage account via Managed Identity
+
+### Verifying Pre-configured Storage Setup
+
+After deployment, verify that the Container App can access the pre-configured storage:
+
+```powershell
+# Check role assignment was created
+az role assignment list `
+  --assignee "<managed-identity-principal-id>" `
+  --scope "<storage-account-resource-id>" `
+  --query "[?roleDefinitionName=='Storage Blob Data Contributor']"
+
+# Check Container App can access storage
+# Look for successful Blob SDK initialization in Container App logs
+az containerapp logs show `
+  --name "mongomigration-prod" `
+  --resource-group "MongoMigrationRGTestACA" `
+  --follow
+
+# Should show: "Using Entra ID (Managed Identity) for Azure Blob Storage" or similar
+```
+
+### Important Notes for Pre-configured Storage
+
+- **Private Endpoint DNS**: If the storage account has private endpoints, ensure DNS resolution works from Container App:
+  - If Container App is in the same VNet, DNS resolution should work automatically
+  - If in different VNets, ensure private DNS zones are linked to the Container App's VNet
+  
+- **Firewall Rules**: If storage account has firewall enabled:
+  - Allow access from Container App's Managed Identity (uses Azure backbone, not public IP)
+  - Or add `Allow Azure services on the trusted services list` exception
+  
+- **Blob Container**: The `migration-data` blob container is created automatically if it doesn't exist
+
+- **No Volume Mount**: When using pre-configured storage with Managed Identity, no Azure Files volume is mounted. The application uses Azure Blob SDK with environment variables:
+  - `UseBlobServiceClient=true`
+  - `BlobServiceClientURI=https://<storage-account>.blob.core.windows.net`
+  - `BlobContainerName=migration-data`
 
 ## Deployment Outputs
 
