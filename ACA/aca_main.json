@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.39.26.7824",
-      "templateHash": "4330028920114987765"
+      "version": "0.41.2.15936",
+      "templateHash": "1394802121520382524"
     }
   },
   "parameters": {
@@ -26,6 +26,13 @@
       "type": "string",
       "metadata": {
         "description": "Name of the Container App"
+      }
+    },
+    "acrLocation": {
+      "type": "string",
+      "defaultValue": "[parameters('location')]",
+      "metadata": {
+        "description": "Location for the Azure Container Registry. Defaults to the main location. Override if reusing an existing ACR in a different region."
       }
     },
     "acrName": {
@@ -107,9 +114,29 @@
       "metadata": {
         "description": "Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When true, UseBlobServiceClient env var is set and no volume is mounted."
       }
+    },
+    "fileShareSizeGB": {
+      "type": "int",
+      "defaultValue": 100,
+      "minValue": 100,
+      "maxValue": 102400,
+      "metadata": {
+        "description": "Size of the Azure File Share in GB (only applies when useEntraIdForStorage is false)"
+      }
+    },
+    "storageAccountResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Use a pre-configured (existing) storage account instead of creating a new one. Requires useEntraIdForStorage=true. Provide the full resource ID of the storage account (e.g., /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Storage/storageAccounts/{name})."
+      }
     }
   },
   "variables": {
+    "usePreConfiguredStorageAccount": "[not(empty(parameters('storageAccountResourceId')))]",
+    "effectiveStorageAccountName": "[if(not(empty(parameters('storageAccountResourceId'))), last(split(parameters('storageAccountResourceId'), '/')), parameters('storageAccountName'))]",
+    "storageAccountSubscriptionId": "[if(variables('usePreConfiguredStorageAccount'), split(parameters('storageAccountResourceId'), '/')[2], subscription().subscriptionId)]",
+    "storageAccountResourceGroupName": "[if(variables('usePreConfiguredStorageAccount'), split(parameters('storageAccountResourceId'), '/')[4], resourceGroup().name)]",
     "workloadProfileType": "[if(lessOrEquals(parameters('vCores'), 4), 'D4', if(lessOrEquals(parameters('vCores'), 8), 'D8', if(lessOrEquals(parameters('vCores'), 16), 'D16', 'D32')))]",
     "workloadProfileName": "Dedicated"
   },
@@ -127,7 +154,7 @@
       "type": "Microsoft.ContainerRegistry/registries",
       "apiVersion": "2023-07-01",
       "name": "[parameters('acrName')]",
-      "location": "[parameters('location')]",
+      "location": "[parameters('acrLocation')]",
       "sku": {
         "name": "Basic"
       },
@@ -141,7 +168,7 @@
     {
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
-      "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', parameters('acrName'))]",
+      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
       "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'acrPull')]",
       "properties": {
         "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
@@ -154,9 +181,10 @@
       ]
     },
     {
+      "condition": "[not(variables('usePreConfiguredStorageAccount'))]",
       "type": "Microsoft.Storage/storageAccounts",
       "apiVersion": "2023-01-01",
-      "name": "[parameters('storageAccountName')]",
+      "name": "[variables('effectiveStorageAccountName')]",
       "location": "[parameters('location')]",
       "kind": "StorageV2",
       "sku": {
@@ -177,14 +205,11 @@
       "condition": "[not(parameters('useEntraIdForStorage'))]",
       "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
       "apiVersion": "2023-01-01",
-      "name": "[format('{0}/default/migration-data', parameters('storageAccountName'))]",
+      "name": "[format('{0}/default/migration-data', variables('effectiveStorageAccountName'))]",
       "properties": {
-        "shareQuota": 100,
+        "shareQuota": "[parameters('fileShareSizeGB')]",
         "enabledProtocols": "SMB"
-      },
-      "dependsOn": [
-        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
-      ]
+      }
     },
     {
       "type": "Microsoft.App/managedEnvironments",
@@ -197,29 +222,29 @@
       "properties": "[union(createObject('workloadProfiles', createArray(createObject('name', 'Consumption', 'workloadProfileType', 'Consumption'), createObject('name', variables('workloadProfileName'), 'workloadProfileType', variables('workloadProfileType'), 'minimumCount', 1, 'maximumCount', 1))), if(not(equals(parameters('infrastructureSubnetResourceId'), '')), createObject('vnetConfiguration', createObject('infrastructureSubnetId', parameters('infrastructureSubnetResourceId'), 'internal', false())), createObject()))]"
     },
     {
-      "condition": "[not(parameters('useEntraIdForStorage'))]",
+      "condition": "[and(not(parameters('useEntraIdForStorage')), not(variables('usePreConfiguredStorageAccount')))]",
       "type": "Microsoft.App/managedEnvironments/storages",
       "apiVersion": "2023-05-01",
       "name": "[format('{0}/{1}', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')), 'migration-storage')]",
       "properties": {
         "azureFile": {
-          "accountName": "[parameters('storageAccountName')]",
-          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-01-01').keys[0].value]",
+          "accountName": "[variables('effectiveStorageAccountName')]",
+          "accountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName')), '2023-01-01').keys[0].value]",
           "shareName": "migration-data",
           "accessMode": "ReadWrite"
         }
       },
       "dependsOn": [
         "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')))]",
-        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName'))]"
       ]
     },
     {
-      "condition": "[parameters('useEntraIdForStorage')]",
+      "condition": "[and(parameters('useEntraIdForStorage'), not(variables('usePreConfiguredStorageAccount')))]",
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
-      "scope": "[format('Microsoft.Storage/storageAccounts/{0}', parameters('storageAccountName'))]",
-      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'storageBlobDataContributor')]",
+      "scope": "[resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'storageBlobDataContributor')]",
       "properties": {
         "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
         "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').principalId]",
@@ -227,7 +252,7 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]",
-        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName'))]"
       ]
     },
     {
@@ -277,7 +302,7 @@
                 "memory": "[format('{0}Gi', parameters('memoryGB'))]"
               },
               "volumeMounts": "[if(parameters('useEntraIdForStorage'), createArray(), createArray(createObject('volumeName', 'migration-data-volume', 'mountPath', '/app/migration-data')))]",
-              "env": "[concat(createArray(createObject('name', 'ASPNETCORE_ENVIRONMENT', 'value', parameters('aspNetCoreEnvironment')), createObject('name', 'ASPNETCORE_HTTP_PORTS', 'value', '8080'), createObject('name', 'StateStoreAppID', 'value', parameters('stateStoreAppID')), createObject('name', 'ResourceDrive', 'value', '/app/migration-data')), if(not(equals(parameters('stateStoreConnectionString'), '')), createArray(createObject('name', 'StateStoreConnectionStringOrPath', 'secretRef', 'statestore-connection')), createArray()), if(parameters('useEntraIdForStorage'), createArray(createObject('name', 'UseBlobServiceClient', 'value', 'true'), createObject('name', 'BlobServiceClientURI', 'value', format('https://{0}.blob.{1}', parameters('storageAccountName'), environment().suffixes.storage)), createObject('name', 'BlobContainerName', 'value', 'migration-data')), createArray()))]",
+              "env": "[concat(createArray(createObject('name', 'ASPNETCORE_ENVIRONMENT', 'value', parameters('aspNetCoreEnvironment')), createObject('name', 'ASPNETCORE_HTTP_PORTS', 'value', '8080'), createObject('name', 'StateStoreAppID', 'value', parameters('stateStoreAppID')), createObject('name', 'ResourceDrive', 'value', '/app/migration-data'), createObject('name', 'STORAGE_QUOTA_GB', 'value', string(parameters('fileShareSizeGB')))), if(not(equals(parameters('stateStoreConnectionString'), '')), createArray(createObject('name', 'StateStoreConnectionStringOrPath', 'secretRef', 'statestore-connection')), createArray()), if(parameters('useEntraIdForStorage'), createArray(createObject('name', 'UseBlobServiceClient', 'value', 'true'), createObject('name', 'BlobServiceClientURI', 'value', format('https://{0}.blob.{1}', variables('effectiveStorageAccountName'), environment().suffixes.storage)), createObject('name', 'BlobContainerName', 'value', 'migration-data'), createObject('name', 'AZURE_CLIENT_ID', 'value', reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').clientId)), createArray()))]",
               "probes": [
                 {
                   "type": "Startup",
@@ -332,9 +357,72 @@
         "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
         "[resourceId('Microsoft.App/managedEnvironments', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')))]",
         "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]",
-        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
-        "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'storageBlobDataContributor'))]",
-        "[resourceId('Microsoft.App/managedEnvironments/storages', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')), 'migration-storage')]"
+        "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), 'storageBlobDataContributor'))]",
+        "[resourceId('Microsoft.App/managedEnvironments/storages', format('{0}-env-{1}', parameters('containerAppName'), variables('workloadProfileType')), 'migration-storage')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('storageAccountSubscriptionId'), variables('storageAccountResourceGroupName')), 'Microsoft.Resources/deployments', 'storageRoleAssignmentExisting')]"
+      ]
+    },
+    {
+      "condition": "[and(parameters('useEntraIdForStorage'), variables('usePreConfiguredStorageAccount'))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "storageRoleAssignmentExisting",
+      "subscriptionId": "[variables('storageAccountSubscriptionId')]",
+      "resourceGroup": "[variables('storageAccountResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "storageAccountName": {
+            "value": "[variables('effectiveStorageAccountName')]"
+          },
+          "managedIdentityId": {
+            "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]"
+          },
+          "managedIdentityPrincipalId": {
+            "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').principalId]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.41.2.15936",
+              "templateHash": "3594985109167760166"
+            }
+          },
+          "parameters": {
+            "storageAccountName": {
+              "type": "string"
+            },
+            "managedIdentityId": {
+              "type": "string"
+            },
+            "managedIdentityPrincipalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), parameters('managedIdentityId'), 'storageBlobDataContributor')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
+                "principalId": "[parameters('managedIdentityPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]"
       ]
     }
   ],
@@ -379,7 +467,7 @@
       "metadata": {
         "description": "Storage Account Name for migration data"
       },
-      "value": "[parameters('storageAccountName')]"
+      "value": "[variables('effectiveStorageAccountName')]"
     },
     "fileShareName": {
       "type": "string",
@@ -407,7 +495,7 @@
       "metadata": {
         "description": "Blob Service URI (only when using Entra ID)"
       },
-      "value": "[if(parameters('useEntraIdForStorage'), format('https://{0}.blob.{1}', parameters('storageAccountName'), environment().suffixes.storage), '')]"
+      "value": "[if(parameters('useEntraIdForStorage'), format('https://{0}.blob.{1}', variables('effectiveStorageAccountName'), environment().suffixes.storage), '')]"
     }
   }
 }
