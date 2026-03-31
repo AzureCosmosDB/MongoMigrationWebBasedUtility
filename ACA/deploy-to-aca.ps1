@@ -10,6 +10,9 @@ param(
     
     [Parameter(Mandatory=$false)]
     [string]$AcrName = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrLocation = "",
     
     [Parameter(Mandatory=$false)]
     [string]$StateStoreAppID = "",
@@ -39,6 +42,9 @@ param(
     
     [Parameter(Mandatory=$false)]
     [switch]$UseEntraIdForAzureStorage,
+
+    [Parameter(Mandatory=$false)]
+    [string]$StorageAccountResourceId = "",
 
     [Parameter(Mandatory=$false)]
     [ValidateRange(100, 102400)]
@@ -71,8 +77,21 @@ if ([string]::IsNullOrEmpty($AcrRepository)) {
     Write-Host "Using ContainerAppName as ACR repository: $AcrRepository" -ForegroundColor Cyan
 }
 
-# Generate storage account name if not provided
-if ([string]::IsNullOrEmpty($StorageAccountName)) {
+# Validate StorageAccountResourceId and StorageAccountName are mutually exclusive
+if (-not [string]::IsNullOrEmpty($StorageAccountResourceId) -and $PSBoundParameters.ContainsKey('StorageAccountName')) {
+    Write-Host "`nError: -StorageAccountResourceId and -StorageAccountName cannot be used together" -ForegroundColor Red
+    exit 1
+}
+
+# Handle pre-configured storage account via resource ID, or generate/use name
+if (-not [string]::IsNullOrEmpty($StorageAccountResourceId)) {
+    if (-not $UseEntraIdForAzureStorage) {
+        Write-Host "`nError: -UseEntraIdForAzureStorage is required when using -StorageAccountResourceId (PE-enabled storage requires Blob SDK access, not Azure Files mount)" -ForegroundColor Red
+        exit 1
+    }
+    $StorageAccountName = $StorageAccountResourceId.Split('/')[-1]
+    Write-Host "Using pre-configured storage account: $StorageAccountName (Entra ID + Blob SDK)" -ForegroundColor Cyan
+} elseif ([string]::IsNullOrEmpty($StorageAccountName)) {
     $StorageAccountName = ($ContainerAppName -replace '-', '').ToLower() + 'stor'
     if ($StorageAccountName.Length -gt 24) {
         $StorageAccountName = $StorageAccountName.Substring(0, 24)
@@ -80,7 +99,15 @@ if ([string]::IsNullOrEmpty($StorageAccountName)) {
     Write-Host "Using generated storage account name: $StorageAccountName" -ForegroundColor Cyan
 }
 
+# Resolve AcrLocation - defaults to main Location if not specified
+if ([string]::IsNullOrEmpty($AcrLocation)) {
+    $AcrLocation = $Location
+}
+
 Write-Host "Using location: $Location" -ForegroundColor Cyan
+if ($AcrLocation -ne $Location) {
+    Write-Host "Using ACR location: $AcrLocation (different from main location)" -ForegroundColor Cyan
+}
 if ($UseEntraIdForAzureStorage) {
     Write-Host "Using Entra ID (Managed Identity) for Azure Storage instead of mounted disk" -ForegroundColor Cyan
 }
@@ -96,12 +123,14 @@ $bicepParams = @(
         "containerAppName=$ContainerAppName",
         "acrName=$AcrName",
         "acrRepository=$AcrRepository",
+        "acrLocation=$AcrLocation",
         "location=$Location",
         "storageAccountName=$StorageAccountName",
         "vCores=$VCores",
         "memoryGB=$MemoryGB",
         "ownerTag=$OwnerTag",
         "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())",
+        "storageAccountResourceId=$StorageAccountResourceId",
         "fileShareSizeGB=$FileShareSizeGB"
 )
 
@@ -179,6 +208,7 @@ $finalBicepParams = @(
         "containerAppName=$ContainerAppName",
         "acrName=$AcrName",
         "acrRepository=$AcrRepository",
+        "acrLocation=$AcrLocation",
         "location=$Location",
         "storageAccountName=$StorageAccountName",
         "vCores=$VCores",
@@ -189,6 +219,7 @@ $finalBicepParams = @(
         "imageTag=$ImageTag",
         "ownerTag=$OwnerTag",
         "useEntraIdForStorage=$($UseEntraIdForAzureStorage.ToString().ToLower())",
+        "storageAccountResourceId=$StorageAccountResourceId",
         "fileShareSizeGB=$FileShareSizeGB"
 )
 
