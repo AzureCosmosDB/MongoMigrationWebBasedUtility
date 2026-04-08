@@ -406,6 +406,21 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"CreatePartitionsAsync: mu={mu.DatabaseName}.{mu.CollectionName}");
 
+            bool useServerLevel = MigrationJobContext.CurrentlyActiveJob?.ChangeStreamLevel == ChangeStreamLevel.Server
+                && MigrationJobContext.CurrentlyActiveJob?.JobType != JobType.RUOptimizedCopy
+                && !(MigrationJobContext.CurrentlyActiveJob?.ProcessingSyncBack ?? false);
+
+            if (useServerLevel)
+            {
+                if (!MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn.HasValue)
+                {
+                    MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn = DateTime.UtcNow;
+                    MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                }
+
+                mu.ChangeStreamStartedOn = MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value;
+            }
+
             if (mu.MigrationChunks!=null && mu.MigrationChunks.Count>0)
             {
                 _log.WriteLine($"Partitions already exist for {mu.DatabaseName}.{mu.CollectionName} - Count: {mu.MigrationChunks.Count}", LogType.Debug);
@@ -415,7 +430,9 @@ namespace OnlineMongoMigrationProcessor.Workers
             _log.WriteLine($"No existing partitions found, will create new ones for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
 			List<MigrationChunk>? chunks = null;
 
-            DateTime currrentTime = DateTime.UtcNow;
+            DateTime currrentTime = useServerLevel
+                ? MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn!.Value
+                : DateTime.UtcNow;
             _log.WriteLine($"Current time captured: {currrentTime}, JobType: {MigrationJobContext.CurrentlyActiveJob?.JobType}", LogType.Debug);
             
             try
@@ -663,6 +680,21 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (mu.SourceStatus == CollectionStatus.IsView)
             {
                 _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} is a view - skipping", LogType.Debug);
+                return TaskResult.Success;
+            }
+
+            // Fast-path for collections that are already fully processed.
+            // Avoid expensive source metadata checks for large jobs and queue directly for change stream monitoring.
+            if (mu.DumpComplete && mu.RestoreComplete)
+            {
+                _log.WriteLine($"Bypassing collection validation for completed unit {mu.DatabaseName}.{mu.CollectionName} (DumpComplete=true, RestoreComplete=true)", LogType.Debug);
+
+                if (_migrationProcessor != null && Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
+                {
+                    _migrationProcessor.AddCollectionToChangeStreamQueue(mu);
+                    _log.WriteLine($"Added {mu.DatabaseName}.{mu.CollectionName} to change stream queue via fast-path", LogType.Debug);
+                }
+
                 return TaskResult.Success;
             }
 
@@ -990,6 +1022,19 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (migrationUnit.SourceStatus == CollectionStatus.IsView)
                 return TaskResult.Success;
 
+            // Fast-path: if offline migration already completed for this unit,
+            // skip source/target existence validation and queue directly for online processing.
+            bool offlineCompleted = (migrationUnit.DumpComplete && migrationUnit.RestoreComplete)
+                || (migrationUnit.MigrationChunks != null
+                    && migrationUnit.MigrationChunks.Count > 0
+                    && migrationUnit.MigrationChunks.TrueForAll(c => c.IsDownloaded == true && c.IsUploaded == true));
+
+            if (offlineCompleted && Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
+            {
+                _migrationProcessor?.AddCollectionToChangeStreamQueue(migrationUnit);
+                return TaskResult.Success;
+            }
+
             var (exists, isCollection) = await ValidateSourceCollectionAsync(migrationUnit);
 
             if (!isCollection)
@@ -1302,10 +1347,20 @@ namespace OnlineMongoMigrationProcessor.Workers
                     {
                         bool valid;
 
-                        if (MigrationJobContext.CurrentlyActiveJob.JobType== JobType.RUOptimizedCopy)
+                        // Fast-path for completed offline migration units: skip expensive source existence checks.
+                        // This significantly reduces startup time for jobs with many collections.
+                        if (migrationUnit.DumpComplete && migrationUnit.RestoreComplete)
+                        {
+                            valid = true;
+                        }
+                        else if (MigrationJobContext.CurrentlyActiveJob.JobType== JobType.RUOptimizedCopy)
+                        {
                             valid = await MongoHelper.CheckRUCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
+                        }
                         else
+                        {
                             valid = await MongoHelper.CheckCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
+                        }
 
                         if (valid && MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode == ChangeStreamMode.Immediate)
                         {
@@ -1319,8 +1374,10 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                         if (valid)
                         {
-                            processor.AddCollectionToChangeStreamQueue(migrationUnit);
-                            _log.WriteLine($"Added {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} to change stream queue", LogType.Debug);
+                            if (processor.AddCollectionToChangeStreamQueue(migrationUnit))
+                            {
+                                _log.WriteLine($"Added {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} to change stream queue", LogType.Debug);
+                            }
                             
                         }
                     }

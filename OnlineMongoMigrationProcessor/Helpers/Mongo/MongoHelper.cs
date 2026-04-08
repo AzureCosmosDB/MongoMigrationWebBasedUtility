@@ -727,10 +727,22 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 }
                 catch (Exception ex) when (ex is MongoExecutionTimeoutException || ex is TimeoutException)
                 {
-                    log.WriteLine($"{syncBackPrefix}Timeout when setting change stream resume token for {mu.DatabaseName}.{mu.CollectionName}: {ex}",LogType.Debug);
+                    var scope = useServerLevel
+                        ? "server-level"
+                        : $"{mu?.DatabaseName}.{mu?.CollectionName}";
 
-                    if (resetCS && string.IsNullOrEmpty(resumeToken))
+                    log.WriteLine($"{syncBackPrefix}Timeout when setting change stream resume token for {scope}: {ex}", LogType.Debug);
+
+                    // For normal setup (non-reset flow), do not loop indefinitely on repeated timeouts.
+                    // Server-level change stream processor can re-attempt later.
+                    if (!resetCS)
+                    {
                         skipLoops = true;
+                    }
+                    else if (string.IsNullOrEmpty(resumeToken))
+                    {
+                        skipLoops = true;
+                    }
                 }
                 catch (Exception ex)
                 {

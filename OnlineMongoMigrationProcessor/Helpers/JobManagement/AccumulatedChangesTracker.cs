@@ -192,6 +192,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
                     LatestResumeToken = string.Empty;
                     LatestTimestamp = DateTime.MinValue;
                     LatestDocumentKey = string.Empty;
+                    CSTotalReadDurationInMS = 0;
+                    CSTotaWriteDurationInMS = 0;
                 }
                 return true;
                 
