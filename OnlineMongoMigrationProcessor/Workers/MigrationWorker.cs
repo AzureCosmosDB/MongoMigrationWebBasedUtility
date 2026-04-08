@@ -2106,7 +2106,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             _log.WriteLine($"CreateSegments started - creating segments for {chunkBoundaries.Boundaries.Count} boundaries", LogType.Debug);
             for (int i = 0; i < chunkBoundaries.Boundaries.Count; i++)
             {               
-                var (startId, endId) = GetStartEnd(true, chunkBoundaries.Boundaries[i], chunkBoundaries.Boundaries.Count, i, userFilter);
+                var (startId, endId) = GetStartEnd(true, chunkBoundaries.Boundaries[i], chunkBoundaries.Boundaries.Count, i, userFilter, dataType: dataType);
                 var chunk = new MigrationChunk(startId, endId, dataType, false, false);
                 chunk.Id = migrationChunks.Count.ToString();
                 migrationChunks.Add(chunk);
@@ -2128,7 +2128,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     string chunkStart = chunk.Gte ?? string.Empty;
                     string chunkEnd = chunk.Lt ?? string.Empty;
 
-                    string firstSegmentEnd = boundary.SegmentBoundaries[0].StartId?.ToString() ?? chunkEnd;
+                    string firstSegmentEnd = SerializeBoundaryValue(boundary.SegmentBoundaries[0].StartId, dataType) ?? chunkEnd;
                     chunk.Segments.Add(new Segment
                     {
                         Gte = chunkStart,
@@ -2140,8 +2140,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                     for (int j = 0; j < boundary.SegmentBoundaries.Count; j++)
                     {
                         var segmentBoundary = boundary.SegmentBoundaries[j];
-                        string segmentStartId = segmentBoundary.StartId?.ToString() ?? string.Empty;
-                        string segmentEndId = segmentBoundary.EndId?.ToString() ?? chunkEnd;
+                        string segmentStartId = SerializeBoundaryValue(segmentBoundary.StartId, dataType) ?? string.Empty;
+                        string segmentEndId = SerializeBoundaryValue(segmentBoundary.EndId, dataType) ?? chunkEnd;
 
                         chunk.Segments.Add(new Segment
                         {
@@ -2155,7 +2155,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             _log.WriteLine($"CreateSegments completed - {migrationChunks.Count} total chunks created", LogType.Debug);
         }
-        private Tuple<string, string> GetStartEnd(bool isChunk, Boundary boundary, int totalBoundaries, int currentIndex, string userFilter,string chunkLt = "", string chunkGte = "")
+        private Tuple<string, string> GetStartEnd(bool isChunk, Boundary boundary, int totalBoundaries, int currentIndex, string userFilter, DataType dataType, string chunkLt = "", string chunkGte = "")
         {
             string startId;
             string endId;
@@ -2182,21 +2182,40 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 startId = isChunk ? minId : chunkGte;
 #pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
-                endId = boundary.EndId?.ToString() ?? "";
+                endId = SerializeBoundaryValue(boundary.EndId, dataType) ?? "";
             }
             else if (currentIndex == totalBoundaries - 1)
             {
-                startId = boundary.StartId?.ToString() ?? "";
+                startId = SerializeBoundaryValue(boundary.StartId, dataType) ?? "";
                 endId = isChunk ? "" : chunkLt;
             }
             else
             {
-                startId = boundary.StartId?.ToString() ?? "";
-                endId = boundary.EndId?.ToString() ?? "";
+                startId = SerializeBoundaryValue(boundary.StartId, dataType) ?? "";
+                endId = SerializeBoundaryValue(boundary.EndId, dataType) ?? "";
             }
 
             return Tuple.Create(startId, endId);
         }           
+
+        private static string? SerializeBoundaryValue(BsonValue? value, DataType dataType)
+        {
+            if (value == null)
+                return null;
+
+            if (value.IsBsonNull)
+                return "BsonNull";
+
+            if (value.IsBsonMaxKey)
+                return "BsonMaxKey";
+
+            return dataType switch
+            {
+                DataType.BinData => value.ToJson(),
+                DataType.Object => value.ToJson(),
+                _ => value.ToString()
+            };
+        }
  
     }
 }
