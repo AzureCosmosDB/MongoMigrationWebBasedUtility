@@ -7,6 +7,7 @@ using OnlineMongoMigrationProcessor.Workers;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,6 +43,33 @@ namespace OnlineMongoMigrationProcessor
         protected virtual bool UseResumeTokenCache => true; // Override in server-level processor to return false
         protected ConcurrentDictionary<string, string> _resumeTokenCache = new ConcurrentDictionary<string, string>();
         protected ConcurrentDictionary<string, long> _migrationUnitsToProcess = new ConcurrentDictionary<string, long>();
+
+        // Reverse lookup: "targetDb.targetCollection" -> MigrationUnit ID, for O(1) resolution in change stream hot path
+        protected ConcurrentDictionary<string, string> _targetNamespaceToUnitId = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Negative cache for namespaces not part of current migration units to avoid repeated fallback scans
+        protected ConcurrentDictionary<string, byte> _namespaceMissCache = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+
+        private int GetTrackedNamespaceCount()
+        {
+            // Source IDs are in _migrationUnitsToProcess and target IDs are in _targetNamespaceToUnitId.
+            return Math.Max(1, _migrationUnitsToProcess.Count + _targetNamespaceToUnitId.Count);
+        }
+
+        private bool ShouldUseNamespaceMissCache()
+        {
+            // Use miss cache only when it is not larger than tracked namespaces.
+            return _namespaceMissCache.Count <= GetTrackedNamespaceCount();
+        }
+
+        private void TrimNamespaceMissCacheIfNeeded()
+        {
+            // If miss cache balloons, clear it and fall back to normal hot path lookups.
+            int tracked = GetTrackedNamespaceCount();
+            if (_namespaceMissCache.Count > tracked * 2)
+            {
+                _namespaceMissCache.Clear();
+            }
+        }
 
         // Tracking for aggressive cleanup to prevent duplicate executions
         protected ConcurrentDictionary<string, bool> _aggressiveCleanupProcessed = new ConcurrentDictionary<string, bool>();
@@ -149,9 +177,9 @@ namespace OnlineMongoMigrationProcessor
 
         public bool AddCollectionsToProcess(string migrationUnitId, CancellationTokenSource cts)
         {
-            //no checks on what collections can be added, caller is responsible for that
-
-            var mu = MigrationJobContext.GetMigrationUnit(migrationUnitId);
+            //no checks on what collections can be added, caller is responsible for that                        
+            var mu=MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics.FirstOrDefault(mub => mub.Id == migrationUnitId);
+            //var mu = MigrationJobContext.GetMigrationUnit(migrationUnitId);
             string key = $"{mu.DatabaseName}.{mu.CollectionName}";
 
             _log.WriteLine($"{_syncBackPrefix} AddCollectionsToProcess invoked for {key}", LogType.Debug);
@@ -159,6 +187,16 @@ namespace OnlineMongoMigrationProcessor
             if (!_migrationUnitsToProcess.ContainsKey(mu.Id))
             {
                 _migrationUnitsToProcess.TryAdd(mu.Id, 0);
+
+                // Populate reverse lookup for O(1) target namespace resolution
+                var targetKey = $"{mu.GetEffectiveTargetDatabaseName()}.{mu.GetEffectiveTargetCollectionName()}";
+                _targetNamespaceToUnitId.TryAdd(targetKey, mu.Id);
+
+                // Remove from negative cache if this namespace was previously seen as a miss
+                var sourceKey = $"{mu.DatabaseName}.{mu.CollectionName}";
+                _namespaceMissCache.TryRemove(sourceKey, out _);
+                _namespaceMissCache.TryRemove(targetKey, out _);
+
                 _log.WriteLine($"{_syncBackPrefix}Collection added to change stream queue - Key: {key}, DumpComplete: {mu.DumpComplete}, RestoreComplete: {mu.RestoreComplete}", LogType.Debug);
                 _log.ShowInMonitor($"Change stream processor added {mu.DatabaseName}.{mu.CollectionName} to the monitoring queue.");
                 return true;
@@ -215,6 +253,14 @@ namespace OnlineMongoMigrationProcessor
 
         protected MigrationUnit? ResolveMigrationUnitFromNamespace(string databaseName, string collectionName)
         {
+            var nsKey = $"{databaseName}.{collectionName}";
+            bool useMissCache = ShouldUseNamespaceMissCache();
+
+            if (useMissCache && _namespaceMissCache.ContainsKey(nsKey))
+            {
+                return null;
+            }
+
             var sourceId = Helper.GenerateMigrationUnitId(databaseName, collectionName);
             if (_migrationUnitsToProcess.ContainsKey(sourceId))
             {
@@ -226,6 +272,22 @@ namespace OnlineMongoMigrationProcessor
                 }
             }
 
+            // O(1) reverse lookup by target namespace instead of iterating all MigrationUnitBasics
+            var targetKey = $"{databaseName}.{collectionName}";
+            if (_targetNamespaceToUnitId.TryGetValue(targetKey, out var cachedUnitId))
+            {
+                if (_migrationUnitsToProcess.ContainsKey(cachedUnitId))
+                {
+                    var mu = MigrationJobContext.GetMigrationUnit(cachedUnitId);
+                    if (mu != null)
+                    {
+                        mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
+                        return mu;
+                    }
+                }
+            }
+
+            // Fallback: linear scan for edge cases (e.g., collections added outside AddCollectionsToProcess)
             if (MigrationJobContext.CurrentlyActiveJob?.MigrationUnitBasics == null)
             {
                 return null;
@@ -247,9 +309,23 @@ namespace OnlineMongoMigrationProcessor
                 if (string.Equals(mu.GetEffectiveTargetDatabaseName(), databaseName, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(mu.GetEffectiveTargetCollectionName(), collectionName, StringComparison.OrdinalIgnoreCase))
                 {
+                    // Cache for future lookups
+                    _targetNamespaceToUnitId.TryAdd(targetKey, mu.Id);
+                    _namespaceMissCache.TryRemove(nsKey, out _);
                     mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
                     return mu;
                 }
+            }
+
+            // Cache miss to avoid repeated fallback scans for ignored namespaces.
+            // Only use this optimization when miss cache remains smaller than tracked namespaces.
+            if (useMissCache)
+            {
+                _namespaceMissCache.TryAdd(nsKey, 0);
+            }
+            else
+            {
+                TrimNamespaceMissCacheIfNeeded();
             }
 
             return null;
@@ -294,6 +370,21 @@ namespace OnlineMongoMigrationProcessor
             if (seconds < _processorRunMinDurationInSec)
                 seconds = _processorRunMinDurationInSec; // Ensure at least minimum duration
             return seconds;
+        }
+
+        protected DateTime GetChangeTimestampUtc(ChangeStreamDocument<BsonDocument> change)
+        {
+            if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.ClusterTime != null)
+            {
+                return MongoHelper.BsonTimestampToUtcDateTime(change.ClusterTime);
+            }
+
+            if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.WallTime != null)
+            {
+                return change.WallTime.Value;
+            }
+
+            return DateTime.MinValue;
         }
 
         protected void IncrementFailureCounter(MigrationUnit mu, int incrementBy = 1)
@@ -407,8 +498,6 @@ namespace OnlineMongoMigrationProcessor
                 string jobId = MigrationJobContext.CurrentlyActiveJob.Id ?? string.Empty;
                 bool isSimulatedRun = MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun;
 
-                MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Processing context - Aggressive: {isAggressive}, AggressiveComplete: {isAggressiveComplete}, Simulated: {isSimulatedRun} for {collectionKey}");
-
                 // Use ParallelWriteHelper for improved performance with retry logic
                 var parallelWriteHelper = new ParallelWriteHelper(_log, _syncBackPrefix);
 
@@ -425,8 +514,6 @@ namespace OnlineMongoMigrationProcessor
                     jobId,
                     _targetClient,
                     isSimulatedRun);
-
-                MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}ParallelWriteHelper completed - Success: {result.Success}, TotalFailures: {result.Failures}, WriteLatency: {result.WriteLatencyMS}ms for {collectionKey}");
 
                 // Track write latency directly in AccumulatedChangesTracker
                 accumulatedChangesInColl.CSTotaWriteDurationInMS += result.WriteLatencyMS;
