@@ -118,7 +118,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         {
             FilterDefinition<BsonDocument>? userFilter = GetFilterDoc(mu.UserFilter);
             var filter = userFilter ?? Builders<BsonDocument>.Filter.Empty;
-            return collection.CountDocuments(filter);
+            return collection.CountDocuments(filter, new CountOptions { MaxTime = TimeSpan.FromMinutes(10) });
         }
 
 		/// <summary>
