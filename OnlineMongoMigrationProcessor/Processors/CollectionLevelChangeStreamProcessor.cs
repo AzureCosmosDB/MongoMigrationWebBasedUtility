@@ -1374,18 +1374,7 @@ namespace OnlineMongoMigrationProcessor
                         && !MongoHelper.CheckForUserFilterMatch(change.FullDocument, userFilterDoc))
                         return true;
                 }
-
-
-                DateTime timeStamp = DateTime.MinValue;
-
-                if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.ClusterTime != null)
-                {
-                    timeStamp = MongoHelper.BsonTimestampToUtcDateTime(change.ClusterTime); // Convert BsonTimestamp to DateTime
-                }
-                else if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.WallTime != null) //for 4.0 and above
-                {
-                    timeStamp = change.WallTime.Value; // Use WallTime for 4.0 and above
-                }
+                DateTime timeStamp = GetChangeTimestampUtc(change);
 
 
                 bool shouldUpdateUI = Task.Run(() => ShowInMonitor(change, collNameSpace, timeStamp, accumulatedChangesInColl.TotalEventCount+1)).Result;

@@ -11,12 +11,11 @@ using OnlineMongoMigrationProcessor.Workers;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics.Metrics;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using static OnlineMongoMigrationProcessor.Helpers.Mongo.MongoHelper;
-using static System.Net.Mime.MediaTypeNames;
 
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
 
@@ -28,6 +27,24 @@ namespace OnlineMongoMigrationProcessor
         // Server-level processors use MigrationJob properties directly for global resume tokens
         protected override bool UseResumeTokenCache => false;
         protected OrderedUniqueList<string> _uniqueCollectionKeys;
+        private readonly ConcurrentDictionary<string, BsonDocument> _userFilterCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, IMongoCollection<BsonDocument>> _targetCollectionCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, DateTime> _lastMuPersistUtc = new(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _touchedMuIdsInPreviousRound = new(StringComparer.OrdinalIgnoreCase);
+        private bool _hasTouchedBaseline = false;
+        private bool _namespaceFilterApplied = false;
+
+        private sealed class ServerWatchState
+        {
+            public long Counter { get; set; }
+            public long FlushedCount { get; set; }
+            public string CollectionKey { get; set; } = string.Empty;
+            public string LatestResumeToken { get; set; } = string.Empty;
+            public DateTime LatestTimestamp { get; set; } = DateTime.MinValue;
+            public ChangeStreamOperationType LatestOperationType { get; set; } = ChangeStreamOperationType.Insert;
+            public string LatestDocumentKey { get; set; } = string.Empty;
+            public string LatestCollectionKey { get; set; } = string.Empty;
+        }
 
 
         private bool _monitorAllCollections = false;
@@ -41,11 +58,6 @@ namespace OnlineMongoMigrationProcessor
         protected override async Task ProcessChangeStreamsAsync(CancellationToken token)
         {
             MigrationJobContext.AddVerboseLog("ServerLevelChangeStreamProcessor.ProcessChangeStreamsAsync: starting");
-            long loops = 0;
-            bool oplogSuccess = true;
-
-            bool isVCore = (_syncBack ? MigrationJobContext.CurrentlyActiveJob.TargetEndpoint : MigrationJobContext.CurrentlyActiveJob.SourceEndpoint)
-               .Contains("mongocluster.cosmos.azure.com", StringComparison.OrdinalIgnoreCase);
 
             // RUOptimizedCopy jobs should not use server-level change streams
             if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy)
@@ -55,55 +67,15 @@ namespace OnlineMongoMigrationProcessor
 
             }
 
-            //temp override to monitor all collections.
-            bool found = _migrationUnitsToProcess.TryGetValue("DUMMY.DUMMY", out var dummyMu);
-            if (_migrationUnitsToProcess.Count == 1 && MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && found && dummyMu != null)
-            {
-                _monitorAllCollections = true;
-                _log.WriteLine($"{_syncBackPrefix}Special mode: Starting server-level change stream processing for all collections.", LogType.Warning);
-            }
-            else
-            {
-                _log.WriteLine($"{_syncBackPrefix}Starting server-level change stream processing for {_migrationUnitsToProcess.Count} collection(s).");
-            }
+            ConfigureMonitoringMode();
 
             long loop = 0;
-            DateTime lastResumeTokenCheck = DateTime.MinValue;
             while (!token.IsCancellationRequested && !ExecutionCancelled)
             {
                 try
                 {
                     loop++;
-                    int seconds = GetBatchDurationInSeconds(1.0f); // Use full duration for server-level
-                    var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
-                    CancellationToken cancellationToken = cancellationTokenSource.Token;
-
-                    _log.WriteLine($"{_syncBackPrefix}Processing round {loop} for server - level change stream. Batch Duration {seconds} seconds");
-
-                    string resumeToken = GetResumeToken();
-
-                    if(!string.IsNullOrEmpty(resumeToken))
-                    {
-                        //await Task.Delay(60 * 1000, cancellationToken);
-                        await WatchServerLevelChangeStream(cancellationToken);
-                        SetAllCollectionsCSLastChecked();
-                    }
-                    else
-                    {
-                        _log.WriteLine($"{_syncBackPrefix}No resume token found for server-level change stream. Waiting for 60 seconds before retrying.", LogType.Warning);
-
-                        // Wait for 60 seconds before checking again
-                        
-                        await InitializeResumeTokensAsync(cancellationToken);
-                        await Task.Delay(60 * 1000, cancellationToken);
-                        lastResumeTokenCheck = DateTime.UtcNow;
-                    }
-
-                    //cleanup for aggressive CS mode
-                    if (loops == 1 || loops % 4 == 0)
-                    {
-                        await AggressiveCSCleanupAsync();
-                    }
+                    await ProcessServerLevelRoundAsync(loop);
 
                 }
                 catch (OperationCanceledException)
@@ -115,6 +87,48 @@ namespace OnlineMongoMigrationProcessor
                     _log.WriteLine($"{_syncBackPrefix}Error in server-level change stream processing: {ex}", LogType.Error);
                     // Continue processing on errors
                 }
+            }
+        }
+
+        private void ConfigureMonitoringMode()
+        {
+            bool found = _migrationUnitsToProcess.TryGetValue("DUMMY.DUMMY", out var dummyMu);
+            if (_migrationUnitsToProcess.Count == 1 && MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && found && dummyMu != null)
+            {
+                _monitorAllCollections = true;
+                _log.WriteLine($"{_syncBackPrefix}Special mode: Starting server-level change stream processing for all collections.", LogType.Warning);
+                return;
+            }
+
+            _log.WriteLine($"{_syncBackPrefix}Starting server-level change stream processing for {_migrationUnitsToProcess.Count} collection(s).");
+        }
+
+        private async Task ProcessServerLevelRoundAsync(long loop)
+        {
+            int seconds = GetBatchDurationInSeconds(1.0f); // Use full duration for server-level
+            using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+            CancellationToken cancellationToken = cancellationTokenSource.Token;
+
+            _log.WriteLine($"{_syncBackPrefix}Processing round {loop} for server - level change stream. Batch Duration {seconds} seconds");
+
+            string resumeToken = GetResumeToken();
+
+            if (!string.IsNullOrEmpty(resumeToken))
+            {
+                var touchedMuIdsInRound = await WatchServerLevelChangeStream(cancellationToken);
+                SetTouchedCollectionsCSLastChecked(touchedMuIdsInRound);
+                await ResetCollectionsUntouchedSincePreviousRoundAsync(touchedMuIdsInRound);
+            }
+            else
+            {
+                _log.WriteLine($"{_syncBackPrefix}No resume token found for server-level change stream. Waiting for 60 seconds before retrying.", LogType.Warning);
+                await InitializeResumeTokensAsync(cancellationToken);
+                await Task.Delay(60 * 1000, cancellationToken);
+            }
+
+            if (loop == 1 || loop % 4 == 0)
+            {
+                await AggressiveCSCleanupAsync();
             }
         }
 
@@ -140,29 +154,13 @@ namespace OnlineMongoMigrationProcessor
                 // do nothing
             }
         }
-
-
-        private DateTime GetChangeTime(ChangeStreamDocument<BsonDocument> change)
-        {
-            if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.ClusterTime != null)
-            {
-                return  MongoHelper.BsonTimestampToUtcDateTime(change.ClusterTime);
-            }
-            else if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.WallTime != null)
-            {
-                return change.WallTime.Value;
-            }
-            return DateTime.MinValue;
-        }
-
-        private async Task WatchServerLevelChangeStream(CancellationToken cancellationToken)
+        private async Task<HashSet<string>> WatchServerLevelChangeStream(CancellationToken cancellationToken)
         {
             MigrationJobContext.AddVerboseLog("ServerLevelChangeStreamProcessor.WatchServerLevelChangeStream: starting");
 
-            long counter = 0;            
-            string collectionKey = string.Empty;
-            string latestResumeToken = string.Empty;
-            DateTime latestTimestamp = DateTime.MinValue;
+            var state = new ServerWatchState();
+            var batchCountersInitializedInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var touchedMuIdsInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
@@ -186,6 +184,7 @@ namespace OnlineMongoMigrationProcessor
 
                 // Create pipeline for server-level change stream
                 List<BsonDocument> pipeline = new List<BsonDocument>();
+                _namespaceFilterApplied = BuildServerLevelNamespaceFilterPipeline(pipeline);
 
                 // Set up options - use global resume token from MigrationJob
                 var options = new ChangeStreamOptions
@@ -197,19 +196,7 @@ namespace OnlineMongoMigrationProcessor
 
                 // Get resume information from MigrationJob for server-level streams
 
-                DateTime timeStamp = GetCursorUtcTimestamp();
                 string tokenJson = GetResumeToken();
-                DateTime startedOn = GetChangeStreamStartedOn();
-                string? version = string.Empty;
-
-                if (!_syncBack)
-                {
-                    version = MigrationJobContext.CurrentlyActiveJob.SourceServerVersion;
-                }
-                else
-                {
-                    version = "8"; // hard code for target
-                }
 
                 // Handle initial document replay for server-level streams
                 bool initialReplayCompleted = GetInitialDocumentReplayedStatus();
@@ -225,30 +212,12 @@ namespace OnlineMongoMigrationProcessor
                             _migrationUnitsToProcess[kvp] = 0;
                         }
                         
-                        return;
+                        return touchedMuIdsInRound;
                     }
                     SetInitialDocumentReplayedStatus(true);
                     MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob); ;
                 }
 
-                //if (timeStamp > DateTime.MinValue && resumeToken == null && !(MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy && !MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack)) //skip CursorUtcTimestamp if its reset 
-                //{
-                //    var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(timeStamp.ToLocalTime());
-                //    options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
-                //}
-                //else if (!string.IsNullOrEmpty(resumeToken))  //both version  having resume token
-                //{
-                //    options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter = BsonDocument.Parse(resumeToken), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
-                //}
-                //else if (string.IsNullOrEmpty(resumeToken) && version.StartsWith("3")) //for Mongo 3.6
-                //{
-                //    options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
-                //}
-                //else if (startedOn > DateTime.MinValue && !version.StartsWith("3"))  //newer version
-                //{
-                //    var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp((DateTime)startedOn);
-                //    options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
-                //}
                 var resumeToken = BsonSerializer.Deserialize<BsonDocument>(tokenJson);
 
                 options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter =resumeToken, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
@@ -256,108 +225,17 @@ namespace OnlineMongoMigrationProcessor
                 var pipelineArray = pipeline.ToArray();
 
                 // Watch at client level (server-level)
-                using var cursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cancellationToken);
+                var cursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cancellationToken);
 
-                long changeCount = 0;
-                long ignoreCount = 0;
-
-                if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
+                using (cursor)
                 {
-                    foreach (var change in cursor.ToEnumerable(cancellationToken))
+                    if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
                     {
-                        latestResumeToken=change.ResumeToken.ToJson();
-                        latestTimestamp = GetChangeTime(change);
-                        collectionKey = change.CollectionNamespace.ToString();
-                        if (_monitorAllCollections || TryResolveQueuedMigrationUnit(collectionKey, out _))
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            if (ExecutionCancelled) break;
-
-                            var result = await PreProcessChange(change, counter);
-                            if (!result.success)
-                                break;
-                            counter = result.counter;
-                            changeCount=counter;
-                        }
-                        else
-                        {
-                            ignoreCount++;
-                            ShowInMonitor(change, collectionKey, GetChangeTime(change), changeCount+ ignoreCount, true);
-                        }
-                        if (ExecutionCancelled)
-                            break;
+                        await ProcessLegacyWatchLoopAsync(cursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                     }
-
-                    try
+                    else
                     {
-                        if (changeCount > _config.ChangeStreamMaxDocsInBatch)
-                        {
-                            await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection);
-                            SetJobResumeToken(latestResumeToken, latestTimestamp);
-                            changeCount = 0;
-                        }
-                    }
-                    catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
-                    {
-                        _log.WriteLine($"{_syncBackPrefix}CRITICAL error during BulkProcessAllChangesAsync. Details: {ex}", LogType.Error);
-                        StopJob($"CRITICAL error in BulkProcessAllChangesAsync. Details: {ex}");
-                        throw; // Re-throw to stop processing
-                    }
-
-                }
-                else
-                {
-                    while (cursor.MoveNext(cancellationToken))
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        if (ExecutionCancelled) break;
-
-                        foreach (var change in cursor.Current)
-                        {
-                            latestResumeToken = change.ResumeToken.ToJson();
-                            latestTimestamp = GetChangeTime(change);
-                            collectionKey = change.CollectionNamespace.ToString();
-
-                            if (_monitorAllCollections || TryResolveQueuedMigrationUnit(collectionKey, out _))
-                            {
-                                cancellationToken.ThrowIfCancellationRequested();
-                                if (ExecutionCancelled) break;
-
-                               
-                                var result = await PreProcessChange(change, counter);
-                                if (!result.success)
-                                    break;
-                                counter = result.counter;
-                                changeCount = counter;
-
-
-                            }
-                            else
-                            {
-                                ignoreCount++;
-                                ShowInMonitor(change, collectionKey, GetChangeTime(change), changeCount + ignoreCount, true);
-                            }
-
-                            if (ExecutionCancelled)
-                                break;
-
-                        }
-                        
-                        try
-                        {
-                            if (counter > _config.ChangeStreamMaxDocsInBatch)
-                            {
-                                await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection);
-                                SetJobResumeToken(latestResumeToken, latestTimestamp);
-                                changeCount = 0;
-                            }
-                        }
-                        catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
-                        {
-                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during BulkProcessAllChangesAsync. Details: {ex}", LogType.Error);
-                            StopJob($"CRITICAL error in BulkProcessAllChangesAsync. Details: {ex}");
-                            throw; // Re-throw to stop processing
-                        }
+                        await ProcessModernWatchLoopAsync(cursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                     }
                 }
             }
@@ -377,44 +255,312 @@ namespace OnlineMongoMigrationProcessor
                     
                     if (_accumulatedChangesPerCollection != null)
                     {
-                        try
-                        {
-                            await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection);                            
-                        }
-                        catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
-                        {
-                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error during final BulkProcessAllChangesAsync. Details: {ex}", LogType.Error);
-                            StopJob($"CRITICAL error in final BulkProcessAllChangesAsync. Details: {ex}");
-                            throw; // Re-throw to stop processing
-                        }
+                        await FlushAndCheckpointAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound, true);
                     }
-                    SetJobResumeToken(latestResumeToken, latestTimestamp);
+                    SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey);
 
                 }
                 catch (Exception ex)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Error processing changes in batch for {collectionKey}. Details: {ex}", LogType.Error);
+                    _log.WriteLine($"{_syncBackPrefix}Error processing changes in batch for {state.CollectionKey}. Details: {ex}", LogType.Error);
                 }
             }
+
+            return touchedMuIdsInRound;
         }
 
-        private void SetJobResumeToken(string latestResumeToken, DateTime latestTimestamp)
+        private async Task ProcessLegacyWatchLoopAsync(
+            IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor,
+            CancellationToken cancellationToken,
+            ServerWatchState state,
+            HashSet<string> batchCountersInitializedInRound,
+            HashSet<string> touchedMuIdsInRound)
         {
-            MigrationJobContext.CurrentlyActiveJob.SyncBackOriginalResumeToken = latestResumeToken;
-            MigrationJobContext.CurrentlyActiveJob.SyncBackCursorUtcTimestamp = latestTimestamp;
-            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
-        }
-
-        private void SetAllCollectionsCSLastChecked()
-        {
-            foreach (var mub in MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics)
+            foreach (var change in cursor.ToEnumerable(cancellationToken))
             {
-                var mu = MigrationJobContext.GetMigrationUnit(mub.Id);
-                mu.CSLastChecked = DateTime.UtcNow;
-                MigrationJobContext.SaveMigrationUnit(mu, true);
+                bool shouldContinue = await TryProcessServerChangeAsync(change, cancellationToken, state, readDurationShareMs: 0);
+                if (!shouldContinue)
+                    break;
             }
+
+            await FlushAndCheckpointIfNeededAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound);
+        }
+
+        private async Task ProcessModernWatchLoopAsync(
+            IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor,
+            CancellationToken cancellationToken,
+            ServerWatchState state,
+            HashSet<string> batchCountersInitializedInRound,
+            HashSet<string> touchedMuIdsInRound)
+        {
+            var readStopwatch = Stopwatch.StartNew();
+
+            while (true)
+            {
+                bool hasBatch = await cursor.MoveNextAsync(cancellationToken);
+
+                if (!hasBatch)
+                {
+                    readStopwatch.Stop();
+                    break;
+                }
+
+                readStopwatch.Stop();
+                int currentBatchCount = cursor.Current?.Count() ?? 0;
+                double readDurationShareMs = currentBatchCount > 0
+                    ? (double)readStopwatch.ElapsedMilliseconds / currentBatchCount
+                    : 0;
+
+                cancellationToken.ThrowIfCancellationRequested();
+                if (ExecutionCancelled)
+                    break;
+
+                foreach (var change in cursor.Current)
+                {
+                    bool shouldContinue = await TryProcessServerChangeAsync(change, cancellationToken, state, readDurationShareMs);
+                    if (!shouldContinue)
+                        break;
+                }
+
+                if (ExecutionCancelled)
+                    break;
+
+                readStopwatch.Restart();
+                await FlushAndCheckpointIfNeededAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound);
+            }
+        }
+
+        private async Task<bool> TryProcessServerChangeAsync(
+            ChangeStreamDocument<BsonDocument> change,
+            CancellationToken cancellationToken,
+            ServerWatchState state,
+            double readDurationShareMs)
+        {
+            state.LatestResumeToken = change.ResumeToken.ToJson();
+            state.LatestTimestamp = GetChangeTimestampUtc(change);
+            state.CollectionKey = change.CollectionNamespace.ToString();
+            state.LatestOperationType = change.OperationType;
+            state.LatestDocumentKey = change.DocumentKey?.ToJson() ?? string.Empty;
+            state.LatestCollectionKey = state.CollectionKey;
+
+            if (readDurationShareMs > 0 && TryResolveQueuedMigrationUnit(state.CollectionKey, out var latencyMu) && latencyMu != null)
+            {
+                var latencyKey = $"{latencyMu.DatabaseName}.{latencyMu.CollectionName}";
+                InitializeAccumulatedChangesTracker(latencyKey);
+                _accumulatedChangesPerCollection[latencyKey].CSTotalReadDurationInMS += (long)Math.Round(readDurationShareMs);
+            }
+
+            if (!(_monitorAllCollections || _namespaceFilterApplied || TryResolveQueuedMigrationUnit(state.CollectionKey, out _)))
+                return !ExecutionCancelled;
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ExecutionCancelled)
+                return false;
+
+            var result = await PreProcessChange(change, state.Counter);
+            if (!result.success)
+                return false;
+
+            state.Counter = result.counter;
+            return !ExecutionCancelled;
+        }
+
+        private async Task FlushAndCheckpointIfNeededAsync(
+            ServerWatchState state,
+            HashSet<string> batchCountersInitializedInRound,
+            HashSet<string> touchedMuIdsInRound)
+        {
+            if ((state.Counter - state.FlushedCount) <= _config.ChangeStreamMaxDocsInBatch)
+                return;
+
+            await FlushAndCheckpointAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound, false);
+            state.FlushedCount = state.Counter;
+        }
+
+        private async Task FlushAndCheckpointAsync(
+            ServerWatchState state,
+            HashSet<string> batchCountersInitializedInRound,
+            HashSet<string> touchedMuIdsInRound,
+            bool forcePersist)
+        {
+            try
+            {
+                await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist);
+                SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
+            {
+                _log.WriteLine($"{_syncBackPrefix}CRITICAL error during BulkProcessAllChangesAsync. Details: {ex}", LogType.Error);
+                StopJob($"CRITICAL error in BulkProcessAllChangesAsync. Details: {ex}");
+                throw;
+            }
+        }
+
+        private bool BuildServerLevelNamespaceFilterPipeline(List<BsonDocument> pipeline)
+        {
+            // In monitor-all mode, keep full stream visibility.
+            if (_monitorAllCollections)
+            {
+                return false;
+            }
+
+            var namespacePairs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var orConditions = new BsonArray();
+
+            foreach (var muId in _migrationUnitsToProcess.Keys)
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(muId);
+                if (mu == null)
+                    continue;
+
+                // Server-level forward stream is from source namespaces.
+                var ns = $"{mu.DatabaseName}.{mu.CollectionName}";
+                if (!namespacePairs.Add(ns))
+                    continue;
+
+                orConditions.Add(new BsonDocument
+                {
+                    { "ns.db", mu.DatabaseName },
+                    { "ns.coll", mu.CollectionName }
+                });
+            }
+
+            if (orConditions.Count == 0)
+            {
+                return false;
+            }
+
+            var matchStage = new BsonDocument("$match", new BsonDocument
+            {
+                {
+                    "operationType",
+                    new BsonDocument("$in", new BsonArray { "insert", "update", "replace", "delete" })
+                },
+                { "$or", orConditions }
+            });
+
+            // Protect against MongoDB command document size limits when many namespaces are configured.
+            int matchStageSizeBytes = matchStage.ToBson().Length;
+            const int stageSafetyLimitBytes = 14 * 1024 * 1024;
+
+            if (matchStageSizeBytes > stageSafetyLimitBytes)
+            {
+                _log.WriteLine($"{_syncBackPrefix}Namespace filter too large ({matchStageSizeBytes} bytes for {orConditions.Count} namespaces). Falling back to unfiltered server-level watch.", LogType.Warning);
+                return false;
+            }
+
+            pipeline.Add(matchStage);
+            return true;
+        }
+
+        private bool TryGetMigrationUnitFromSourceNamespace(string databaseName, string collectionName, out MigrationUnit? migrationUnit)
+        {
+            migrationUnit = null;
+            var sourceId = Helper.GenerateMigrationUnitId(databaseName, collectionName);
+            if (!_migrationUnitsToProcess.ContainsKey(sourceId))
+                return false;
+
+            migrationUnit = MigrationJobContext.GetMigrationUnit(sourceId);
+            if (migrationUnit == null)
+                return false;
+
+            migrationUnit.ParentJob = MigrationJobContext.CurrentlyActiveJob;
+            return true;
+        }
+
+        private void SetJobResumeToken(string latestResumeToken, DateTime latestTimestamp, ChangeStreamOperationType latestOperationType, string latestDocumentKey, string latestCollectionKey)
+        {
+            if (string.IsNullOrEmpty(latestResumeToken))
+                return;
+
+            UpdateResumeToken(latestResumeToken, latestOperationType, latestDocumentKey, latestCollectionKey);
+
+            // Server-level UI "Time Since Last Change" reads job.CSLastChecked.
+            // Refresh it on every successful checkpoint so lag display stays current.
             MigrationJobContext.CurrentlyActiveJob.CSLastChecked = DateTime.UtcNow;
+
+            if (!_syncBack)
+                MigrationJobContext.CurrentlyActiveJob.CursorUtcTimestamp = latestTimestamp;
+            else
+                MigrationJobContext.CurrentlyActiveJob.SyncBackCursorUtcTimestamp = latestTimestamp;
+
             MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+        }
+
+        private void SetTouchedCollectionsCSLastChecked(HashSet<string> touchedMuIds)
+        {
+            if (touchedMuIds == null || touchedMuIds.Count == 0)
+                return;
+
+            var now = DateTime.UtcNow;
+            bool anyUpdated = false;
+
+            foreach (var muId in touchedMuIds)
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(muId);
+                if (mu == null)
+                    continue;
+
+                mu.CSLastChecked = now;
+                mu.UpdateParentJob();
+                MigrationJobContext.SaveMigrationUnit(mu, false);
+                anyUpdated = true;
+            }
+
+            if (anyUpdated)
+            {
+                MigrationJobContext.CurrentlyActiveJob.CSLastChecked = now;
+                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+            }
+        }
+
+        private async Task ResetCollectionsUntouchedSincePreviousRoundAsync(HashSet<string> touchedMuIdsInCurrentRound)
+        {
+            touchedMuIdsInCurrentRound ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            List<string> candidatesToReset;
+
+            if (!_hasTouchedBaseline)
+            {
+                // First round bootstrap: previous touched set is empty, so build candidates from all MUs.
+                candidatesToReset = MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics
+                    .Where(mub => !touchedMuIdsInCurrentRound.Contains(mub.Id))
+                    .Select(mub => mub.Id)
+                    .ToList();
+            }
+            else
+            {
+                // Steady state: only consider collections active in previous round but not current round.
+                candidatesToReset = _touchedMuIdsInPreviousRound
+                    .Where(muId => !touchedMuIdsInCurrentRound.Contains(muId))
+                    .ToList();
+            }
+
+            bool anyUpdated = false;
+
+            foreach (var muId in candidatesToReset)
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(muId);
+                if (mu == null)
+                    continue;
+
+                if (mu.CSUpdatesInLastBatch == 0 && mu.CSNormalizedUpdatesInLastBatch == 0)
+                    continue;
+
+                mu.CSUpdatesInLastBatch = 0;
+                mu.CSNormalizedUpdatesInLastBatch = 0;
+                mu.UpdateParentJob();
+                MigrationJobContext.SaveMigrationUnit(mu, false);
+                anyUpdated = true;
+            }
+
+            if (anyUpdated)
+                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+
+            _touchedMuIdsInPreviousRound = new HashSet<string>(touchedMuIdsInCurrentRound, StringComparer.OrdinalIgnoreCase);
+            _hasTouchedBaseline = true;
+
+            await Task.CompletedTask;
         }
 
         private bool TryResolveQueuedMigrationUnit(string collectionKey, out MigrationUnit? migrationUnit)
@@ -429,6 +575,17 @@ namespace OnlineMongoMigrationProcessor
 
             migrationUnit = ResolveMigrationUnitFromNamespace(parts[0], parts[1]);
             return migrationUnit != null;
+        }
+
+        private BsonDocument GetCachedUserFilterDoc(MigrationUnit migrationUnit)
+        {
+            return _userFilterCache.GetOrAdd(migrationUnit.Id, _ => MongoHelper.GetFilterDoc(migrationUnit.UserFilter));
+        }
+
+        private IMongoCollection<BsonDocument> GetCachedTargetCollection(string databaseName, string collectionName)
+        {
+            string collectionKey = $"{databaseName}.{collectionName}";
+            return _targetCollectionCache.GetOrAdd(collectionKey, _ => GetTargetCollection(databaseName, collectionName));
         }
 
         private async Task<(bool success, long counter)> PreProcessChange(ChangeStreamDocument<BsonDocument> change, long counter)
@@ -455,13 +612,24 @@ namespace OnlineMongoMigrationProcessor
                 }
                 else
                 {
-                    if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
+                    if (_namespaceFilterApplied)
+                    {
+                        if (!TryGetMigrationUnitFromSourceNamespace(databaseName, collectionName, out migrationUnit) || migrationUnit == null)
+                        {
+                            // Defensive fallback: if filtered stream still yields an unexpected namespace.
+                            if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
+                            {
+                                return (true, counter);
+                            }
+                        }
+                    }
+                    else if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
                     {
                         return (true, counter); // Skip changes for collections not in our job
                     }
 
                     // Check user filter condition               
-                    var userFilterDoc = MongoHelper.GetFilterDoc(migrationUnit.UserFilter);
+                    var userFilterDoc = GetCachedUserFilterDoc(migrationUnit);
 
                     if (change.OperationType != ChangeStreamOperationType.Delete)
                     {
@@ -472,21 +640,13 @@ namespace OnlineMongoMigrationProcessor
                 }
                 counter++;
 
-                DateTime timeStamp = DateTime.MinValue;
-                if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.ClusterTime != null)
-                {
-                    timeStamp = MongoHelper.BsonTimestampToUtcDateTime(change.ClusterTime);
-                }
-                else if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.WallTime != null)
-                {
-                    timeStamp = change.WallTime.Value;
-                }
+                DateTime timeStamp = GetChangeTimestampUtc(change);
 
-                _ = Task.Run(() => ShowInMonitor(change, collectionKey, timeStamp, counter));
+                ShowInMonitor(change, collectionKey, timeStamp, counter);
 
 
                 // Get target collection
-                IMongoCollection<BsonDocument> targetCollection = GetTargetCollection(databaseName, collectionName);
+                IMongoCollection<BsonDocument> targetCollection = GetCachedTargetCollection(databaseName, collectionName);
 
                 
                 if (_monitorAllCollections)
@@ -500,8 +660,6 @@ namespace OnlineMongoMigrationProcessor
                 InitializeAccumulatedChangesTracker(keyForUI);
                 PreProcessChangeEvent(change, targetCollection, collectionKey, _accumulatedChangesPerCollection[keyForUI], MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun, migrationUnit);
 
-                migrationUnit.CSUpdatesInLastBatch++;
-
                 if (ExecutionCancelled)
                     return (false, counter);
 
@@ -514,72 +672,154 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private async Task BulkProcessAllChangesAsync(Dictionary<string, AccumulatedChangesTracker> accumulatedChangesInColl)
+        private async Task BulkProcessAllChangesAsync(Dictionary<string, AccumulatedChangesTracker> accumulatedChangesInColl, HashSet<string> batchCountersInitializedInRound, HashSet<string> touchedMuIdsInRound, bool forcePersist)
         {
-            MigrationUnit migrationUnit = null;
+            var entriesToProcess = CollectEntriesToProcess(accumulatedChangesInColl);
+
+            if (entriesToProcess.Count == 0)
+            {
+                return;
+            }
+
+            var tasks = CreateBulkWriteTasks(entriesToProcess);
+
+            // Await all parallel writes
+            var results = await Task.WhenAll(tasks);
+
+            ApplyBulkWriteResults(results, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist);
+
+            // Parent job persistence is handled by SetJobResumeToken after each successful flush checkpoint.
+        }
+
+        private List<(string collectionKey, AccumulatedChangesTracker docs, MigrationUnit mu, IMongoCollection<BsonDocument> targetCollection)> CollectEntriesToProcess(Dictionary<string, AccumulatedChangesTracker> accumulatedChangesInColl)
+        {
+            var entriesToProcess = new List<(string collectionKey, AccumulatedChangesTracker docs, MigrationUnit mu, IMongoCollection<BsonDocument> targetCollection)>();
+
             foreach (var kvp in accumulatedChangesInColl)
             {
                 var collectionKey = kvp.Key;
                 var docs = kvp.Value;
                 int totalChanges = docs.DocsToBeInserted.Count + docs.DocsToBeUpdated.Count + docs.DocsToBeDeleted.Count;
 
-                if (totalChanges > 0)
+                if (totalChanges <= 0)
+                    continue;
+
+                if (!TryResolveQueuedMigrationUnit(collectionKey, out var mu) || mu == null)
+                    continue;
+
+                var targetCollection = GetCachedTargetCollection(mu.DatabaseName, mu.CollectionName);
+
+                if (_monitorAllCollections)
                 {
-                    if (TryResolveQueuedMigrationUnit(collectionKey, out var mu) && mu != null)
+                    var muId = Helper.GenerateMigrationUnitId("DUMMY.DUMMY");
+                    mu = MigrationJobContext.GetMigrationUnit(muId);
+                    mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
+                }
+
+                entriesToProcess.Add((collectionKey, docs, mu, targetCollection));
+            }
+
+            return entriesToProcess;
+        }
+
+        private List<Task<(string collectionKey, MigrationUnit mu, AccumulatedChangesTracker docs, bool success)>> CreateBulkWriteTasks(List<(string collectionKey, AccumulatedChangesTracker docs, MigrationUnit mu, IMongoCollection<BsonDocument> targetCollection)> entriesToProcess)
+        {
+            int maxParallelWrites = Math.Clamp(Environment.ProcessorCount, 4, 32);
+            maxParallelWrites = Math.Min(maxParallelWrites, Math.Max(1, entriesToProcess.Count));
+            var semaphore = new SemaphoreSlim(maxParallelWrites, maxParallelWrites);
+            var tasks = new List<Task<(string collectionKey, MigrationUnit mu, AccumulatedChangesTracker docs, bool success)>>();
+
+            foreach (var entry in entriesToProcess)
+            {
+                var (collectionKey, docs, mu, targetCollection) = entry;
+                tasks.Add(Task.Run(async () =>
+                {
+                    await semaphore.WaitAsync();
+                    try
                     {
-                        migrationUnit = mu;
-                        var targetCollection = GetTargetCollection(migrationUnit.DatabaseName, migrationUnit.CollectionName);
-
-                        if (_monitorAllCollections)
-                        {
-                            //since we want the chnages to  be reported to this dummy collection.
-                            var muId = Helper.GenerateMigrationUnitId("DUMMY.DUMMY");
-                            migrationUnit = MigrationJobContext.GetMigrationUnit(muId);
-                            migrationUnit.ParentJob = MigrationJobContext.CurrentlyActiveJob;
-                        }
-
-                        try
-                        {
-                            await BulkProcessChangesAsync(
-                            migrationUnit,
+                        await BulkProcessChangesAsync(
+                            mu,
                             targetCollection,
                             insertEvents: docs.DocsToBeInserted.Values.ToList(),
                             updateEvents: docs.DocsToBeUpdated.Values.ToList(),
                             deleteEvents: docs.DocsToBeDeleted.Values.ToList(),
-                            accumulatedChangesInColl: docs);
-
-                            // Only update resume token AFTER successful batch write
-                            // This ensures we can recover from the last successful checkpoint on failure
-                            if (!string.IsNullOrEmpty(docs.LatestResumeToken))
-                            {
-                                UpdateResumeToken(docs.LatestResumeToken, docs.LatestOperationType, docs.LatestDocumentKey, collectionKey);
-                                if (!_syncBack)
-                                    migrationUnit.CursorUtcTimestamp = docs.LatestTimestamp;
-                                else
-                                    migrationUnit.SyncBackCursorUtcTimestamp = docs.LatestTimestamp;     
-                                
-                                MigrationJobContext.SaveMigrationUnit(migrationUnit,true);
-
-                                MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Checkpoint updated for {collectionKey}: Resume token persisted after successful batch write");
-                            }
-                        }
-                        catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
-                        {
-                            _log.WriteLine($"{_syncBackPrefix}CRITICAL error in BulkProcessAllChangesAsync for {collectionKey}.Details: {ex}", LogType.Error);
-                            StopJob($"CRITICAL error processing {collectionKey}. Details: {ex}");
-                            throw; // Re-throw to stop processing
-                        }
-                        catch (Exception ex)
-                        {
-                            _log.WriteLine($"{_syncBackPrefix}Error processing changes for {collectionKey}. Details: {ex}", LogType.Error);
-                            throw; // Re-throw to ensure error is handled upstream
-                        }
-
+                            accumulatedChangesInColl: docs,
+                            batchSize: 500);
+                        return (collectionKey, mu, docs, success: true);
                     }
-                }
+                    catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
+                    {
+                        _log.WriteLine($"{_syncBackPrefix}CRITICAL error in BulkProcessAllChangesAsync for {collectionKey}.Details: {ex}", LogType.Error);
+                        StopJob($"CRITICAL error processing {collectionKey}. Details: {ex}");
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.WriteLine($"{_syncBackPrefix}Error processing changes for {collectionKey}. Details: {ex}", LogType.Error);
+                        throw;
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }));
             }
 
-            MigrationJobContext.SaveMigrationUnit(migrationUnit,false);
+            return tasks;
+        }
+
+        private void ApplyBulkWriteResults(
+            (string collectionKey, MigrationUnit mu, AccumulatedChangesTracker docs, bool success)[] results,
+            HashSet<string> batchCountersInitializedInRound,
+            HashSet<string> touchedMuIdsInRound,
+            bool forcePersist)
+        {
+            foreach (var (collectionKey, mu, docs, success) in results)
+            {
+                if (success && !string.IsNullOrEmpty(docs.LatestResumeToken))
+                {
+                    var flushedEventCount = docs.TotalEventCount;
+                    touchedMuIdsInRound.Add(mu.Id);
+
+                    UpdateResumeToken(docs.LatestResumeToken, docs.LatestOperationType, docs.LatestDocumentKey, collectionKey);
+                    if (!_syncBack)
+                        mu.CursorUtcTimestamp = docs.LatestTimestamp;
+                    else
+                        mu.SyncBackCursorUtcTimestamp = docs.LatestTimestamp;
+
+                    if (flushedEventCount > 0)
+                    {
+                        mu.CSAvgReadLatencyInMS = Math.Round((double)docs.CSTotalReadDurationInMS / flushedEventCount, 2);
+                        mu.CSAvgWriteLatencyInMS = Math.Round((double)docs.CSTotaWriteDurationInMS / flushedEventCount, 2);
+                    }
+
+                    if (batchCountersInitializedInRound.Add(mu.Id))
+                    {
+                        mu.CSUpdatesInLastBatch = 0;
+                        mu.CSNormalizedUpdatesInLastBatch = 0;
+                    }
+
+                    mu.CSUpdatesInLastBatch += flushedEventCount;
+                    mu.CSNormalizedUpdatesInLastBatch = mu.CSUpdatesInLastBatch;
+                    mu.UpdateParentJob();
+
+                    var now = DateTime.UtcNow;
+                    bool shouldPersistMu = forcePersist
+                        || !_lastMuPersistUtc.TryGetValue(mu.Id, out var lastPersistedUtc)
+                        || (now - lastPersistedUtc).TotalSeconds >= 2;
+
+                    if (shouldPersistMu)
+                    {
+                        MigrationJobContext.SaveMigrationUnit(mu, false);
+                        _lastMuPersistUtc[mu.Id] = now;
+                    }
+                }
+
+                if (success)
+                {
+                    docs.Reset(true);
+                }
+            }
         }
 
         // Server-level equivalent of AutoReplayFirstChangeInResumeToken
@@ -785,33 +1025,6 @@ namespace OnlineMongoMigrationProcessor
         }
 
         #region Server-Level Resume Token Management
-
-        private DateTime GetCursorUtcTimestamp()
-        {
-            if (!_syncBack)
-                return MigrationJobContext.CurrentlyActiveJob.SyncBackCursorUtcTimestamp;
-            else
-                return MigrationJobContext.CurrentlyActiveJob.CursorUtcTimestamp;
-        }
-
-        private DateTime GetChangeStreamStartedOn()
-        {
-            if (!_syncBack)
-            {
-                if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.HasValue)
-                    return MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value;
-                else
-                    return DateTime.MinValue;
-            }
-            else
-            {
-                if (MigrationJobContext.CurrentlyActiveJob.SyncBackChangeStreamStartedOn.HasValue)
-                    return MigrationJobContext.CurrentlyActiveJob.SyncBackChangeStreamStartedOn.Value;
-                else
-                    return DateTime.MinValue;
-
-            }
-        }
 
         private string GetResumeToken()
         {
