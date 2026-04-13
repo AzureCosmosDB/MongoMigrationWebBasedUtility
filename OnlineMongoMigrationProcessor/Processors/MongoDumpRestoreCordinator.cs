@@ -78,6 +78,8 @@ namespace OnlineMongoMigrationProcessor
         private readonly object _workingSetLock = new object();
 
         private const int MaxManifestWorkingSetSize = 200;
+        private const long AbsoluteMaxDocsPerChunk = 25000000;
+        private const long DynamicThresholdMinChunkDocs = 5000000;
         private const int MaxActiveMigrationUnitsWorkingSetSize = 200;
 
         // Coordinated processing infrastructure (shared across all migration units)
@@ -1835,7 +1837,7 @@ namespace OnlineMongoMigrationProcessor
 
 
             // Validate that the split actually reduced the count for the first sub-chunk
-            long maxDocsPerChunk= GetMaxDocsPerChunk(mu);
+            long maxDocsPerChunk = GetEffectiveMaxDocsPerChunk(mu, retryCount);
            
            
             if (retrySuccess && retryCount > maxDocsPerChunk)
@@ -1859,13 +1861,26 @@ namespace OnlineMongoMigrationProcessor
             }
             else
             {
-                // Calculate max docs per chunk: (EstimatedDocCount / ChunkCount) * 3, capped at 25M
-                maxDocsPerChunk = Math.Min((mu.EstimatedDocCount / mu.MigrationChunks.Count) * 3, 25000000);
+                // Dynamic threshold baseline: (EstimatedDocCount / InitialChunkCount) * 3, capped at 25M.
+                // Whether this threshold is applied is decided per chunk by GetEffectiveMaxDocsPerChunk.
+                maxDocsPerChunk = Math.Min((mu.EstimatedDocCount / mu.MigrationChunks.Count) * 3, AbsoluteMaxDocsPerChunk);
+
                 mu.MaxDocsPerChunk = maxDocsPerChunk;
                 MigrationJobContext.SaveMigrationUnit(mu, true);
             }
 
             return maxDocsPerChunk;
+        }
+
+        private long GetEffectiveMaxDocsPerChunk(MigrationUnit mu, long chunkDocCount)
+        {
+            // Apply dynamic threshold only when this chunk itself is > 5M docs.
+            if (chunkDocCount <= DynamicThresholdMinChunkDocs)
+            {
+                return AbsoluteMaxDocsPerChunk;
+            }
+
+            return GetMaxDocsPerChunk(mu);
         }
 
         /// <summary>
@@ -1963,7 +1978,9 @@ namespace OnlineMongoMigrationProcessor
             );
 
             // Handle timeout by splitting chunk if needed
-            long maxDocsPerChunk = GetMaxDocsPerChunk(mu);
+            long maxDocsPerChunk = countSuccess
+                ? GetEffectiveMaxDocsPerChunk(mu, docCount)
+                : AbsoluteMaxDocsPerChunk;
 
             bool countTimedOut = !countSuccess;
             bool chunkTooLarge = countSuccess && docCount > maxDocsPerChunk;
@@ -2386,12 +2403,14 @@ namespace OnlineMongoMigrationProcessor
 
         private string GetMongoToolPath(string toolName)
         {
-            if (toolName.Equals("mongodump", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoDumpToolPath))
+            bool canUseConfiguredToolPath = Helper.IsWindows();
+
+            if (canUseConfiguredToolPath && toolName.Equals("mongodump", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoDumpToolPath))
             {
                 return _mongoDumpToolPath;
             }
 
-            if (toolName.Equals("mongorestore", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoRestoreToolPath))
+            if (canUseConfiguredToolPath && toolName.Equals("mongorestore", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoRestoreToolPath))
             {
                 return _mongoRestoreToolPath;
             }
