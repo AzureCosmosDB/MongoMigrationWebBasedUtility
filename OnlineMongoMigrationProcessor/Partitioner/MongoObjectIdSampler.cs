@@ -22,6 +22,8 @@ namespace OnlineMongoMigrationProcessor.Partitioner
     {
         private readonly IMongoCollection<BsonDocument> _collection;
         private readonly int _timeoutSeconds;
+        private const int AbsoluteMaxRecordsPerRange = 25000000;
+        private const long DynamicThresholdMinDocs = 5000000;
 
         public MongoObjectIdSampler(IMongoCollection<BsonDocument> collection, int timeoutSeconds = 60000)
         {
@@ -112,6 +114,18 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             return splitBoundaries;
         }
 
+        private int GetEffectiveMaxRecordsPerRange(long totalDocs, int initialChunkCount)
+        {
+            if (totalDocs <= DynamicThresholdMinDocs)
+            {
+                return AbsoluteMaxRecordsPerRange;
+            }
+
+            int safeChunkCount = Math.Max(1, initialChunkCount);
+            long dynamicMax = Math.Min((totalDocs / safeChunkCount) * 3, AbsoluteMaxRecordsPerRange);
+            return (int)Math.Max(1, dynamicMax);
+        }
+
         /// <summary>
         /// Generates time-based equidistant ObjectIds, then validates and adjusts ranges to ensure 
         /// each range has 1K-1M records. Returns empty list if total records < 1K.
@@ -120,8 +134,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
         {
             MigrationJobContext.AddVerboseLog($"MongoObjectIdSampler.GenerateEquidistantObjectIdsAsync: count={count}, ObjectIdPartitioner={settings.ObjectIdPartitioner}, collectionTotalDocCount={collectionTotalDocCount}");
             const int MIN_RECORDS_PER_RANGE = 1000;
-            // Calculate max records per range: min of (CollectionTotalDocCount / 5) and 25M
-            int MAX_RECORDS_PER_RANGE = (int)Math.Min(collectionTotalDocCount / 5, 25000000);
+            int maxRecordsPerRangeForFallback = GetEffectiveMaxRecordsPerRange(collectionTotalDocCount, count);
 
             // Try to get total count with retry logic
             var (totalCount, countTimedOut) = await TryGetCountWithRetryAsync(filter);
@@ -129,7 +142,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             // If count timed out, fall back to splitting based on ObjectId range
             if (countTimedOut)
             {
-                return await GenerateBoundariesFromObjectIdRangeAsync(count, filter, MAX_RECORDS_PER_RANGE);
+                return await GenerateBoundariesFromObjectIdRangeAsync(count, filter, maxRecordsPerRangeForFallback);
             }
 
             // Create a cancellation token for the remaining operations
@@ -140,6 +153,8 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             {
                 return new List<BsonValue>();
             }
+
+            int maxRecordsPerRange = GetEffectiveMaxRecordsPerRange(totalCount, count);
 
             // Use pagination to directly sample ObjectIds at regular intervals
             if (settings.ObjectIdPartitioner == PartitionerType.UsePagination)
@@ -159,7 +174,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
             if (settings.ObjectIdPartitioner == PartitionerType.UseAdjustedTimeBoundaries)
             {
                 // Validate and adjust ranges based on actual record counts
-                var adjusted = await ValidateAndAdjustRanges(timeBased, filter, totalCount, MIN_RECORDS_PER_RANGE, MAX_RECORDS_PER_RANGE, operationCts.Token);
+                var adjusted = await ValidateAndAdjustRanges(timeBased, filter, totalCount, MIN_RECORDS_PER_RANGE, maxRecordsPerRange, operationCts.Token);
                 return adjusted;
             }
             else

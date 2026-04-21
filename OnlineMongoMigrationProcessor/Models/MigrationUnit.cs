@@ -217,6 +217,7 @@ namespace OnlineMongoMigrationProcessor
             mub.CSUpdatesInLastBatch = this.CSUpdatesInLastBatch;
             mub.CSAvgReadLatencyInMS = this.CSAvgReadLatencyInMS;
             mub.CSAvgWriteLatencyInMS = this.CSAvgWriteLatencyInMS;
+            mub.CSLastChecked = this.CSLastChecked;
             mub.CursorUtcTimestamp = this.CursorUtcTimestamp;
             mub.SyncBackCursorUtcTimestamp = this.SyncBackCursorUtcTimestamp;
             mub.DumpPercent = this.DumpPercent;

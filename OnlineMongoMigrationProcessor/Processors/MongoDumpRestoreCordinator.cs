@@ -78,6 +78,8 @@ namespace OnlineMongoMigrationProcessor
         private readonly object _workingSetLock = new object();
 
         private const int MaxManifestWorkingSetSize = 200;
+        private const long AbsoluteMaxDocsPerChunk = 25000000;
+        private const long DynamicThresholdMinChunkDocs = 5000000;
         private const int MaxActiveMigrationUnitsWorkingSetSize = 200;
 
         // Coordinated processing infrastructure (shared across all migration units)
@@ -103,6 +105,10 @@ namespace OnlineMongoMigrationProcessor
         private PendingTasksCompletedHandler? _onPendingTasksCompleted;
 
         private bool _processNewTasks = true;
+
+        // Cached duplicate settings (read once at Initialize)
+        private bool _ignoreDuplicatesAndContinueRestore = false;
+        private TimeSpan _continuousDuplicateThreshold = TimeSpan.FromMinutes(5);
 
         private DateTime _downLoadPausedTill = DateTime.MinValue;
         private DateTime _lastDiskSpaceCheckedAtUtc = DateTime.MinValue;
@@ -439,6 +445,22 @@ namespace OnlineMongoMigrationProcessor
                     _processTimer.AutoReset = true;
 
                     _coordinatorInitialized = true;
+
+                    // Cache duplicate settings once
+                    try
+                    {
+                        var dupSettings = new MigrationSettings();
+                        dupSettings.Load();
+                        _ignoreDuplicatesAndContinueRestore = dupSettings.IgnoreDuplicatesAndContinueRestore;
+                        _continuousDuplicateThreshold = dupSettings.ContinuousDuplicateThresholdInSeconds > 0
+                            ? TimeSpan.FromSeconds(dupSettings.ContinuousDuplicateThresholdInSeconds)
+                            : TimeSpan.FromMinutes(5);
+                    }
+                    catch
+                    {
+                        _ignoreDuplicatesAndContinueRestore = false;
+                        _continuousDuplicateThreshold = TimeSpan.FromMinutes(5);
+                    }
 
                     // Reset any previously skipped collections to allow retry on job start/resume
                     ResetSkippedCollectionFlags();
@@ -1507,6 +1529,8 @@ namespace OnlineMongoMigrationProcessor
                 args,
                 dumpFilePath,
                 _processCts?.Token ?? CancellationToken.None,
+                _ignoreDuplicatesAndContinueRestore,
+                _continuousDuplicateThreshold,
                 onProcessStarted: pid => MigrationJobContext.ActiveDumpProcessIds.Add(pid),
                 onProcessEnded: pid => MigrationJobContext.ActiveDumpProcessIds.Remove(pid)
             ), _processCts?.Token ?? CancellationToken.None);
@@ -1813,7 +1837,7 @@ namespace OnlineMongoMigrationProcessor
 
 
             // Validate that the split actually reduced the count for the first sub-chunk
-            long maxDocsPerChunk= GetMaxDocsPerChunk(mu);
+            long maxDocsPerChunk = GetEffectiveMaxDocsPerChunk(mu, retryCount);
            
            
             if (retrySuccess && retryCount > maxDocsPerChunk)
@@ -1837,13 +1861,26 @@ namespace OnlineMongoMigrationProcessor
             }
             else
             {
-                // Calculate max docs per chunk: (EstimatedDocCount / ChunkCount) * 3, capped at 25M
-                maxDocsPerChunk = Math.Min((mu.EstimatedDocCount / mu.MigrationChunks.Count) * 3, 25000000);
+                // Dynamic threshold baseline: (EstimatedDocCount / InitialChunkCount) * 3, capped at 25M.
+                // Whether this threshold is applied is decided per chunk by GetEffectiveMaxDocsPerChunk.
+                maxDocsPerChunk = Math.Min((mu.EstimatedDocCount / mu.MigrationChunks.Count) * 3, AbsoluteMaxDocsPerChunk);
+
                 mu.MaxDocsPerChunk = maxDocsPerChunk;
                 MigrationJobContext.SaveMigrationUnit(mu, true);
             }
 
             return maxDocsPerChunk;
+        }
+
+        private long GetEffectiveMaxDocsPerChunk(MigrationUnit mu, long chunkDocCount)
+        {
+            // Apply dynamic threshold only when this chunk itself is > 5M docs.
+            if (chunkDocCount <= DynamicThresholdMinChunkDocs)
+            {
+                return AbsoluteMaxDocsPerChunk;
+            }
+
+            return GetMaxDocsPerChunk(mu);
         }
 
         /// <summary>
@@ -1941,7 +1978,9 @@ namespace OnlineMongoMigrationProcessor
             );
 
             // Handle timeout by splitting chunk if needed
-            long maxDocsPerChunk = GetMaxDocsPerChunk(mu);
+            long maxDocsPerChunk = countSuccess
+                ? GetEffectiveMaxDocsPerChunk(mu, docCount)
+                : AbsoluteMaxDocsPerChunk;
 
             bool countTimedOut = !countSuccess;
             bool chunkTooLarge = countSuccess && docCount > maxDocsPerChunk;
@@ -2353,6 +2392,8 @@ namespace OnlineMongoMigrationProcessor
                 args,
                 dumpFilePath,
                 _processCts?.Token ?? CancellationToken.None,
+                _ignoreDuplicatesAndContinueRestore,
+                _continuousDuplicateThreshold,
                 onProcessStarted: pid => MigrationJobContext.ActiveRestoreProcessIds.Add(pid),
                 onProcessEnded: pid => MigrationJobContext.ActiveRestoreProcessIds.Remove(pid)
             ), _processCts?.Token ?? CancellationToken.None);
@@ -2362,12 +2403,14 @@ namespace OnlineMongoMigrationProcessor
 
         private string GetMongoToolPath(string toolName)
         {
-            if (toolName.Equals("mongodump", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoDumpToolPath))
+            bool canUseConfiguredToolPath = Helper.IsWindows();
+
+            if (canUseConfiguredToolPath && toolName.Equals("mongodump", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoDumpToolPath))
             {
                 return _mongoDumpToolPath;
             }
 
-            if (toolName.Equals("mongorestore", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoRestoreToolPath))
+            if (canUseConfiguredToolPath && toolName.Equals("mongorestore", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(_mongoRestoreToolPath))
             {
                 return _mongoRestoreToolPath;
             }

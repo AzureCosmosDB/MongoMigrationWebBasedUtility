@@ -286,7 +286,12 @@ class SchemaMigration:
 
         for source_index_name, source_index_info in source_indexes.items():
             self._print_verbose(f"  Processing index: {source_index_name}")
-            index_keys = source_index_info['key']
+            # Normalize direction values: Atlas may store index directions as BSON double (1.0).
+            # PyMongo create_index expects int/str direction values.
+            index_keys = [
+                (field, int(direction) if isinstance(direction, float) else direction)
+                for field, direction in source_index_info['key']
+            ]
             index_options = {k: v for k, v in source_index_info.items() if k not in ['key', 'v']}
             index_options['name'] = source_index_name
             index_list.append((index_keys, index_options))

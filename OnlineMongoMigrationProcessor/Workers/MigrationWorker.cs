@@ -258,6 +258,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (string.IsNullOrWhiteSpace(MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]))
                 return TaskResult.FailedAfterRetries;
 
+            
+
             _sourceClient = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], false, _config.CACertContentsForSourceServer ?? string.Empty);
             _log.WriteLine($"Source client initialized,  JobType: {MigrationJobContext.CurrentlyActiveJob.JobType}, IsSimulated: {MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun}");
             if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
@@ -285,7 +287,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                     }
                 }
             }
-
+            if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.DumpAndRestore)
+            {
+                _log.WriteLine($"IgnoreDuplicatesAndContinueRestore={_config.IgnoreDuplicatesAndContinueRestore}", LogType.Info);
+            }
             _log.WriteLine("Verifying source server connectivity...", LogType.Debug);
             try
             {
@@ -401,6 +406,21 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"CreatePartitionsAsync: mu={mu.DatabaseName}.{mu.CollectionName}");
 
+            bool useServerLevel = MigrationJobContext.CurrentlyActiveJob?.ChangeStreamLevel == ChangeStreamLevel.Server
+                && MigrationJobContext.CurrentlyActiveJob?.JobType != JobType.RUOptimizedCopy
+                && !(MigrationJobContext.CurrentlyActiveJob?.ProcessingSyncBack ?? false);
+
+            if (useServerLevel)
+            {
+                if (!MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn.HasValue)
+                {
+                    MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn = DateTime.UtcNow;
+                    MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                }
+
+                mu.ChangeStreamStartedOn = MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value;
+            }
+
             if (mu.MigrationChunks!=null && mu.MigrationChunks.Count>0)
             {
                 _log.WriteLine($"Partitions already exist for {mu.DatabaseName}.{mu.CollectionName} - Count: {mu.MigrationChunks.Count}", LogType.Debug);
@@ -410,7 +430,9 @@ namespace OnlineMongoMigrationProcessor.Workers
             _log.WriteLine($"No existing partitions found, will create new ones for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
 			List<MigrationChunk>? chunks = null;
 
-            DateTime currrentTime = DateTime.UtcNow;
+            DateTime currrentTime = useServerLevel
+                ? MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn!.Value
+                : DateTime.UtcNow;
             _log.WriteLine($"Current time captured: {currrentTime}, JobType: {MigrationJobContext.CurrentlyActiveJob?.JobType}", LogType.Debug);
             
             try
@@ -543,7 +565,7 @@ namespace OnlineMongoMigrationProcessor.Workers
         private async Task<TaskResult> PreparePartitionsAsync(CancellationToken _cts, bool skipPartitioning)
         {
             _log.WriteLine($"PreparePartitionsAsync started - SkipPartitioning: {skipPartitioning}", LogType.Debug);
-            
+
             var validationResult = ValidateAndInitialize();
             if (!validationResult.IsValid)
             {
@@ -658,6 +680,21 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (mu.SourceStatus == CollectionStatus.IsView)
             {
                 _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} is a view - skipping", LogType.Debug);
+                return TaskResult.Success;
+            }
+
+            // Fast-path for collections that are already fully processed.
+            // Avoid expensive source metadata checks for large jobs and queue directly for change stream monitoring.
+            if (mu.DumpComplete && mu.RestoreComplete)
+            {
+                _log.WriteLine($"Bypassing collection validation for completed unit {mu.DatabaseName}.{mu.CollectionName} (DumpComplete=true, RestoreComplete=true)", LogType.Debug);
+
+                if (_migrationProcessor != null && Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
+                {
+                    _migrationProcessor.AddCollectionToChangeStreamQueue(mu);
+                    _log.WriteLine($"Added {mu.DatabaseName}.{mu.CollectionName} to change stream queue via fast-path", LogType.Debug);
+                }
+
                 return TaskResult.Success;
             }
 
@@ -985,6 +1022,19 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (migrationUnit.SourceStatus == CollectionStatus.IsView)
                 return TaskResult.Success;
 
+            // Fast-path: if offline migration already completed for this unit,
+            // skip source/target existence validation and queue directly for online processing.
+            bool offlineCompleted = (migrationUnit.DumpComplete && migrationUnit.RestoreComplete)
+                || (migrationUnit.MigrationChunks != null
+                    && migrationUnit.MigrationChunks.Count > 0
+                    && migrationUnit.MigrationChunks.TrueForAll(c => c.IsDownloaded == true && c.IsUploaded == true));
+
+            if (offlineCompleted && Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
+            {
+                _migrationProcessor?.AddCollectionToChangeStreamQueue(migrationUnit);
+                return TaskResult.Success;
+            }
+
             var (exists, isCollection) = await ValidateSourceCollectionAsync(migrationUnit);
 
             if (!isCollection)
@@ -1297,10 +1347,20 @@ namespace OnlineMongoMigrationProcessor.Workers
                     {
                         bool valid;
 
-                        if (MigrationJobContext.CurrentlyActiveJob.JobType== JobType.RUOptimizedCopy)
+                        // Fast-path for completed offline migration units: skip expensive source existence checks.
+                        // This significantly reduces startup time for jobs with many collections.
+                        if (migrationUnit.DumpComplete && migrationUnit.RestoreComplete)
+                        {
+                            valid = true;
+                        }
+                        else if (MigrationJobContext.CurrentlyActiveJob.JobType== JobType.RUOptimizedCopy)
+                        {
                             valid = await MongoHelper.CheckRUCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
+                        }
                         else
+                        {
                             valid = await MongoHelper.CheckCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
+                        }
 
                         if (valid && MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode == ChangeStreamMode.Immediate)
                         {
@@ -1314,8 +1374,10 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                         if (valid)
                         {
-                            processor.AddCollectionToChangeStreamQueue(migrationUnit);
-                            _log.WriteLine($"Added {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} to change stream queue", LogType.Debug);
+                            if (processor.AddCollectionToChangeStreamQueue(migrationUnit))
+                            {
+                                _log.WriteLine($"Added {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} to change stream queue", LogType.Debug);
+                            }
                             
                         }
                     }
@@ -2044,7 +2106,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             _log.WriteLine($"CreateSegments started - creating segments for {chunkBoundaries.Boundaries.Count} boundaries", LogType.Debug);
             for (int i = 0; i < chunkBoundaries.Boundaries.Count; i++)
             {               
-                var (startId, endId) = GetStartEnd(true, chunkBoundaries.Boundaries[i], chunkBoundaries.Boundaries.Count, i, userFilter);
+                var (startId, endId) = GetStartEnd(true, chunkBoundaries.Boundaries[i], chunkBoundaries.Boundaries.Count, i, userFilter, dataType: dataType);
                 var chunk = new MigrationChunk(startId, endId, dataType, false, false);
                 chunk.Id = migrationChunks.Count.ToString();
                 migrationChunks.Add(chunk);
@@ -2066,7 +2128,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     string chunkStart = chunk.Gte ?? string.Empty;
                     string chunkEnd = chunk.Lt ?? string.Empty;
 
-                    string firstSegmentEnd = boundary.SegmentBoundaries[0].StartId?.ToString() ?? chunkEnd;
+                    string firstSegmentEnd = SerializeBoundaryValue(boundary.SegmentBoundaries[0].StartId, dataType) ?? chunkEnd;
                     chunk.Segments.Add(new Segment
                     {
                         Gte = chunkStart,
@@ -2078,8 +2140,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                     for (int j = 0; j < boundary.SegmentBoundaries.Count; j++)
                     {
                         var segmentBoundary = boundary.SegmentBoundaries[j];
-                        string segmentStartId = segmentBoundary.StartId?.ToString() ?? string.Empty;
-                        string segmentEndId = segmentBoundary.EndId?.ToString() ?? chunkEnd;
+                        string segmentStartId = SerializeBoundaryValue(segmentBoundary.StartId, dataType) ?? string.Empty;
+                        string segmentEndId = SerializeBoundaryValue(segmentBoundary.EndId, dataType) ?? chunkEnd;
 
                         chunk.Segments.Add(new Segment
                         {
@@ -2093,7 +2155,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             _log.WriteLine($"CreateSegments completed - {migrationChunks.Count} total chunks created", LogType.Debug);
         }
-        private Tuple<string, string> GetStartEnd(bool isChunk, Boundary boundary, int totalBoundaries, int currentIndex, string userFilter,string chunkLt = "", string chunkGte = "")
+        private Tuple<string, string> GetStartEnd(bool isChunk, Boundary boundary, int totalBoundaries, int currentIndex, string userFilter, DataType dataType, string chunkLt = "", string chunkGte = "")
         {
             string startId;
             string endId;
@@ -2120,21 +2182,40 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 startId = isChunk ? minId : chunkGte;
 #pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
-                endId = boundary.EndId?.ToString() ?? "";
+                endId = SerializeBoundaryValue(boundary.EndId, dataType) ?? "";
             }
             else if (currentIndex == totalBoundaries - 1)
             {
-                startId = boundary.StartId?.ToString() ?? "";
+                startId = SerializeBoundaryValue(boundary.StartId, dataType) ?? "";
                 endId = isChunk ? "" : chunkLt;
             }
             else
             {
-                startId = boundary.StartId?.ToString() ?? "";
-                endId = boundary.EndId?.ToString() ?? "";
+                startId = SerializeBoundaryValue(boundary.StartId, dataType) ?? "";
+                endId = SerializeBoundaryValue(boundary.EndId, dataType) ?? "";
             }
 
             return Tuple.Create(startId, endId);
         }           
+
+        private static string? SerializeBoundaryValue(BsonValue? value, DataType dataType)
+        {
+            if (value == null)
+                return null;
+
+            if (value.IsBsonNull)
+                return "BsonNull";
+
+            if (value.IsBsonMaxKey)
+                return "BsonMaxKey";
+
+            return dataType switch
+            {
+                DataType.BinData => value.ToJson(),
+                DataType.Object => value.ToJson(),
+                _ => value.ToString()
+            };
+        }
  
     }
 }

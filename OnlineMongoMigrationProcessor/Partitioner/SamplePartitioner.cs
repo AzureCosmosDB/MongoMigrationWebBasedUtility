@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Numerics;
+using System.Text.RegularExpressions;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml.Linq;
@@ -429,7 +430,9 @@ namespace OnlineMongoMigrationProcessor
                     var doc = rawCollection
                         .Find(rangeFilter)
                         .Sort(Builders<RawBsonDocument>.Sort.Ascending("_id"))
-                        .Project(Builders<RawBsonDocument>.Projection.Include("_id"))
+                        // Keep projection typed as RawBsonDocument to avoid BsonDocument deserialization
+                        // for malformed legacy UUID-like BinData payloads.
+                        .Project<RawBsonDocument>(Builders<RawBsonDocument>.Projection.Include("_id"))
                         .Skip(skipCount)
                         .Limit(1)
                         .FirstOrDefault();
@@ -450,6 +453,15 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (Exception ex)
                 {
+                    // Some sources contain legacy UUID subtype payloads with non-standard byte lengths.
+                    // When this appears while reading the next pagination probe document, stop probing
+                    // and continue with the boundaries already collected instead of spamming retries.
+                    if (dataType == DataType.BinData && IsMalformedLegacyUuidLengthError(ex))
+                    {
+                        log.WriteLine($"Stopping BinData pagination probe at attempt {partitionIndex} due to malformed legacy UUID binary length. Continuing with collected boundaries.", LogType.Warning);
+                        break;
+                    }
+
                     log.WriteLine($"Encountered error in attempt {partitionIndex} while paginating data where _id is {dataType}: {ex}");
                 }
             }
@@ -489,6 +501,13 @@ namespace OnlineMongoMigrationProcessor
             }
 
             return chunkBoundaries;
+        }
+
+        private static bool IsMalformedLegacyUuidLengthError(Exception ex)
+        {
+            var message = ex.ToString();
+            return message.IndexOf("UuidLegacy", StringComparison.OrdinalIgnoreCase) >= 0
+                && message.IndexOf("Length must be 16", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static ChunkBoundaries? GetChunkBoundariesForObjectId(Log log, IMongoCollection<BsonDocument> collection, bool optimizeForMongoDump, int sampleCount, int segmentCount, BsonDocument userFilter, MigrationSettings config, long collectionTotalDocCount)
@@ -709,6 +728,10 @@ namespace OnlineMongoMigrationProcessor
                     break;
 
                 case DataType.BinData:
+                    gte ??= ParseBinaryBound(gteString);
+                    lt ??= ParseBinaryBound(ltString);
+                    break;
+
                 case DataType.Other:
                     // For these, we treat it as a special case with no specific bounds
                     gte ??= BsonNull.Value;
@@ -719,6 +742,33 @@ namespace OnlineMongoMigrationProcessor
             }
 
             return (gte, lt);
+        }
+
+        private static BsonBinaryData ParseBinaryBound(string boundValue)
+        {
+            if (string.IsNullOrWhiteSpace(boundValue))
+                throw new ArgumentException("Binary bound value is empty.");
+
+            // Extended JSON path, e.g. {"$binary":{"base64":"...","subType":"03"}}
+            try
+            {
+                var parsed = BsonDocument.Parse($"{{\"v\":{boundValue}}}")["v"];
+                if (parsed.IsBsonBinaryData)
+                    return parsed.AsBsonBinaryData;
+            }
+            catch
+            {
+                // Fallback to shell BinData syntax parser below.
+            }
+
+            // Mongo shell style fallback, e.g. BinData(3, "base64...")
+            var match = Regex.Match(boundValue, @"^BinData\((\d+),\s*""?(.*?)""?\)$", RegexOptions.CultureInvariant);
+            if (!match.Success)
+                throw new ArgumentException($"Unsupported BinData boundary format: {boundValue}");
+
+            byte subType = byte.Parse(match.Groups[1].Value);
+            string base64 = match.Groups[2].Value;
+            return new BsonBinaryData(Convert.FromBase64String(base64), (BsonBinarySubType)subType);
         }
 
         /// <summary>

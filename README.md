@@ -359,6 +359,12 @@ These settings are persisted per app instance and affect all jobs:
       - **Use Pagination**: Pagination-based boundaries for equal-sized chunks (deterministic)
     - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for detailed explanations.
 
+- Ignore duplicates during Restore
+    - When enabled, MongoRestore continues past the duplicate-key threshold instead of stopping the chunk and queuing duplicate cleanup. This avoids costly per-document cleanup retries but means duplicate documents are silently skipped. Only applies to Dump and Restore jobs.
+
+- Continuous Duplicate Threshold (seconds)
+    - Default: 300 (5 minutes). The number of seconds of uninterrupted duplicate-key violations before the restore is stopped for a chunk. Sporadic duplicates interspersed with successful inserts do not count — only a continuous stream of duplicates triggers the threshold. Only applies to Dump and Restore jobs.
+
 - CA certificate file for source server (.pem)
     - Paste/upload the PEM (CA chain) if your source requires a custom CA to establish TLS.
 

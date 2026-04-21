@@ -1,4 +1,5 @@
 ﻿@using OnlineMongoMigrationProcessor
+@using OnlineMongoMigrationProcessor.Models
 
 <div class="modal fade show d-block bg-dark bg-opacity-75" id="myModal" aria-modal="true" role="dialog">
     <div class="modal-dialog bg-dark modal-xl">
@@ -73,7 +74,7 @@
                                     @if (MigrationJob != null && Helper.IsOnline(MigrationJob))
                                     {
                                         <div><span class="lbl">Mode:</span> @Helper.GetChangeStreamMode(MigrationJob)</div>
-                                        <div><span class="lbl">Started On (UTC):</span> @(MigrationUnit.ChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">Started On (UTC):</span> @GetChangeStreamStartedOnForDisplay(MigrationUnit, MigrationJob)</div>
                                         <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.OriginalResumeToken ?? "N/A")</div>
                                         <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.CursorUtcTimestamp</div>
                                         <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.ResumeToken ?? "N/A")</div>
@@ -185,6 +186,13 @@
     }
 
     private static string FormatLong(long value) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:N0}", value);
+
+    private static string GetChangeStreamStartedOnForDisplay(MigrationUnit migrationUnit, MigrationJob migrationJob)
+    {
+        var isServerLevel = migrationJob.ChangeStreamLevel == ChangeStreamLevel.Server;
+        var startedOn = isServerLevel ? migrationJob.ChangeStreamStartedOn : migrationUnit.ChangeStreamStartedOn;
+        return startedOn?.ToString() ?? "N/A";
+    }
 
     private void Cancel()
     {
