@@ -798,6 +798,9 @@ namespace OnlineMongoMigrationProcessor
             accumulatedChangesInColl.CSTotaWriteDurationInMS = 0;
             accumulatedChangesInColl.Reset();
 
+
+            string currentPos= mu.ResumeToken ;
+
             // creating the watch cursor
             System.Diagnostics.Stopwatch readStopwatch = new System.Diagnostics.Stopwatch();
 
@@ -833,6 +836,7 @@ namespace OnlineMongoMigrationProcessor
                             }
 
                             MigrationJobContext.AddVerboseLog($"{_syncBackPrefix} Cursor created for {collectionKey}. Starting processing...");
+
 
                             // 2. Process cursor
                             var result = await ProcessChangeStreamCursorAsync(
@@ -880,13 +884,14 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch(Exception ex) when (ex.Message.Contains("CollectionScan died due to position in capped collection being deleted"))
                 {
-                    _log.ShowInMonitor($"{_syncBackPrefix}Change stream position invalidated for {collectionKey} - oplog position was deleted. Will push and retry in next batch.");
+
+                    _log.WriteLine($"{_syncBackPrefix}Change stream position invalidated for {collectionKey} - oplog position was deleted. Will push and retry in next batch.", LogType.Warning);
                     
                     AdjustCursorTimeForOplogError(mu); 
                 }
                 catch (Exception ex) when (ex.Message.Contains("Expired resume token or cursor")|| ex.Message.Contains("resume point may no longer be in the oplog"))
                 {
-                    _log.ShowInMonitor($"{_syncBackPrefix}Expired resume token or cursor for {collectionKey} - oplog position was deleted. Will push and retry in next batch.");
+                    _log.WriteLine($"{_syncBackPrefix}Expired resume token or cursor for {collectionKey} - oplog position {currentPos} was deleted. Will push and retry in next batch.", LogType.Warning);
 
                     AdjustCursorTimeForOplogError(mu);
                 }

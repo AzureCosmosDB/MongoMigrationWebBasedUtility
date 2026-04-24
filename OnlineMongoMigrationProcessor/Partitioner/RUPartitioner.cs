@@ -62,8 +62,8 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                     if (boundary != null)
                     {
                         chunk.RUStopLSN = boundary.LSN;
-                        chunk.Gte = boundary?.StartId?.ToString();
-                        chunk.Lt = boundary?.EndId?.ToString();
+                        chunk.Gte = boundary?.StartId?.ToString() ?? string.Empty;
+                        chunk.Lt = boundary?.EndId?.ToString() ?? string.Empty;
                     }
 
                     chunks.Add(chunk);

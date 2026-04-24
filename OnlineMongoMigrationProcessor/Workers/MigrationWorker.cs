@@ -2082,6 +2082,15 @@ namespace OnlineMongoMigrationProcessor.Workers
 #pragma warning restore CS8604
                 _log.WriteLine($"Segments created for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} DataType: {dataType}", LogType.Debug);
             }
+
+            // Post-partition action: set Lte on the last chunk/segments for this data type using snapshot max _id.
+            MongoHelper.PopulateLteForLastChunk(
+                _log,
+                collection,
+                migrationChunks,
+                dataType,
+                MongoHelper.GetFilterDoc(migrationUnit?.UserFilter),
+                migrationUnit?.DataTypeFor_Id.HasValue == true);
         }
 
         private void CreateEmptyBoundaryChunk(List<MigrationChunk> migrationChunks, DataType dataType)

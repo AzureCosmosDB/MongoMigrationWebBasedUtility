@@ -1,4 +1,4 @@
-﻿using MongoDB.Bson;
+using MongoDB.Bson;
 using MongoDB.Bson.IO;
 using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
@@ -9,14 +9,10 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.ComponentModel.DataAnnotations;
 using System.Linq;
-using System.Numerics;
 using System.Text.RegularExpressions;
 using System.Text;
 using System.Threading.Tasks;
-using System.Xml.Linq;
-using static MongoDB.Driver.WriteConcern;
 
 namespace OnlineMongoMigrationProcessor
 {
@@ -69,6 +65,7 @@ namespace OnlineMongoMigrationProcessor
 
             // Determine if we should skip DataType filtering
             bool skipDataTypeFilter = migrationUnit?.DataTypeFor_Id.HasValue == true;
+            ChunkBoundaries? resultBoundaries = null;
 
             if (skipDataTypeFilter)
             {
@@ -144,62 +141,46 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-                if (chunkCount > adjustedMaxSamples)
-                {
-                    int count = 2;
-                    long newCount = docCountByType / ((long)minDocsPerSegment * count);
-                    while (newCount > adjustedMaxSamples)
-                    {
-                        count++;
-
-                        // Check for potential overflow before multiplication
-                        long multiplier = (long)minDocsPerSegment * count;
-                        if (multiplier <= 0 || multiplier > docCountByType)
-                        {                           
-                            break;
-                        }
-                        newCount = docCountByType / multiplier;
-                        MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating adjustedMaxSamples: collection={collection.CollectionNamespace}, newCount={newCount}, dataType={dataType}, docCountByType={docCountByType}, multiplier={multiplier}");
-                    }
-                    
-
-                    log.WriteLine($"Requested chunk count {chunkCount} exceeds maximum samples {adjustedMaxSamples} for {collection.CollectionNamespace}. Adjusting to {newCount}", LogType.Warning);
-                    chunkCount = (int)newCount;
-                }
-
-
-                // Ensure minimum documents per chunk
-                chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
-                docsInChunk = docCountByType / chunkCount;
-
-                // Calculate segments based on documents per chunk
-                segmentCount = Math.Min(
-                    Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
-                    GetMaxSegments()
-                );
-
-
-                // Calculate the total sample count
-                sampleCount = Math.Min(chunkCount * segmentCount, adjustedMaxSamples);
-
-
-                MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating sampleCount: collection={collection.CollectionNamespace}, dataType={dataType}, segmentCount={segmentCount}, sampleCount{sampleCount}");
-
-                // Adjust segments per chunk based on the new sample count
-                segmentCount = Math.Max(1, sampleCount / chunkCount);
-
                 bool usePaginationPartitioner = dataType != DataType.ObjectId && config.NonObjectIdPartitioner == PartitionerType.UsePagination;
 
-                // Optimize for non-dump scenarios
-                if (!optimizeForMongoDump && !usePaginationPartitioner)
+                if (optimizeForMongoDump)
                 {
-                    while (chunkCount > segmentCount && segmentCount < GetMaxSegments())
+                    // DumpAndRestore: oversample then pick equidistant quantile boundaries
+                    chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
+                    segmentCount = 1;
+                    adjustedMaxSamples = (int)Math.Min((long)Math.Floor(docCountByType * 0.04), 500000);
+
+                    // Oversample ~200 per chunk, capped by adjustedMaxSamples
+                    sampleCount = (int)Math.Min((long)chunkCount * 200, adjustedMaxSamples);
+                    sampleCount = Math.Max(sampleCount, chunkCount); // at least chunkCount samples
+
+                    MigrationJobContext.AddVerboseLog($"SamplePartitioner DumpAndRestore: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, sampleCount={sampleCount}");
+                }
+                else
+                {
+                    // MongoDriver path: compute segments for parallel writes within each chunk
+                    chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
+                    docsInChunk = docCountByType / chunkCount;
+
+                    segmentCount = Math.Min(
+                        Math.Max(1, (int)Math.Ceiling((double)docsInChunk / minDocsPerSegment)),
+                        GetMaxSegments()
+                    );
+
+                    sampleCount = Math.Min(chunkCount * segmentCount, adjustedMaxSamples);
+                    segmentCount = Math.Max(1, sampleCount / chunkCount);
+
+                    if (!usePaginationPartitioner)
                     {
-                        chunkCount--;
-                        segmentCount++;
+                        while (chunkCount > segmentCount && segmentCount < GetMaxSegments())
+                        {
+                            chunkCount--;
+                            segmentCount++;
+                        }
+                        chunkCount = sampleCount / segmentCount;
                     }
 
-                    chunkCount = sampleCount / segmentCount;
+                    MigrationJobContext.AddVerboseLog($"SamplePartitioner MongoDriver: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, segmentCount={segmentCount}, sampleCount={sampleCount}");
                 }
 
                 MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating chunkCount: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}");
@@ -212,13 +193,17 @@ namespace OnlineMongoMigrationProcessor
                 {
                     try
                     {
-                        return GetChunkBoundariesForObjectId(log, collection, optimizeForMongoDump, sampleCount, segmentCount, userFilter, config, docCountByType);
+                        // ObjectId sampler generates exactly N equidistant boundaries (not oversampled).
+                        // Use chunkCount * segmentCount as the desired boundary count, not the
+                        // oversampled sampleCount which is only for $sample + quantile selection.
+                        int objectIdBoundaryCount = chunkCount * segmentCount;
+                        resultBoundaries = GetChunkBoundariesForObjectId(log, collection, optimizeForMongoDump, objectIdBoundaryCount, segmentCount, userFilter, config, docCountByType);
                     }
                     catch (Exception ex)
                     {
                         log.WriteLine($"Falling back to general sampler for {collection.CollectionNamespace} as ObjectId sampler failed. Details:  {ex}", LogType.Warning);
                         MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating chunkCount: collection={collection.CollectionNamespace}, dataType={dataType}, userFilter={userFilter}, skipDataTypeFilter={skipDataTypeFilter}, sampleCount={sampleCount}, chunkCount={chunkCount}, segmentCount={segmentCount}");
-                        return GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
+                        resultBoundaries = GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
                     }
                 }
                 else
@@ -229,10 +214,13 @@ namespace OnlineMongoMigrationProcessor
                         skipDataTypeFilter = true;
 
                     if (usePaginationPartitioner)
-                        return GetChunkBoundariesGeneralWithPagination(log, collection, dataType, userFilter, skipDataTypeFilter, sampleCount, segmentCount, chunkCount, docCountByType);
+                        resultBoundaries = GetChunkBoundariesGeneralWithPagination(log, collection, dataType, userFilter, skipDataTypeFilter, sampleCount, segmentCount, chunkCount, docCountByType);
+                    else
+                        resultBoundaries = GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
 
-                    return GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
                 }
+
+                return resultBoundaries;
 
             }
             catch (OperationCanceledException)
@@ -297,16 +285,16 @@ namespace OnlineMongoMigrationProcessor
 
 
             var pipelineStages = new List<BsonDocument>();
-            
+
             // Only add $match stage if matchCondition is not empty
             if (matchCondition != null && matchCondition.ElementCount > 0)
             {
                 pipelineStages.Add(new BsonDocument("$match", matchCondition));
             }
-            
+
             pipelineStages.Add(new BsonDocument("$sample", new BsonDocument("size", sampleCount)));
             pipelineStages.Add(new BsonDocument("$project", new BsonDocument("_id", 1)));
-            
+
             var pipeline = pipelineStages.ToArray();
 
             List<BsonValue> partitionValues = new List<BsonValue>();
@@ -356,6 +344,17 @@ namespace OnlineMongoMigrationProcessor
                 return null;
             }
             // Step 3: Calculate partition boundaries
+            // For DumpAndRestore: pick equidistant quantile boundaries from oversampled sorted list
+            if (optimizeForMongoDump && partitionValues.Count > chunkCount)
+            {
+                var quantileBoundaries = new List<BsonValue>();
+                for (int k = 0; k < chunkCount; k++)
+                {
+                    int idx = (int)((long)k * partitionValues.Count / chunkCount);
+                    quantileBoundaries.Add(partitionValues[idx]);
+                }
+                partitionValues = quantileBoundaries;
+            }
 
             chunkBoundaries = ConvertToBoundaries(partitionValues, segmentCount);
 
@@ -678,75 +677,96 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        public static (BsonValue gte, BsonValue lt) GetChunkBounds(string gteString, string ltString, DataType dataType)
+        public static (BsonValue gte, BsonValue lt, BsonValue lte) GetChunkBounds(
+            string gteString,
+            string ltString,
+            string lteString,
+            DataType dataType)
         {
             BsonValue? gte = null;
             BsonValue? lt = null;
+            BsonValue? lte = null;
 
-            // Initialize `gte` and `lt` based on special cases
+            // Initialize `gte` based on special cases
             if (gteString.Equals("BsonMaxKey"))
                 gte = BsonMaxKey.Value;
             else if (string.IsNullOrEmpty(gteString) || gteString == "BsonNull")
                 gte = BsonNull.Value;
 
+            // Initialize lt based on special cases
             if (ltString.Equals("BsonMaxKey"))
                 lt = BsonMaxKey.Value;
-            else if (string.IsNullOrEmpty(ltString) || ltString== "BsonNull")
+            else if (string.IsNullOrEmpty(ltString) || ltString == "BsonNull")
                 lt = BsonNull.Value;
+
+            // Initialize lte based on special cases
+            if (lteString.Equals("BsonMaxKey"))
+                lte = BsonMaxKey.Value;
+            else if (string.IsNullOrEmpty(lteString) || lteString == "BsonNull")
+                lte = BsonNull.Value;
 
             // Handle by DataType
             switch (dataType)
             {
                 case DataType.ObjectId:
                     gte ??= new BsonObjectId(ObjectId.Parse(gteString));
-                    lt ??= new BsonObjectId(ObjectId.Parse(ltString));
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonObjectId(ObjectId.Parse(ltString));
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonObjectId(ObjectId.Parse(lteString));
                     break;
 
                 case DataType.Int:
                     gte ??= new BsonInt32(int.Parse(gteString));
-                    lt ??= new BsonInt32(int.Parse(ltString));
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonInt32(int.Parse(ltString));
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonInt32(int.Parse(lteString));
                     break;
 
                 case DataType.Int64:
                     gte ??= new BsonInt64(long.Parse(gteString));
-                    lt ??= new BsonInt64(long.Parse(ltString));
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonInt64(long.Parse(ltString));
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonInt64(long.Parse(lteString));
                     break;
 
                 case DataType.String:
                     gte ??= new BsonString(gteString);
-                    lt ??= new BsonString(ltString);
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonString(ltString);
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonString(lteString);
                     break;
 
                 case DataType.Object:
-                    gte ??= BsonDocument.Parse(gteString);
-                    lt ??= BsonDocument.Parse(ltString);
+                    gte ??= string.IsNullOrEmpty(gteString) ? BsonNull.Value : BsonDocument.Parse(gteString);
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : BsonDocument.Parse(ltString);
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : BsonDocument.Parse(lteString);
                     break;
 
                 case DataType.Decimal128:
                     gte ??= new BsonDecimal128(Decimal128.Parse(gteString));
-                    lt ??= new BsonDecimal128(Decimal128.Parse(ltString));
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonDecimal128(Decimal128.Parse(ltString));
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonDecimal128(Decimal128.Parse(lteString));
                     break;
 
                 case DataType.Date:
                     gte ??= new BsonDateTime(DateTime.Parse(gteString));
-                    lt ??= new BsonDateTime(DateTime.Parse(ltString));
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonDateTime(DateTime.Parse(ltString));
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonDateTime(DateTime.Parse(lteString));
                     break;
 
                 case DataType.BinData:
-                    gte ??= ParseBinaryBound(gteString);
-                    lt ??= ParseBinaryBound(ltString);
+                    gte ??= string.IsNullOrEmpty(gteString) ? BsonNull.Value : ParseBinaryBound(gteString);
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : ParseBinaryBound(ltString);
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : ParseBinaryBound(lteString);
                     break;
 
                 case DataType.Other:
                     // For these, we treat it as a special case with no specific bounds
                     gte ??= BsonNull.Value;
                     lt ??= BsonMaxKey.Value;
+                    lte ??= BsonMaxKey.Value;
                     break;
                 default:
                     throw new ArgumentException($"Unsupported data type: {dataType}");
             }
 
-            return (gte, lt);
+            return (gte, lt, lte);
         }
 
         private static BsonBinaryData ParseBinaryBound(string boundValue)
@@ -781,10 +801,10 @@ namespace OnlineMongoMigrationProcessor
         /// Uses MongoDB $sample aggregation stage for efficient sampling.
         /// </summary>
         public static async Task<List<BsonDocument>> SampleCollectionForSplitPointAsync(
-            IMongoCollection<BsonDocument> collection,
-            MigrationChunk chunk,
-            BsonDocument? userFilterDoc,
-            int sampleSize)
+                    IMongoCollection<BsonDocument> collection,
+                    MigrationChunk chunk,
+                    BsonDocument? userFilterDoc,
+                    int sampleSize)
         {
             MigrationJobContext.AddVerboseLog($"SampleCollectionForSplitPointAsync: sampleSize={sampleSize}, idField=_id");
 
@@ -794,9 +814,12 @@ namespace OnlineMongoMigrationProcessor
                 var matchStages = new List<BsonDocument>();
 
                 // Get properly parsed bounds using SamplePartitioner (handles type-specific parsing)
-                var bounds = GetChunkBounds(chunk.Gte ?? "", chunk.Lt ?? "", chunk.DataType);
+                // Use Lt if available, otherwise use Lte for the upper bound
+                string upperBound = !string.IsNullOrEmpty(chunk.Lt) ? chunk.Lt : (chunk.Lte ?? "");
+                var bounds = GetChunkBounds(chunk.Gte ?? "", upperBound, chunk.Lte ?? "", chunk.DataType);
                 BsonValue? gteBsonValue = bounds.gte != null && !(bounds.gte is BsonMaxKey) && !(bounds.gte is BsonNull) ? bounds.gte : null;
                 BsonValue? ltBsonValue = bounds.lt != null && !(bounds.lt is BsonMaxKey) && !(bounds.lt is BsonNull) ? bounds.lt : null;
+                BsonValue? lteBsonValue = bounds.lte != null && !(bounds.lte is BsonMaxKey) && !(bounds.lte is BsonNull) ? bounds.lte : null;
 
                 // Build range filter for _id
                 BsonDocument rangeFilter = new BsonDocument();
@@ -808,10 +831,14 @@ namespace OnlineMongoMigrationProcessor
                 {
                     rangeFilter["$lt"] = ltBsonValue;
                 }
+                else if (lteBsonValue != null)
+                {
+                    rangeFilter["$lte"] = lteBsonValue;
+                }
 
                 // Build the combined condition: data type + range + user filter
                 BsonDocument filterCondition = BuildDataTypeCondition(chunk.DataType, userFilterDoc, true);
-                
+
                 // Add range filter to the condition
                 if (rangeFilter.ElementCount > 0)
                 {
@@ -900,12 +927,23 @@ namespace OnlineMongoMigrationProcessor
                     subChunks.Add(subChunk);
                 }
 
-                // Last sub-chunk goes up to original upper bound
+                // Last sub-chunk goes up to original upper bound (use Lt if available, otherwise Lte)
                 if (samples.Count > 0)
                 {
                     var lastSample = samples[samples.Count - 1];
                     string lastGte = lastSample["_id"].ToJson();
-                    string lastLt = originalChunk.Lt ?? ""; // Use original upper bound or empty
+                    string lastLt = originalChunk.Lt ?? ""; // Prefer Lt
+                    string lastLte = ""; // Default empty
+                    
+                    // If Lt is empty, use Lte for the upper bound
+                    if (string.IsNullOrEmpty(lastLt) && !string.IsNullOrEmpty(originalChunk.Lte))
+                    {
+                        lastLte = originalChunk.Lte;
+                    }
+                    else if (string.IsNullOrEmpty(lastLt))
+                    {
+                        lastLt = originalChunk.Lt ?? ""; // Use whatever was in original
+                    }
 
                     var lastSubChunk = new MigrationChunk(
                         lastGte,
@@ -914,7 +952,8 @@ namespace OnlineMongoMigrationProcessor
                         false,
                         false)
                     {
-                        Id = (samples.Count - 1).ToString()
+                        Id = (samples.Count - 1).ToString(),
+                        Lte = lastLte
                     };
 
                     subChunks.Add(lastSubChunk);
@@ -929,7 +968,7 @@ namespace OnlineMongoMigrationProcessor
                 throw;
             }
         }
+
+
     }
-
-
 }

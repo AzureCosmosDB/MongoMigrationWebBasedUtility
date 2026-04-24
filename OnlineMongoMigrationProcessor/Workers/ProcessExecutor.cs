@@ -328,7 +328,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     _log.ShowInMonitor($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {percent}%");
                                         
                     mu.DumpPercent = PercentageUpdater.CalculateOverallPercentFromAllChunks(mu, isRestore: false, log: _log);
-                    if (mu.DumpPercent >= 99.99)
+                    if (mu.DumpPercent >= 99.99 && mu.MigrationChunks.All(c => c.IsDownloaded == true))
                     {
                         mu.DumpComplete = true;
                         MigrationJobContext.SaveMigrationUnit(mu, true);
