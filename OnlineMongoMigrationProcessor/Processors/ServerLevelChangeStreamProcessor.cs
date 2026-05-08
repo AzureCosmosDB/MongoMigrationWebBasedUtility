@@ -224,8 +224,28 @@ namespace OnlineMongoMigrationProcessor
 
                 pipelineArray = pipeline.ToArray();
 
-                // Watch at client level (server-level)
-                var cursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cancellationToken);
+                // Watch at client level (server-level) with a dedicated 5-minute cursor creation timeout
+                using var cursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+                IChangeStreamCursor<ChangeStreamDocument<BsonDocument>>? cursor = null;
+                var cursorCreationSw = Stopwatch.StartNew();
+                try
+                {
+                    cursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cursorCreationCts.Token);
+                }
+                catch (OperationCanceledException) when (cursorCreationCts.IsCancellationRequested)
+                {
+                    _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (5 min) for server-level change stream.", LogType.Warning);
+                    return touchedMuIdsInRound;
+                }
+                finally
+                {
+                    cursorCreationSw.Stop();
+                }
+
+                if (cursorCreationSw.Elapsed.TotalSeconds > GetBatchDurationInSeconds(1.0f))
+                {
+                    _log.WriteLine($"{_syncBackPrefix}Cursor creation for server-level change stream took {cursorCreationSw.Elapsed.TotalSeconds:F1}s, exceeding batch duration of {GetBatchDurationInSeconds(1.0f)}s", LogType.Warning);
+                }
 
                 using (cursor)
                 {
@@ -278,7 +298,27 @@ namespace OnlineMongoMigrationProcessor
                         MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
                     };
 
-                    var retryCursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, cancellationToken);
+                    using var retryCursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+                    IChangeStreamCursor<ChangeStreamDocument<BsonDocument>>? retryCursor;
+                    var retryCursorCreationSw = Stopwatch.StartNew();
+                    try
+                    {
+                        retryCursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, retryCursorCreationCts.Token);
+                    }
+                    catch (OperationCanceledException) when (retryCursorCreationCts.IsCancellationRequested)
+                    {
+                        _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (5 min) during StartAtOperationTime fallback.", LogType.Warning);
+                        return touchedMuIdsInRound;
+                    }
+                    finally
+                    {
+                        retryCursorCreationSw.Stop();
+                    }
+
+                    if (retryCursorCreationSw.Elapsed.TotalSeconds > GetBatchDurationInSeconds(1.0f))
+                    {
+                        _log.WriteLine($"{_syncBackPrefix}Cursor creation for server-level fallback took {retryCursorCreationSw.Elapsed.TotalSeconds:F1}s, exceeding batch duration of {GetBatchDurationInSeconds(1.0f)}s", LogType.Warning);
+                    }
                     using (retryCursor)
                     {
                         if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
