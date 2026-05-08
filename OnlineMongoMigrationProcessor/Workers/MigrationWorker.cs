@@ -539,7 +539,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                         }
 
-                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts, false);
+                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts);
                     }
                     catch (Exception ex)
                     {
@@ -871,7 +871,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 _ = Task.Run(async () =>
                 {
-                    await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, 30, syncBack, _cts,false);
+                    await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, 30, syncBack, _cts);
                 });
 
                 context.ServerLevelResumeTokenSet = true;

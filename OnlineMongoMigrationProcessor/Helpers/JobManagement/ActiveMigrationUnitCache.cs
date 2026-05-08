@@ -18,7 +18,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
 
         public MigrationUnit GetMigrationUnit(string migrationUnitId, string JobId=null)
         {
-            MigrationJobContext.AddVerboseLog($"ActiveMigrationUnitsCache.GetMigrationUnit: migrationUnitId={migrationUnitId}, cacheCount={_migrationUnits.Count}");
+            //MigrationJobContext.AddVerboseLog($"ActiveMigrationUnitsCache.GetMigrationUnit: migrationUnitId={migrationUnitId}, cacheCount={_migrationUnits.Count}");
 
             if (string.IsNullOrEmpty(JobId))
             {

@@ -121,7 +121,7 @@ namespace OnlineMongoMigrationProcessor
 
 
 
-        public override async Task<TaskResult> StartProcessAsync(string migrationUnitId, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public override async Task<TaskResult> StartProcessAsync(string migrationUnitId, string sourceConnectionString, string targetConnectionString)
         {
             MigrationJobContext.AddVerboseLog($"CopyProcessor.StartProcessAsync: migrationUnitId={migrationUnitId}");
             var mu=MigrationJobContext.GetMigrationUnit(migrationUnitId);

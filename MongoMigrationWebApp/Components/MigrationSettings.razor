@@ -129,6 +129,12 @@
                         <label for="cs-colls-inbatch" class="form-label">Max collections per change stream batch</label>
                         <input type="number" id="cs-colls-inbatch" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ChangeStreamMaxCollsInBatch" />
                     </div>
+                    <div class="mb-3">
+                        <label for="enable-cswatchlog">
+                            <input type="checkbox" id="enable-cswatchlog" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).EnableCSWatchLog" />
+                            Enable change stream watch logging
+                        </label>
+                    </div>
                 </div>
 
                 <!-- Hash Comparison Tab Content -->

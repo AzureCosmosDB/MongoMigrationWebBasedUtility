@@ -146,8 +146,7 @@ namespace OnlineMongoMigrationProcessor
                     null,
                     30,
                     _syncBack,
-                    token,
-                    true);
+                    token);
             }
             catch (Exception ex)
             {
@@ -161,12 +160,13 @@ namespace OnlineMongoMigrationProcessor
             var state = new ServerWatchState();
             var batchCountersInitializedInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var touchedMuIdsInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int maxAwaitSeconds = 5;
+            BsonDocument[] pipelineArray = Array.Empty<BsonDocument>();
 
             try
             {
                 // Calculate MaxAwaitTime from the cancellation token timeout
                 // Use 80% of cancellation timeout or 5 seconds minimum to ensure cursor returns before cancellation
-                int maxAwaitSeconds = 5;
                 if (cancellationToken.CanBeCanceled)
                 {
                     try
@@ -222,7 +222,7 @@ namespace OnlineMongoMigrationProcessor
 
                 options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter =resumeToken, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
 
-                var pipelineArray = pipeline.ToArray();
+                pipelineArray = pipeline.ToArray();
 
                 // Watch at client level (server-level)
                 var cursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cancellationToken);
@@ -242,6 +242,67 @@ namespace OnlineMongoMigrationProcessor
             catch (OperationCanceledException)
             {
                 // Expected when batch timeout occurs
+            }
+            catch (MongoCommandException mcex) when (
+                mcex.Code == 280 ||
+                mcex.Message.Contains("resume token was not found") ||
+                mcex.Message.Contains("Resume of change stream was not possible") ||
+                mcex.Message.Contains("Expired resume token"))
+            {
+                _log.WriteLine($"{_syncBackPrefix}Resume token invalid for server-level change stream (Code: {mcex.Code}). Falling back to StartAtOperationTime.", LogType.Warning);
+
+                // Determine the best timestamp to resume from
+                DateTime fallbackTime = _syncBack
+                    ? MigrationJobContext.CurrentlyActiveJob.SyncBackCursorUtcTimestamp
+                    : MigrationJobContext.CurrentlyActiveJob.CursorUtcTimestamp;
+
+                if (fallbackTime <= DateTime.MinValue)
+                    fallbackTime = MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn ?? DateTime.MinValue;
+
+                if (fallbackTime <= DateTime.MinValue)
+                {
+                    _log.WriteLine($"{_syncBackPrefix}No fallback timestamp available. Cannot retry with StartAtOperationTime.", LogType.Error);
+                    throw;
+                }
+
+                try
+                {
+                    var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(fallbackTime);
+                    _log.WriteLine($"{_syncBackPrefix}Retrying server-level change stream with StartAtOperationTime: {fallbackTime} (BsonTimestamp: {bsonTimestamp})", LogType.Warning);
+
+                    var retryOptions = new ChangeStreamOptions
+                    {
+                        BatchSize = 500,
+                        FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
+                        StartAtOperationTime = bsonTimestamp,
+                        MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
+                    };
+
+                    var retryCursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, cancellationToken);
+                    using (retryCursor)
+                    {
+                        if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
+                            await ProcessLegacyWatchLoopAsync(retryCursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        else
+                            await ProcessModernWatchLoopAsync(retryCursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                    }
+
+                    _log.WriteLine($"{_syncBackPrefix}StartAtOperationTime fallback succeeded.", LogType.Warning);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected when batch timeout occurs during retry
+                }
+                catch (Exception retryEx)
+                {
+                    _log.WriteLine($"{_syncBackPrefix}StartAtOperationTime fallback also failed: {retryEx}", LogType.Error);
+                    throw;
+                }
+            }
+            catch (MongoCommandException mcex)
+            {
+                _log.WriteLine($"{_syncBackPrefix}Error watching server-level change stream: {mcex}", LogType.Error);
+                throw;
             }
             catch (Exception ex)
             {
@@ -789,6 +850,8 @@ namespace OnlineMongoMigrationProcessor
 
                     if (flushedEventCount > 0)
                     {
+                        mu.CSLastResumeTokenWithChange = docs.LatestResumeToken;
+                        mu.CSLastChangeUTCTime = docs.LatestTimestamp;
                         mu.CSAvgReadLatencyInMS = Math.Round((double)docs.CSTotalReadDurationInMS / flushedEventCount, 2);
                         mu.CSAvgWriteLatencyInMS = Math.Round((double)docs.CSTotaWriteDurationInMS / flushedEventCount, 2);
                     }

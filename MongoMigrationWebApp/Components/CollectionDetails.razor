@@ -78,9 +78,9 @@
                                         <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.OriginalResumeToken ?? "N/A")</div>
                                         <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.CursorUtcTimestamp</div>
                                         <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.ResumeToken ?? "N/A")</div>
-                                        <div><span class="lbl">First Change Replayed:</span> @MigrationUnit.InitialDocumenReplayed</div>
+                                        <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(MigrationUnit.ResumeDocumentKey) ? "N/A" : MigrationUnit.InitialDocumenReplayed.ToString())</div>
                                         <div><span class="lbl">First Change Document:</span> @(MigrationUnit.ResumeDocumentKey?.ToString() ?? "N/A")</div>
-                                        <div><span class="lbl">First Change Operation:</span> @MigrationUnit.ResumeTokenOperation</div>
+                                        <div><span class="lbl">First Change Operation:</span> @(string.IsNullOrEmpty(MigrationUnit.ResumeDocumentKey) ? "N/A" : MigrationUnit.ResumeTokenOperation.ToString())</div>
                                         <div><span class="lbl">Inserted:</span> @FormatLong(MigrationUnit.CSDocsInserted) (from @FormatLong(MigrationUnit.CSDInsertEvents) events)</div>
                                         <div><span class="lbl">Deleted:</span> @FormatLong(MigrationUnit.CSDocsDeleted) (from @FormatLong(MigrationUnit.CSDeleteEvents) events)</div>
                                         <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.CSDocsUpdated) (from @FormatLong(MigrationUnit.CSUpdateEvents) events)</div>
@@ -88,6 +88,8 @@
                                         <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.CSErrors)</div>
                                         <div><span class="lbl">Avg Read Latency (ms):</span> @MigrationUnit.CSAvgReadLatencyInMS.ToString("F2")</div>
                                         <div><span class="lbl">Avg Write Latency (ms):</span> @MigrationUnit.CSAvgWriteLatencyInMS.ToString("F2")</div>
+                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationUnit.CSLastChangeUTCTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                                        <div><span class="lbl">Last Resume Token With Change:</span> @(MigrationUnit.CSLastResumeTokenWithChange ?? "N/A")</div>
                                         @if (Helper.GetChangeStreamMode(MigrationJob) == "Aggressive" && MigrationUnit.AggressiveCacheDeleted)
                                         {
                                             <div><span class="lbl">Aggressive:</span> Completed on @(MigrationUnit.AggressiveCacheDeletedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A") UTC</div>

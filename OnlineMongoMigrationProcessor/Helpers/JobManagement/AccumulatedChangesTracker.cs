@@ -46,6 +46,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
         public string CollectionKey { get; private set; } = string.Empty;
         public string LatestResumeToken { get; private set; } = string.Empty;
         public DateTime LatestTimestamp { get; private set; } = DateTime.MinValue;
+        public DateTime EarliestTimestamp { get; private set; } = DateTime.MinValue;
         public ChangeStreamOperationType LatestOperationType { get; private set; }
         public string LatestDocumentKey { get; private set; } = string.Empty;
 
@@ -166,10 +167,18 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             }
 #endif
            
+            
+
             // Always track latest (last change in batch) - for checkpoint on success
-            if (change.ResumeToken != null && change.ResumeToken != BsonNull.Value)
+            if (change.ResumeToken != null && change.ResumeToken != BsonNull.Value && !string.IsNullOrEmpty(change.ResumeToken.ToJson()))
             {
-                if (changeTimestamp >= LatestTimestamp && !string.IsNullOrEmpty(change.ResumeToken.ToJson()))
+                // Track earliest (first change in batch)
+                if (EarliestTimestamp == DateTime.MinValue && changeTimestamp > DateTime.MinValue)
+                {
+                    EarliestTimestamp = changeTimestamp;
+                }
+
+                if (changeTimestamp >= LatestTimestamp )
                 {
                     LatestResumeToken = change.ResumeToken.ToJson();
                     LatestOperationType = change.OperationType;
@@ -191,6 +200,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
                     _totalEventCount = 0;
                     LatestResumeToken = string.Empty;
                     LatestTimestamp = DateTime.MinValue;
+                    EarliestTimestamp = DateTime.MinValue;
                     LatestDocumentKey = string.Empty;
                     CSTotalReadDurationInMS = 0;
                     CSTotaWriteDurationInMS = 0;
@@ -210,6 +220,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
                 // Clear latest
                 LatestResumeToken = string.Empty;
                 LatestTimestamp = DateTime.MinValue;
+                EarliestTimestamp = DateTime.MinValue;
                 LatestDocumentKey = string.Empty;
             }
         }       

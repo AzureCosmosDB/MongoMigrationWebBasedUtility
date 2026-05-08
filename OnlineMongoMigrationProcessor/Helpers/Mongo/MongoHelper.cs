@@ -599,43 +599,27 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             if (syncBack)
             {
                 mu.SyncBackResumeToken = null;
-                mu.SyncBackCursorUtcTimestamp= mu.SyncBackChangeStreamStartedOn.Value;
+                mu.SyncBackCursorUtcTimestamp = DateTime.MinValue;
             }
             else
             {
                 mu.ResumeToken = null;
-                mu.CursorUtcTimestamp = mu.ChangeStreamStartedOn.Value;
+                mu.OriginalResumeToken = null;
+                mu.CursorUtcTimestamp = DateTime.MinValue;
             }
 
+            mu.CSLastResumeTokenWithChange = null;
             ResetCounters(mu, syncBack);
         }
 
-        public async static Task SetChangeStreamResumeTokenAsync(Log log, MongoClient client, MigrationJob job, MigrationUnit mu, int seconds, bool syncBack, CancellationToken cts, bool isFromCSProcessor)
+        public async static Task SetChangeStreamResumeTokenAsync(Log log, MongoClient client, MigrationJob job, MigrationUnit mu, int seconds, bool syncBack, CancellationToken cts)
         {
             int retryCount = 0;
             bool isSucessful = false;
-            bool resetCS = false;
 
             // Determine if we should use server-level or collection-level processing
             bool useServerLevel = job.ChangeStreamLevel == ChangeStreamLevel.Server;
             string syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
-
-            //Reset CS only allowed at collection level
-            if (!useServerLevel && mu != null)
-               resetCS = mu.ResetChangeStream;
-               
-
-            if (resetCS)
-            {
-                if(isFromCSProcessor)
-                    return; //exit calls from CS processor.
-                                
-                log.WriteLine($"{syncBackPrefix}Resetting change stream for {mu.DatabaseName}.{mu.CollectionName}", LogType.Warning);
-                await ResetCS(job, mu, syncBack);    
-                MigrationJobContext.SaveMigrationUnit(mu, true);
-
-                return;                
-            }
 
             bool skipLoops = false;
             string resumeToken=string.Empty;    
@@ -759,28 +743,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                         : $"{mu?.DatabaseName}.{mu?.CollectionName}";
 
                     log.WriteLine($"{syncBackPrefix}Timeout when setting change stream resume token for {scope}: {ex}", LogType.Debug);
-
-                    // For normal setup (non-reset flow), do not loop indefinitely on repeated timeouts.
-                    // Server-level change stream processor can re-attempt later.
-                    if (!resetCS)
-                    {
-                        skipLoops = true;
-                    }
-                    else if (string.IsNullOrEmpty(resumeToken))
-                    {
-                        skipLoops = true;
-                    }
+                    skipLoops = true;
                 }
                 catch (Exception ex)
                 {
-                    if (resetCS && !string.IsNullOrEmpty(resumeToken))
-                    {
-                        retryCount++;
-                        log.WriteLine($"{syncBackPrefix}Attempt {retryCount}. Error setting change stream resume token for {mu.DatabaseName}.{mu.CollectionName}: {ex}", LogType.Error);
-                       
-                    }
-                    else
-                        skipLoops = true;
+                    skipLoops = true;
                 }
                 finally
                 {
@@ -905,7 +872,6 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                                 // Use common function for server-level resume token setting
                                 SetResumeTokenProperties(job, change, syncBack,log, migrationUnit);
-                                                              
 
                                 log.WriteLine($"Server-level resume token set  with collection key {job.ResumeCollectionKey}");
                                 // Exit immediately after first change detected
@@ -938,6 +904,45 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 catch (Exception ex) when (ex is OperationCanceledException)
                 {
                     // Cancellation requested - exit quietly
+                }
+
+                // No changes detected — capture the cursor's postBatchResumeToken
+                // so the collection gets a valid resume position even when idle.
+                // Placed outside try/catch so it runs after timeout/cancellation too.
+                try
+                {
+                    var postBatchToken = cursor.GetResumeToken();
+                    if (postBatchToken != null)
+                    {
+                        var postBatchTokenJson = postBatchToken.ToJson();
+                        if (useServerLevel)
+                        {
+                            if (string.IsNullOrEmpty(syncBack ? job.SyncBackResumeToken : job.ResumeToken))
+                            {
+                                if (syncBack)
+                                    job.SyncBackResumeToken = postBatchTokenJson;
+                                else
+                                    job.ResumeToken = postBatchTokenJson;
+                                MigrationJobContext.SaveMigrationJob(job);
+                                log.WriteLine($"Server-level postBatchResumeToken captured (no changes detected)", LogType.Debug);
+                            }
+                        }
+                        else
+                        {
+                            var currentToken = syncBack ? mu.SyncBackResumeToken : mu.ResumeToken;
+                            if (string.IsNullOrEmpty(currentToken))
+                            {
+                                SetResumeParameters(mu, DateTime.UtcNow, postBatchTokenJson, syncBack);
+                                mu.InitialDocumenReplayed = true; // No change to replay
+                                MigrationJobContext.SaveMigrationUnit(mu, true);
+                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected)");
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // cursor may be in a bad state after cancellation — ignore
                 }
             }
         }
@@ -1099,7 +1104,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             string databaseName, string collectionName,
             int timeoutSeconds, CancellationToken cancellationToken)
         {
-            const int hardTimeoutSeconds = 300; // 5-minute absolute ceiling via Task.WhenAny
+            const int hardTimeoutSeconds = 300; // 15-minute absolute ceiling via Task.WhenAny
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
             
@@ -1695,6 +1700,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             mu.ResetChangeStream = false;
             mu.InitialDocumenReplayed = false;
+            mu.ResumeDocumentKey = null;
+            mu.ResumeTokenOperation = default;
+            mu.CSLastResumeTokenWithChange = null;
+            mu.CSLastChangeUTCTime = null;
             mu.CSLastChecked = DateTime.MinValue; 
             mu.CSLastBatchDurationSeconds = 0;
             mu.CSNormalizedUpdatesInLastBatch = 0;
@@ -1869,7 +1878,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 return false;
             }
 
-            if (probeResult == null || !probeResult.Success || string.IsNullOrWhiteSpace(probeResult.ResumeToken))
+            if (probeResult == null || !probeResult.Success)
             {
                 if (!string.IsNullOrWhiteSpace(probeResult?.Error))
                 {
@@ -1879,8 +1888,9 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 return false;
             }
 
-            // Signal that a change was detected - SetChangeStreamResumeTokenAsync will handle the actual update
-            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe found new change for {mu.DatabaseName}.{mu.CollectionName} (signal-only mode).");
+            // Probe confirmed the change stream is reachable.
+            // Resume token positioning is handled by WatchChangeStreamUntilChangeAsync.
+            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe probe succeeded for {mu.DatabaseName}.{mu.CollectionName}");
             return true;
         }
 
@@ -2222,7 +2232,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                         }
                     }
 
-                    log.WriteLine($"Populated Lte={serializedMaxId} for last chunk and its segments");
+                    log.WriteLine($"Populated Lte={serializedMaxId} for last chunk and its segments", LogType.Debug);
                 }
             }
             catch (Exception ex)
