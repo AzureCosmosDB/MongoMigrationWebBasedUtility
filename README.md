@@ -41,6 +41,7 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
 - [RU-optimized copy (Cosmos DB source)](#ru-optimized-copy-cosmos-db-source)
 - [Security and data handling](#security-and-data-handling)
 - [Logs, backup, and recovery](#logs-backup-and-recovery)
+  - [Change Stream Watch Log](#change-stream-watch-log)
 - [Performance tips](#performance-tips)
 - [Troubleshooting](#troubleshooting)
 
@@ -861,6 +862,32 @@ Notes:
 - Consider deploying behind VNet integration and/or Private Endpoint (see earlier sections) to restrict access.
 - **Entra ID Authentication (Optional)**: You can configure Entra ID-based authentication for your Azure Web App to ensure only valid users can access the migration tool. This adds an additional layer of security by requiring users to authenticate with their organizational credentials. For configuration details, see [Azure App Service Authentication](https://learn.microsoft.com/en-us/azure/static-web-apps/authentication-authorization).
 
+
+## Logs, backup, and recovery
+
+### Change Stream Watch Log
+
+When **Enable change stream watch logging** is turned on in settings, the tool records a diagnostic entry for every change stream watch cycle. These entries are written to the **target** server in the `mongomigrationwebapplog` database, under a collection named `cswatchlog_{appId}_{jobId}`.
+
+This log helps you understand how the change stream is progressing per collection — how many changes were picked up in each cycle, how long each cycle took, and what resume tokens were used. It is especially useful for diagnosing slow catch-up, verifying idle collections, and confirming that resume tokens are advancing correctly.
+
+Each entry contains:
+
+| Field | Description |
+|---|---|
+| `CollectionNamespace` | The source `database.collection` being watched |
+| `TimeUtc` | When the entry was recorded (UTC) |
+| `ResumeTokenStart` | Resume token the watch cycle started from |
+| `ResumeTokenEnd` | Resume token after the watch cycle completed |
+| `TotalChanges` | Number of change events processed in the cycle |
+| `WatchDurationMs` | How long the watch cycle ran (milliseconds) |
+| `IsSyncBack` | Whether this was a sync-back watch cycle |
+| `FirstChangeTimestamp` | Timestamp of the earliest change in the batch |
+| `LastChangeTimestamp` | Timestamp of the latest change in the batch |
+
+The collection is automatically created with indexes for efficient querying by collection name, resume token, and change count.
+
+> **Note:** This log writes to the target server. In simulated runs where no target connection is configured, logging is silently skipped.
 
 ## Performance tips
 
