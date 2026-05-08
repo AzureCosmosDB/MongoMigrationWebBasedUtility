@@ -1627,6 +1627,7 @@ namespace OnlineMongoMigrationProcessor
             int chunkIndex,
             BsonValue gte,
             BsonValue lt,
+            BsonValue lte,
             DataType dataType,
             BsonDocument? userFilterDoc,
             bool skipDataTypeFilter,
@@ -1643,6 +1644,7 @@ namespace OnlineMongoMigrationProcessor
                         collection,
                         gte,
                         lt,
+                        lte,
                         dataType,
                         userFilterDoc,
                         skipDataTypeFilter
@@ -1697,6 +1699,7 @@ namespace OnlineMongoMigrationProcessor
             // Update the original chunk in-place with the first sub-chunk's values (retains original ID)
             originalChunk.Gte = subChunks[0].Gte;
             originalChunk.Lt = subChunks[0].Lt;
+            originalChunk.Lte = subChunks[0].Lte;
             originalChunk.DataType = subChunks[0].DataType;
             originalChunk.IsDownloaded = subChunks[0].IsDownloaded;
             originalChunk.IsUploaded = subChunks[0].IsUploaded;
@@ -1724,8 +1727,8 @@ namespace OnlineMongoMigrationProcessor
         /// <param name="userFilterDoc">Optional user filter document</param>
         /// <param name="sourceConnectionString">Source connection string for PrepareDownloadList</param>
         /// <param name="targetConnectionString">Target connection string for PrepareDownloadList</param>
-        /// <returns>Tuple containing (docCount, gte bound, lt bound, query string)</returns>
-        private async Task<(long docCount, BsonValue gte, BsonValue lt, string query)> HandleCountTimeoutWithChunkSplitAsync(
+        /// <returns>Tuple containing (docCount, gte bound, lt bound, lte bound, query string)</returns>
+        private async Task<(long docCount, BsonValue gte, BsonValue lt, BsonValue lte, string query)> HandleCountTimeoutWithChunkSplitAsync(
             MigrationUnit mu,
             int chunkIndex,
             IMongoCollection<BsonDocument> sourceCollection,
@@ -1772,7 +1775,7 @@ namespace OnlineMongoMigrationProcessor
         /// <summary>
         /// Handles the result of chunk splitting - common logic for both ObjectId and sample-based strategies
         /// </summary>
-        private async Task<(long docCount, BsonValue gte, BsonValue lt, string query)> ProcessChunkSplitResultAsync(
+        private async Task<(long docCount, BsonValue gte, BsonValue lt, BsonValue lte, string query)> ProcessChunkSplitResultAsync(
             MigrationUnit mu,
             int chunkIndex,
             List<MigrationChunk> subChunks,
@@ -1815,12 +1818,14 @@ namespace OnlineMongoMigrationProcessor
             // Re-process the first sub-chunk (updated in-place at the same index)
             var bounds = SamplePartitioner.GetChunkBounds(
                 mu.MigrationChunks[chunkIndex].Gte!,
-                mu.MigrationChunks[chunkIndex].Lt!,
+                mu.MigrationChunks[chunkIndex].Lt ?? "",
+                mu.MigrationChunks[chunkIndex].Lte ?? "",
                 dataType
             );
             var gte = bounds.gte;
             var lt = bounds.lt;
-            var query = MongoHelper.GenerateQueryString(gte, lt, dataType, userFilterDoc, mu);
+            var lte = bounds.lte;
+            var query = MongoHelper.GenerateQueryString(gte, lt, lte, dataType, userFilterDoc, mu);
 
             // Try count again on the smaller sub-chunk
             var (retrySuccess, retryCount) = TryGetDocumentCountWithRetry(
@@ -1828,6 +1833,7 @@ namespace OnlineMongoMigrationProcessor
                 chunkIndex,
                 gte,
                 lt,
+                lte,
                 dataType,
                 userFilterDoc,
                 mu.DataTypeFor_Id.HasValue
@@ -1849,7 +1855,7 @@ namespace OnlineMongoMigrationProcessor
                 return recursiveResult;
             }
 
-            return (docCount, gte, lt, query);
+            return (docCount, gte, lt, lte, query);
         }
 
         private long GetMaxDocsPerChunk(MigrationUnit mu)
@@ -1953,18 +1959,20 @@ namespace OnlineMongoMigrationProcessor
             // Get chunk bounds
             var bounds = SamplePartitioner.GetChunkBounds(
                 mu.MigrationChunks[chunkIndex].Gte!,
-                mu.MigrationChunks[chunkIndex].Lt!,
+                mu.MigrationChunks[chunkIndex].Lt ?? "",
+                mu.MigrationChunks[chunkIndex].Lte ?? "",
                 mu.MigrationChunks[chunkIndex].DataType
             );
             var gte = bounds.gte;
             var lt = bounds.lt;
+            var lte = bounds.lte;
 
             // Get source collection
             var sourceCollection = GetSourceCollection(sourceConnectionString, mu.DatabaseName, mu.CollectionName);
 
             // Build query and get count with retry logic
             BsonDocument? userFilterDoc = MongoHelper.GetFilterDoc(mu.UserFilter);
-            string query = MongoHelper.GenerateQueryString(gte, lt, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc, mu);
+            string query = MongoHelper.GenerateQueryString(gte, lt, lte, mu.MigrationChunks[chunkIndex].DataType, userFilterDoc, mu);
 
             // Try to get document count with retry
             var (countSuccess, docCount) = TryGetDocumentCountWithRetry(
@@ -1972,6 +1980,7 @@ namespace OnlineMongoMigrationProcessor
                 chunkIndex,
                 gte,
                 lt,
+                lte,
                 mu.MigrationChunks[chunkIndex].DataType,
                 userFilterDoc,
                 mu.DataTypeFor_Id.HasValue
@@ -2013,6 +2022,7 @@ namespace OnlineMongoMigrationProcessor
                 docCount = result.docCount;
                 gte = result.gte;
                 lt = result.lt;
+                lte = result.lte;
                 query = result.query;
             }
 
@@ -2020,7 +2030,7 @@ namespace OnlineMongoMigrationProcessor
             _log?.WriteLine($"Count for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] is {docCount}", LogType.Debug);
 
             // Convert query for mongodump
-            string extendedQuery = MongoQueryConverter.ConvertMondumpFilter(query, gte, lt, mu.MigrationChunks[chunkIndex].DataType);
+            string extendedQuery = MongoQueryConverter.ConvertMondumpFilter(query, gte, lt, lte, mu.MigrationChunks[chunkIndex].DataType);
             string args = $"{baseArgs} --query=\"{extendedQuery}\"";
 
             return (docCount, args);
@@ -2490,16 +2500,19 @@ namespace OnlineMongoMigrationProcessor
                 // Get chunk bounds and count in target
                 var bounds = SamplePartitioner.GetChunkBounds(
                     mu.MigrationChunks[chunkIndex].Gte!,
-                    mu.MigrationChunks[chunkIndex].Lt!,
+                    mu.MigrationChunks[chunkIndex].Lt ?? "",
+                    mu.MigrationChunks[chunkIndex].Lte ?? "",
                     mu.MigrationChunks[chunkIndex].DataType
                 );
                 var gte = bounds.gte;
                 var lt = bounds.lt;
+                var lte = bounds.lte;
 
                 mu.MigrationChunks[chunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(
                     targetCollection,
                     gte,
                     lt,
+                    lte,
                     mu.MigrationChunks[chunkIndex].DataType,
                     MongoHelper.ConvertUserFilterToBSONDocument(mu.UserFilter!),
                     mu.DataTypeFor_Id.HasValue

@@ -4,8 +4,9 @@ namespace OnlineMongoMigrationProcessor
 {
     public class MigrationChunk
     {
-        public string? Lt { get; set; }
-        public string? Gte { get; set; }
+        public string Lt { get; set; } = string.Empty;
+        public string Lte { get; set; } = string.Empty;
+        public string Gte { get; set; } = string.Empty;
         public bool? IsDownloaded { get; set; }
         public bool? IsUploaded { get; set; }
         public long DumpQueryDocCount { get; set; }

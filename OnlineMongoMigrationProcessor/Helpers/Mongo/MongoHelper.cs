@@ -1,4 +1,4 @@
-﻿using MongoDB.Bson;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using MongoDB.Driver.Core.Clusters;
@@ -118,7 +118,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         {
             FilterDefinition<BsonDocument>? userFilter = GetFilterDoc(mu.UserFilter);
             var filter = userFilter ?? Builders<BsonDocument>.Filter.Empty;
-            return collection.CountDocuments(filter);
+            return collection.CountDocuments(filter, new CountOptions { MaxTime = TimeSpan.FromMinutes(10) });
         }
 
 		/// <summary>
@@ -258,17 +258,18 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             return (lsn, rid, min, max);
         }
 
-
+        /// <summary>
+        /// GenerateQueryFilter with separate handling for exclusive (Lt, $lt) and inclusive (Lte, $lte) upper bounds.
+        /// </summary>
         public static FilterDefinition<BsonDocument> GenerateQueryFilter(
              BsonValue? gte,
+             BsonValue? lt,
              BsonValue? lte,
              DataType dataType,
              BsonDocument userFilterDoc,
              bool skipDataTypeFilter = false)
         {
-
             var userFilter = new BsonDocumentFilterDefinition<BsonDocument>(userFilterDoc);
-
             var filterBuilder = Builders<BsonDocument>.Filter;
 
             FilterDefinition<BsonDocument> typeFilter;
@@ -278,27 +279,26 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
             if (skipDataTypeFilter)
             {
-                // Skip DataType filtering - use empty filter for type
                 typeFilter = FilterDefinition<BsonDocument>.Empty;
             }
             else
             {
-                // Original DataType filtering logic
                 typeFilter = filterBuilder.Eq("_id", new BsonDocument("$type", DataTypeToBsonType(dataType)));
             }
 
             bool hasGte = gte != null && !gte.IsBsonNull && !(gte is BsonMaxKey);
-            bool hasLte = lte != null && !lte.IsBsonNull && !(lte is BsonMaxKey);
+            bool haslt = lt != null && !lt.IsBsonNull && !(lt is BsonMaxKey);
+            bool haslte = lte != null && !lte.IsBsonNull && !(lte is BsonMaxKey);
 
             FilterDefinition<BsonDocument> idFilter;
 
-            if (hasGte && hasLte)
+            if (hasGte && haslt)
             {
                 if (skipDataTypeFilter)
                 {
                     idFilter = filterBuilder.And(
                         BuildFilterGte("_id", gte!, dataType),
-                        BuildFilterLt("_id", lte!, dataType)
+                        BuildFilterLt("_id", lt!, dataType)
                     );
                 }
                 else
@@ -306,7 +306,25 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     idFilter = filterBuilder.And(
                         typeFilter,
                         BuildFilterGte("_id", gte!, dataType),
-                        BuildFilterLt("_id", lte!, dataType)
+                        BuildFilterLt("_id", lt!, dataType)
+                    );
+                }
+            }
+            else if (hasGte && haslte)
+            {
+                if (skipDataTypeFilter)
+                {
+                    idFilter = filterBuilder.And(
+                        BuildFilterGte("_id", gte!, dataType),
+                        BuildFilterLte("_id", lte!, dataType)
+                    );
+                }
+                else
+                {
+                    idFilter = filterBuilder.And(
+                        typeFilter,
+                        BuildFilterGte("_id", gte!, dataType),
+                        BuildFilterLte("_id", lte!, dataType)
                     );
                 }
             }
@@ -324,17 +342,31 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     );
                 }
             }
-            else if (hasLte)
+            else if (haslt)
             {
                 if (skipDataTypeFilter)
                 {
-                    idFilter = BuildFilterLt("_id", lte!, dataType);
+                    idFilter = BuildFilterLt("_id", lt!, dataType);
                 }
                 else
                 {
                     idFilter = filterBuilder.And(
                         typeFilter,
-                        BuildFilterLt("_id", lte!, dataType)
+                        BuildFilterLt("_id", lt!, dataType)
+                    );
+                }
+            }
+            else if (haslte)
+            {
+                if (skipDataTypeFilter)
+                {
+                    idFilter = BuildFilterLte("_id", lte!, dataType);
+                }
+                else
+                {
+                    idFilter = filterBuilder.And(
+                        typeFilter,
+                        BuildFilterLte("_id", lte!, dataType)
                     );
                 }
             }
@@ -343,26 +375,21 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 idFilter = typeFilter;
             }
 
-            if (userFilter != null && userFilter.Document.ElementCount>0)
+            if (userFilter != null && userFilter.Document.ElementCount > 0)
             {
-                // Combine userFilter with idFilter using AND
-                //if (!MongoHelper.UsesIdFieldInFilter(userFilterDoc)) // if user filter does not use _id, we can combine at root                {
-                //{
-                    // Combine userFilter with idFilter using AND
-                    return filterBuilder.And(userFilter, idFilter);
-                //}
+                return filterBuilder.And(userFilter, idFilter);
             }
 
             return idFilter;
         }
 
 
-        public static long GetDocumentCount(IMongoCollection<BsonDocument> collection, BsonValue? gte, BsonValue? lte, DataType dataType, BsonDocument userFilterDoc, bool skipDataTypeFilter = false)
+        public static long GetDocumentCount(IMongoCollection<BsonDocument> collection, BsonValue? gte, BsonValue? lt, BsonValue? lte, DataType dataType, BsonDocument userFilterDoc, bool skipDataTypeFilter = false)
         {
-            MigrationJobContext.AddVerboseLog($"Processing GetDocumentCount for {collection.CollectionNamespace}  with gte={gte.ToJson()}, lte={gte.ToJson()}, datatype={dataType},userFilterDoc={userFilterDoc.ToJson()} ");
+            MigrationJobContext.AddVerboseLog($"Processing GetDocumentCount for {collection.CollectionNamespace} with gte={gte?.ToJson()}, lt={lt?.ToJson()}, lte={lte?.ToJson()}, datatype={dataType}, userFilterDoc={userFilterDoc.ToJson()} ");
             try
             {
-                FilterDefinition<BsonDocument> filter = GenerateQueryFilter(gte, lte, dataType, userFilterDoc, skipDataTypeFilter);
+                FilterDefinition<BsonDocument> filter = GenerateQueryFilter(gte, lt, lte, dataType, userFilterDoc, skipDataTypeFilter);
 
                 //bool genError= false;
                 //if (genError)
@@ -572,43 +599,27 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             if (syncBack)
             {
                 mu.SyncBackResumeToken = null;
-                mu.SyncBackCursorUtcTimestamp= mu.SyncBackChangeStreamStartedOn.Value;
+                mu.SyncBackCursorUtcTimestamp = DateTime.MinValue;
             }
             else
             {
                 mu.ResumeToken = null;
-                mu.CursorUtcTimestamp = mu.ChangeStreamStartedOn.Value;
+                mu.OriginalResumeToken = null;
+                mu.CursorUtcTimestamp = DateTime.MinValue;
             }
 
+            mu.CSLastResumeTokenWithChange = null;
             ResetCounters(mu, syncBack);
         }
 
-        public async static Task SetChangeStreamResumeTokenAsync(Log log, MongoClient client, MigrationJob job, MigrationUnit mu, int seconds, bool syncBack, CancellationToken cts, bool isFromCSProcessor)
+        public async static Task SetChangeStreamResumeTokenAsync(Log log, MongoClient client, MigrationJob job, MigrationUnit mu, int seconds, bool syncBack, CancellationToken cts)
         {
             int retryCount = 0;
             bool isSucessful = false;
-            bool resetCS = false;
 
             // Determine if we should use server-level or collection-level processing
             bool useServerLevel = job.ChangeStreamLevel == ChangeStreamLevel.Server;
             string syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
-
-            //Reset CS only allowed at collection level
-            if (!useServerLevel && mu != null)
-               resetCS = mu.ResetChangeStream;
-               
-
-            if (resetCS)
-            {
-                if(isFromCSProcessor)
-                    return; //exit calls from CS processor.
-                                
-                log.WriteLine($"{syncBackPrefix}Resetting change stream for {mu.DatabaseName}.{mu.CollectionName}", LogType.Warning);
-                await ResetCS(job, mu, syncBack);    
-                MigrationJobContext.SaveMigrationUnit(mu, true);
-
-                return;                
-            }
 
             bool skipLoops = false;
             string resumeToken=string.Empty;    
@@ -732,28 +743,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                         : $"{mu?.DatabaseName}.{mu?.CollectionName}";
 
                     log.WriteLine($"{syncBackPrefix}Timeout when setting change stream resume token for {scope}: {ex}", LogType.Debug);
-
-                    // For normal setup (non-reset flow), do not loop indefinitely on repeated timeouts.
-                    // Server-level change stream processor can re-attempt later.
-                    if (!resetCS)
-                    {
-                        skipLoops = true;
-                    }
-                    else if (string.IsNullOrEmpty(resumeToken))
-                    {
-                        skipLoops = true;
-                    }
+                    skipLoops = true;
                 }
                 catch (Exception ex)
                 {
-                    if (resetCS && !string.IsNullOrEmpty(resumeToken))
-                    {
-                        retryCount++;
-                        log.WriteLine($"{syncBackPrefix}Attempt {retryCount}. Error setting change stream resume token for {mu.DatabaseName}.{mu.CollectionName}: {ex}", LogType.Error);
-                       
-                    }
-                    else
-                        skipLoops = true;
+                    skipLoops = true;
                 }
                 finally
                 {
@@ -878,7 +872,6 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                                 // Use common function for server-level resume token setting
                                 SetResumeTokenProperties(job, change, syncBack,log, migrationUnit);
-                                                              
 
                                 log.WriteLine($"Server-level resume token set  with collection key {job.ResumeCollectionKey}");
                                 // Exit immediately after first change detected
@@ -911,6 +904,45 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 catch (Exception ex) when (ex is OperationCanceledException)
                 {
                     // Cancellation requested - exit quietly
+                }
+
+                // No changes detected — capture the cursor's postBatchResumeToken
+                // so the collection gets a valid resume position even when idle.
+                // Placed outside try/catch so it runs after timeout/cancellation too.
+                try
+                {
+                    var postBatchToken = cursor.GetResumeToken();
+                    if (postBatchToken != null)
+                    {
+                        var postBatchTokenJson = postBatchToken.ToJson();
+                        if (useServerLevel)
+                        {
+                            if (string.IsNullOrEmpty(syncBack ? job.SyncBackResumeToken : job.ResumeToken))
+                            {
+                                if (syncBack)
+                                    job.SyncBackResumeToken = postBatchTokenJson;
+                                else
+                                    job.ResumeToken = postBatchTokenJson;
+                                MigrationJobContext.SaveMigrationJob(job);
+                                log.WriteLine($"Server-level postBatchResumeToken captured (no changes detected)", LogType.Debug);
+                            }
+                        }
+                        else
+                        {
+                            var currentToken = syncBack ? mu.SyncBackResumeToken : mu.ResumeToken;
+                            if (string.IsNullOrEmpty(currentToken))
+                            {
+                                SetResumeParameters(mu, DateTime.UtcNow, postBatchTokenJson, syncBack);
+                                mu.InitialDocumenReplayed = true; // No change to replay
+                                MigrationJobContext.SaveMigrationUnit(mu, true);
+                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected)");
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // cursor may be in a bad state after cancellation — ignore
                 }
             }
         }
@@ -1072,7 +1104,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             string databaseName, string collectionName,
             int timeoutSeconds, CancellationToken cancellationToken)
         {
-            const int hardTimeoutSeconds = 300; // 5-minute absolute ceiling via Task.WhenAny
+            const int hardTimeoutSeconds = 300; // 15-minute absolute ceiling via Task.WhenAny
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
             
@@ -1220,6 +1252,26 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             };
         }
 
+        private static FilterDefinition<BsonDocument> BuildFilterLte(string fieldName, BsonValue? value, DataType dataType)
+        {
+            var filterBuilder = Builders<BsonDocument>.Filter;
+
+            if (value == null || value.IsBsonNull) return FilterDefinition<BsonDocument>.Empty;
+
+            return dataType switch
+            {
+                DataType.ObjectId => filterBuilder.Lte(fieldName, value.AsObjectId),
+                DataType.Int => filterBuilder.Lte(fieldName, value.AsInt32),
+                DataType.Int64 => filterBuilder.Lte(fieldName, value.AsInt64),
+                DataType.String => filterBuilder.Lte(fieldName, value.AsString),
+                DataType.Decimal128 => filterBuilder.Lte(fieldName, value.AsDecimal128),
+                DataType.Date => filterBuilder.Lte(fieldName, ((BsonDateTime)value).ToUniversalTime()),
+                DataType.Object => filterBuilder.Lte(fieldName, value.AsBsonDocument),
+                DataType.BinData => filterBuilder.Lte(fieldName, value.AsBsonBinaryData),
+                _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
+            };
+        }
+
         private static FilterDefinition<BsonDocument> BuildFilterGte(string fieldName, BsonValue? value, DataType dataType)
         {
             var filterBuilder = Builders<BsonDocument>.Filter;
@@ -1297,7 +1349,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         }
 
 
-        public static string GenerateQueryString(BsonValue? gte, BsonValue? lte, DataType dataType, BsonDocument? userFilterDoc, MigrationUnit? migrationUnit = null)
+        public static string GenerateQueryString(BsonValue? gte, BsonValue? lt, BsonValue? lte, DataType dataType, BsonDocument? userFilterDoc, MigrationUnit? migrationUnit = null)
         {
             // Check if we should skip DataType filter when DataTypeFor_Id is specified
             bool skipDataTypeFilter = migrationUnit?.DataTypeFor_Id.HasValue == true;
@@ -1316,9 +1368,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 idConditions.Add($"\\\"$gte\\\": {BsonValueToString(gte, dataType)}");
             }
 
-            if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
+            if (!(lt == null || lt.IsBsonNull) && lt is not BsonMaxKey)
             {
-                idConditions.Add($"\\\"$lt\\\": {BsonValueToString(lte, dataType)}");
+                idConditions.Add($"\\\"$lt\\\": {BsonValueToString(lt, dataType)}");
+            }
+            else if (!(lte == null || lte.IsBsonNull) && lte is not BsonMaxKey)
+            {
+                idConditions.Add($"\\\"$lte\\\": {BsonValueToString(lte, dataType)}");
             }
 
             var rootConditions = new List<string>();
@@ -1644,6 +1700,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             mu.ResetChangeStream = false;
             mu.InitialDocumenReplayed = false;
+            mu.ResumeDocumentKey = null;
+            mu.ResumeTokenOperation = default;
+            mu.CSLastResumeTokenWithChange = null;
+            mu.CSLastChangeUTCTime = null;
             mu.CSLastChecked = DateTime.MinValue; 
             mu.CSLastBatchDurationSeconds = 0;
             mu.CSNormalizedUpdatesInLastBatch = 0;
@@ -1818,7 +1878,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 return false;
             }
 
-            if (probeResult == null || !probeResult.Success || string.IsNullOrWhiteSpace(probeResult.ResumeToken))
+            if (probeResult == null || !probeResult.Success)
             {
                 if (!string.IsNullOrWhiteSpace(probeResult?.Error))
                 {
@@ -1828,8 +1888,9 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 return false;
             }
 
-            // Signal that a change was detected - SetChangeStreamResumeTokenAsync will handle the actual update
-            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe found new change for {mu.DatabaseName}.{mu.CollectionName} (signal-only mode).");
+            // Probe confirmed the change stream is reachable.
+            // Resume token positioning is handled by WatchChangeStreamUntilChangeAsync.
+            MigrationJobContext.AddVerboseLog($"{syncBackPrefix}ResumeTokenProbeExe probe succeeded for {mu.DatabaseName}.{mu.CollectionName}");
             return true;
         }
 
@@ -2066,10 +2127,12 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             else
             {
                 var chunk = mu.MigrationChunks[chunkIndex];
-                var bounds = SamplePartitioner.GetChunkBounds(chunk.Gte!, chunk.Lt!, chunk.DataType);
+                // Parse Lt and Lte separately to maintain correct query semantics
+                var bounds = SamplePartitioner.GetChunkBounds(chunk.Gte!, chunk.Lt ?? "", chunk.Lte ?? "", chunk.DataType);
                 deleteFilter = GenerateQueryFilter(
                     bounds.gte,
                     bounds.lt,
+                    bounds.lte,
                     chunk.DataType,
                     GetFilterDoc(mu.UserFilter),
                     mu.DataTypeFor_Id.HasValue);
@@ -2128,6 +2191,99 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
             log?.WriteLine($"Duplicate cleanup failed after {maxCleanupAttempts} attempts for {nsLog}[{chunkIndex}]. Last error: {Helper.RedactPii(lastCleanupError?.ToString() ?? "Unknown error")}", LogType.Debug);
             return (false, 0);
+        }
+
+        /// <summary>
+        /// Post-partition: Populates Lte for the last chunk and its segments with the snapshot max _id.
+        /// This ensures that when Lt is null (unbounded), Lte provides the upper bound for queries.
+        /// </summary>
+        public static void PopulateLteForLastChunk(
+            Log log,
+            IMongoCollection<BsonDocument> collection,
+            List<MigrationChunk> migrationChunks,
+            DataType dataType,
+            BsonDocument userFilter,
+            bool skipDataTypeFilter)
+        {
+            if (migrationChunks == null || migrationChunks.Count == 0)
+                return;
+
+            try
+            {
+                var snapshotMaxId = GetSnapshotMaxId(collection, dataType, userFilter, skipDataTypeFilter);
+                if (snapshotMaxId == null || snapshotMaxId.IsBsonNull)
+                    return;
+
+                var lastChunk = migrationChunks[^1];
+                var rawCollection = collection.Database.GetCollection<RawBsonDocument>(collection.CollectionNamespace.CollectionName);
+                var serializedMaxId = SerializeBsonValue(snapshotMaxId, dataType);
+
+                // Set Lte for the last chunk
+                if (!string.IsNullOrEmpty(serializedMaxId))
+                {
+                    lastChunk.Lte = serializedMaxId;
+
+                    // Set Lte for all segments in the last chunk
+                    if (lastChunk.Segments != null && lastChunk.Segments.Count > 0)
+                    {
+                        foreach (var segment in lastChunk.Segments)
+                        {
+                            segment.Lte = serializedMaxId;
+                        }
+                    }
+
+                    log.WriteLine($"Populated Lte={serializedMaxId} for last chunk and its segments", LogType.Debug);
+                }
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Unable to populate Lte for last chunk in {collection.CollectionNamespace}. Continuing without Lte. Details: {ex.Message}", LogType.Warning);
+            }
+        }
+
+        private static BsonValue? GetSnapshotMaxId(
+            IMongoCollection<BsonDocument> collection,
+            DataType dataType,
+            BsonDocument userFilter,
+            bool skipDataTypeFilter)
+        {
+            var rawCollection = collection.Database.GetCollection<RawBsonDocument>(collection.CollectionNamespace.CollectionName);
+            BsonDocument matchCondition = SamplePartitioner.BuildDataTypeCondition(dataType, userFilter, skipDataTypeFilter);
+
+            FilterDefinition<RawBsonDocument> filter = (matchCondition != null && matchCondition.ElementCount > 0)
+                ? new BsonDocumentFilterDefinition<RawBsonDocument>(matchCondition)
+                : FilterDefinition<RawBsonDocument>.Empty;
+
+            var maxDoc = rawCollection
+                .Find(filter)
+                .Sort(Builders<RawBsonDocument>.Sort.Descending("_id"))
+                .Project<RawBsonDocument>(Builders<RawBsonDocument>.Projection.Include("_id"))
+                .Limit(1)
+                .FirstOrDefault();
+
+            if (maxDoc == null || !maxDoc.Contains("_id"))
+                return null;
+
+            return maxDoc["_id"];
+        }
+
+        private static string? SerializeBsonValue(BsonValue? value, DataType dataType)
+        {
+            if (value == null)
+                return null;
+
+            if (value.IsBsonNull)
+                return "BsonNull";
+
+            if (value.IsBsonMaxKey)
+                return "BsonMaxKey";
+
+            return dataType switch
+            {
+                DataType.BinData => value.ToJson(),
+                DataType.Object => value.ToJson(),
+                _ => value.ToString()
+            };
         }
 
     }

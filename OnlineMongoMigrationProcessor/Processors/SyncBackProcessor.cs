@@ -82,7 +82,7 @@ namespace OnlineMongoMigrationProcessor.Processors
         }
 
 
-        public override async Task<TaskResult> StartProcessAsync(string MigrationUnitId, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public override async Task<TaskResult> StartProcessAsync(string MigrationUnitId, string sourceConnectionString, string targetConnectionString)
         {
 #if LEGACY_MONGODB_DRIVER
             _log.WriteLine("SyncBack is not supported with legacy MongoDB driver.", LogType.Warning);

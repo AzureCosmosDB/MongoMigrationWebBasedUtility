@@ -1,4 +1,4 @@
-﻿using MongoDB.Bson;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Bson.Serialization.Serializers;
 using MongoDB.Driver;
@@ -670,12 +670,14 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (migrationChunk.Segments.Count > 1)
             {
 #pragma warning disable CS8604 // Possible null reference argument.
-                var bounds = SamplePartitioner.GetChunkBounds(migrationChunk.Gte, migrationChunk.Lt, migrationChunk.DataType);
-#pragma warning restore CS8604 // Possible null reference argument.
+                // Parse Lt and Lte separately to maintain correct query semantics
+                var bounds = SamplePartitioner.GetChunkBounds(migrationChunk.Gte ?? "", migrationChunk.Lt ?? "", migrationChunk.Lte ?? "", migrationChunk.DataType);
                 var gte = bounds.gte;
                 var lt = bounds.lt;
+                var lte = bounds.lte;
 
-                FilterDefinition<BsonDocument> idFilter = MongoHelper.GenerateQueryFilter(gte, lt, migrationChunk.DataType, MongoHelper.GetFilterDoc(mu.UserFilter),mu.DataTypeFor_Id.HasValue);
+                FilterDefinition<BsonDocument> idFilter = MongoHelper.GenerateQueryFilter(gte, lt, lte, migrationChunk.DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
+#pragma warning restore CS8604 // Possible null reference argument.
                 
                 BsonDocument? userFilter = MongoHelper.GetFilterDoc(mu.UserFilter);
                 BsonDocument matchCondition = SamplePartitioner.BuildDataTypeCondition(migrationChunk.DataType, userFilter, mu.DataTypeFor_Id.HasValue);
@@ -813,12 +815,14 @@ namespace OnlineMongoMigrationProcessor.Workers
                 // Multiple segments - each segment has its own bounds
                 // Generate a segment-specific filter
 #pragma warning disable CS8604 // Possible null reference argument.
-                var bounds = SamplePartitioner.GetChunkBounds(segment.Gte, segment.Lt, mu.MigrationChunks[migrationChunkIndex].DataType);
-#pragma warning restore CS8604 // Possible null reference argument.
+                // Parse Lt and Lte separately to maintain correct query semantics
+                var bounds = SamplePartitioner.GetChunkBounds(segment.Gte ?? "", segment.Lt ?? "", segment.Lte ?? "", mu.MigrationChunks[migrationChunkIndex].DataType);
                 var gte = bounds.gte;
                 var lt = bounds.lt;
+                var lte = bounds.lte;
 
-                combinedFilter = MongoHelper.GenerateQueryFilter(gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
+                combinedFilter = MongoHelper.GenerateQueryFilter(gte, lt, lte, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
+#pragma warning restore CS8604 // Possible null reference argument.
             }
 
             return combinedFilter;
@@ -829,16 +833,18 @@ namespace OnlineMongoMigrationProcessor.Workers
             MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.ValidateChunkDocumentCounts: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={migrationChunkIndex}");
 
 #pragma warning disable CS8604 // Possible null reference argument.
-            var bounds = SamplePartitioner.GetChunkBounds(mu.MigrationChunks[migrationChunkIndex].Gte, mu.MigrationChunks[migrationChunkIndex].Lt, mu.MigrationChunks[migrationChunkIndex].DataType);
+            // Parse Lt and Lte separately to maintain correct query semantics
+            var bounds = SamplePartitioner.GetChunkBounds(mu.MigrationChunks[migrationChunkIndex].Gte ?? "", mu.MigrationChunks[migrationChunkIndex].Lt ?? "", mu.MigrationChunks[migrationChunkIndex].Lte ?? "", mu.MigrationChunks[migrationChunkIndex].DataType);
             var gte = bounds.gte;
             var lt = bounds.lt;
+            var lte = bounds.lte;
 
             _log.WriteLine($"Counting documents on target {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}].");
 
             try
             {
-                mu.MigrationChunks[migrationChunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(_targetCollection, gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
-                mu.MigrationChunks[migrationChunkIndex].DumpQueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, gte, lt, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
+                mu.MigrationChunks[migrationChunkIndex].DocCountInTarget = MongoHelper.GetDocumentCount(_targetCollection, gte, lt, lte, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
+                mu.MigrationChunks[migrationChunkIndex].DumpQueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, gte, lt, lte, mu.MigrationChunks[migrationChunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
             }
             catch (Exception ex)
             {
@@ -861,22 +867,6 @@ namespace OnlineMongoMigrationProcessor.Workers
             return TaskResult.Success;
         }
 
-        private async Task<TaskResult> WriteDocumentsToTarget(List<BsonDocument> documents, Segment segment, CancellationToken cancellationToken)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return TaskResult.Canceled;
-            }
-
-            if (!MongoHelper.IsCosmosRUEndpoint(_targetCollection))
-            {
-                return await WriteBulkDocuments(documents, segment, cancellationToken);
-            }
-            else
-            {
-                return await WriteDocumentsWithInsertMany(documents, segment, cancellationToken);
-            }
-        }
 
         private async Task<TaskResult> WriteRawDocumentsToTarget(List<RawBsonDocument> documents, Segment segment, CancellationToken cancellationToken)
         {
@@ -895,65 +885,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
         }
 
-        private async Task<TaskResult> WriteBulkDocuments(List<BsonDocument> documents, Segment segment, CancellationToken cancellationToken)
-        {
-            MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.WriteBulkDocuments: documents.Count={documents.Count}, segmentId={segment.Id}");
 
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return TaskResult.Canceled;
-            }
-
-            try
-            {
-                var insertModels = documents.Select(doc =>
-                {
-                    if (doc.Contains("_id") && doc["_id"].IsObjectId)
-                        doc["_id"] = doc["_id"].AsObjectId;
-                    return new InsertOneModel<BsonDocument>(doc);
-                }).ToList();
-
-                var result = await _targetCollection.BulkWriteAsync(insertModels, new BulkWriteOptions { IsOrdered = false }, cancellationToken);
-                Interlocked.Add(ref _successCount, result.InsertedCount);
-                segment.ResultDocCount += result.InsertedCount;
-                
-                return TaskResult.Success;
-            }
-            catch (OperationCanceledException)
-            {
-                return TaskResult.Canceled;
-            }
-        }
-
-        private async Task<TaskResult> WriteDocumentsWithInsertMany(List<BsonDocument> documents, Segment segment, CancellationToken cancellationToken)
-        {
-            MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.WriteDocumentsWithInsertMany: documents.Count={documents.Count}, segmentId={segment.Id}");
-
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return TaskResult.Canceled;
-            }
-
-            try
-            {
-                var docsToInsert = documents.Select(doc =>
-                {
-                    if (doc.Contains("_id") && doc["_id"].IsObjectId)
-                        doc["_id"] = doc["_id"].AsObjectId;
-                    return doc;
-                }).ToList();
-
-                await _targetCollection.InsertManyAsync(docsToInsert, new InsertManyOptions { IsOrdered = false }, cancellationToken);
-                Interlocked.Add(ref _successCount, docsToInsert.Count);
-                segment.ResultDocCount += docsToInsert.Count;
-                
-                return TaskResult.Success;
-            }
-            catch (OperationCanceledException)
-            {
-                return TaskResult.Canceled;
-            }
-        }
 
         private async Task<TaskResult> WriteBulkRawDocuments(List<RawBsonDocument> documents, Segment segment, CancellationToken cancellationToken)
         {

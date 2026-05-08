@@ -186,7 +186,13 @@ namespace OnlineMongoMigrationProcessor
 
             if (!_migrationUnitsToProcess.ContainsKey(mu.Id))
             {
-                _migrationUnitsToProcess.TryAdd(mu.Id, 0);
+                // Load persisted CSNormalizedUpdatesInLastBatch so sorting is correct after a restart
+                long initialValue = 0;
+                var fullMu = MigrationJobContext.GetMigrationUnit(mu.Id);
+                if (fullMu != null)
+                    initialValue = fullMu.CSNormalizedUpdatesInLastBatch;
+
+                _migrationUnitsToProcess.TryAdd(mu.Id, initialValue);
 
                 // Populate reverse lookup for O(1) target namespace resolution
                 var targetKey = $"{mu.GetEffectiveTargetDatabaseName()}.{mu.GetEffectiveTargetCollectionName()}";

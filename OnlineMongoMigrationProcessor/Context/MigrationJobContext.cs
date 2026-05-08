@@ -381,8 +381,9 @@ namespace OnlineMongoMigrationProcessor.Context
                 }
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                AddVerboseLog($"SaveMigrationUnit FAILED for {mu?.Id}: {ex.Message}");
                 return false;
             }
         }

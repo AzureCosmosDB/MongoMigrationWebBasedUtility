@@ -684,11 +684,12 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                     startOid = ObjectId.Parse(originalChunk.Gte);
                 }
 
-                // Resolve end ObjectId
+                // Resolve end ObjectId - prioritize Lt, then Lte
                 ObjectId endOid;
-                if (string.IsNullOrEmpty(originalChunk.Lt))
+                string? upperBound = !string.IsNullOrEmpty(originalChunk.Lt) ? originalChunk.Lt : originalChunk.Lte;
+                if (string.IsNullOrEmpty(upperBound))
                 {
-                    MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Lt is empty, querying collection for maximum ObjectId");
+                    MigrationJobContext.AddVerboseLog($"SplitObjectIdChunkIntoSubChunksAsync: Lt and Lte are empty, querying collection for maximum ObjectId");
                     var maxOid = await GetMaxObjectIdAsync(collection, timeoutSeconds);
                     if (!maxOid.HasValue)
                     {
@@ -700,7 +701,7 @@ namespace OnlineMongoMigrationProcessor.Partitioner
                 }
                 else
                 {
-                    endOid = ObjectId.Parse(originalChunk.Lt);
+                    endOid = ObjectId.Parse(upperBound);
                 }
 
                 // Generate boundaries and create sub-chunks

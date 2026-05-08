@@ -1,4 +1,4 @@
-﻿using MongoDB.Bson;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using OnlineMongoMigrationProcessor.Context;
@@ -60,15 +60,16 @@ namespace OnlineMongoMigrationProcessor
             if (mu.MigrationChunks.Count > 1)
             {
                 var gteStr = mu.MigrationChunks[chunkIndex].Gte ?? string.Empty;
-                var ltStr = mu.MigrationChunks[chunkIndex].Lt ?? string.Empty;
-                var bounds = SamplePartitioner.GetChunkBounds(gteStr, ltStr, mu.MigrationChunks[chunkIndex].DataType);
+                // Parse Lt and Lte separately to maintain correct query semantics
+                var bounds = SamplePartitioner.GetChunkBounds(gteStr, mu.MigrationChunks[chunkIndex].Lt ?? "", mu.MigrationChunks[chunkIndex].Lte ?? "", mu.MigrationChunks[chunkIndex].DataType);
                 var gte = bounds.gte;
                 var lt = bounds.lt;
+                var lte = bounds.lte;
 
                 _log.WriteLine($"{ctx.DatabaseName}.{ctx.CollectionName}-Chunk [{chunkIndex}] generating query");
 
                 // Generate query and get document count
-                filter = MongoHelper.GenerateQueryFilter(gte, lt, mu.MigrationChunks[chunkIndex].DataType,MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
+                filter = MongoHelper.GenerateQueryFilter(gte, lt, lte, mu.MigrationChunks[chunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
 
                 docCount = MongoHelper.GetDocumentCount(ctx.Collection, filter, new BsonDocument());//filter already has user filter.
                 mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
@@ -120,7 +121,7 @@ namespace OnlineMongoMigrationProcessor
 
 
 
-        public override async Task<TaskResult> StartProcessAsync(string migrationUnitId, string sourceConnectionString, string targetConnectionString, string idField = "_id")
+        public override async Task<TaskResult> StartProcessAsync(string migrationUnitId, string sourceConnectionString, string targetConnectionString)
         {
             MigrationJobContext.AddVerboseLog($"CopyProcessor.StartProcessAsync: migrationUnitId={migrationUnitId}");
             var mu=MigrationJobContext.GetMigrationUnit(migrationUnitId);

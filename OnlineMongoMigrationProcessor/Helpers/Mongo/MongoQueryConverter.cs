@@ -14,7 +14,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
     public static class MongoQueryConverter
     {
 
-        public static string ConvertMondumpFilter(string query, BsonValue? gte, BsonValue? lte, DataType dataType)
+        public static string ConvertMondumpFilter(string query, BsonValue? gte, BsonValue? lt, BsonValue? lte, DataType dataType)
         {
             if(dataType!= DataType.Object )
             {
@@ -22,19 +22,27 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             else
             {
-                return CreateMongoDumpFilter(gte, lte);
+                return CreateMongoDumpFilter(gte, lt, lte);
             }
 
         }
 
 
-        public static string CreateMongoDumpFilter(BsonValue? gte, BsonValue? lt)
+        public static string CreateMongoDumpFilter(BsonValue? gte, BsonValue? lt, BsonValue? lte)
         {
             var ops = new List<string>();
-            if (gte is BsonDocument gteDoc)
-                ops.Add($"\"$gte\": {gteDoc.ToJson()}");
-            if (lt is BsonDocument ltDoc)
-                ops.Add($"\"$lt\": {ltDoc.ToJson()}");
+            
+            // Add $gte if it's not null and not BsonNull
+            if (gte is not null && !(gte is BsonNull))
+                ops.Add($"\"$gte\": {gte.ToJson()}");
+            
+            // Add $lt if it's not null and not BsonNull (prefer $lt over $lte)
+            if (lt is not null && !(lt is BsonNull))
+                ops.Add($"\"$lt\": {lt.ToJson()}");
+            // Add $lte only if $lt is not present/null
+            else if (lte is not null && !(lte is BsonNull))
+                ops.Add($"\"$lte\": {lte.ToJson()}");
+            
             var criteria = $"{{ {string.Join(", ", ops)} }}";
             var filter = $"{{ \"_id\": {criteria} }}";
 
