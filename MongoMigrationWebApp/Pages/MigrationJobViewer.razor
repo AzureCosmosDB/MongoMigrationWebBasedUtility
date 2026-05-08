@@ -13,6 +13,12 @@
 @inject HttpClient HttpClient
 @implements IDisposable
 
+@if (CurrentlyLoadedMigrationJob == null)
+{
+    <p>Redirecting...</p>
+    return;
+}
+
 <div class="d-flex justify-content-between align-items-center mb-3">
     <h3>
         <button class="btn btn-light" @onclick="GoBack" title="Back to Job List" style="border: none; background: transparent;">
@@ -1299,6 +1305,7 @@ else if (@_showLogBackupFile)
     {
         if (CurrentlyLoadedMigrationJob == null) // Fixed the condition to check for null
         {
+            NavigationManager.NavigateTo("/", replace: true);
             return;
         }
 
