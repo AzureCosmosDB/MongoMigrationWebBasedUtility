@@ -29,7 +29,6 @@ namespace OnlineMongoMigrationProcessor
         
         private MongoClient _changeStreamMongoClient;
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _flushLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
-        // [RemovingProbe] private static readonly TimeSpan StaleCursorProbeThreshold = TimeSpan.FromHours(48);
 
         public CollectionLevelChangeStreamProcessor(Log log, MongoClient sourceClient, MongoClient targetClient, ActiveMigrationUnitsCache muCache, MigrationSettings config, bool syncBack = false, MigrationWorker? migrationWorker = null)
             : base(log, sourceClient, targetClient, muCache, config, syncBack, migrationWorker)
@@ -223,47 +222,6 @@ namespace OnlineMongoMigrationProcessor
                 .ToList();
         }
 
-
-        // [RemovingProbe] Probe eligibility check removed - always eligible
-        // private async Task<TaskResult> EnsureProbeEligibilityAsync(MigrationUnit mu)
-        // {
-        //     if (mu == null || mu.ResetChangeStream)
-        //     {
-        //         return TaskResult.Abort;
-        //     }
-        //
-        //     DateTime cursorTimestamp = _syncBack ? mu.SyncBackCursorUtcTimestamp : mu.CursorUtcTimestamp;
-        //     string resumeToken = _syncBack ? mu.SyncBackResumeToken ?? string.Empty : mu.ResumeToken ?? string.Empty;
-        //
-        //     if(cursorTimestamp == DateTime.MinValue)
-        //         return TaskResult.Abort;
-        //
-        //     if (!string.IsNullOrEmpty(resumeToken))
-        //         return TaskResult.Success;
-        //
-        //     if (DateTime.UtcNow - cursorTimestamp.ToUniversalTime()< StaleCursorProbeThreshold)
-        //         return TaskResult.Success;
-        //
-        //     var currentJob = MigrationJobContext.CurrentlyActiveJob;
-        //     string collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
-        //     _log.WriteLine($"{_syncBackPrefix}Stale cursor with empty resume token for {collectionKey}; running probe before processing.", LogType.Debug);
-        //
-        //     bool probeFoundChange = await MongoHelper.TryInitializeResumeTokenWithIsolatedProbeAsync(
-        //         _log,
-        //         currentJob,
-        //         mu,
-        //         _syncBack,
-        //         CancellationToken.None,
-        //         _syncBack ? null : _config.CACertContentsForSourceServer);
-        //
-        //     if (!probeFoundChange)
-        //     {
-        //         _log.ShowInMonitor($"{_syncBackPrefix}Skipping {collectionKey} - stale cursor and probe found no new change.");
-        //         return TaskResult.Abort;
-        //     }
-        //
-        //     return TaskResult.Success;
-        // }
 
         private void LogProcessingConfiguration(int collectionCount)
         {
