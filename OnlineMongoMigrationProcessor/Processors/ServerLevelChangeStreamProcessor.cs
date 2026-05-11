@@ -106,8 +106,6 @@ namespace OnlineMongoMigrationProcessor
         private async Task ProcessServerLevelRoundAsync(long loop)
         {
             int seconds = GetBatchDurationInSeconds(1.0f); // Use full duration for server-level
-            using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
-            CancellationToken cancellationToken = cancellationTokenSource.Token;
 
             _log.WriteLine($"{_syncBackPrefix}Processing round {loop} for server - level change stream. Batch Duration {seconds} seconds");
 
@@ -115,15 +113,16 @@ namespace OnlineMongoMigrationProcessor
 
             if (!string.IsNullOrEmpty(resumeToken))
             {
-                var touchedMuIdsInRound = await WatchServerLevelChangeStream(cancellationToken);
+                var touchedMuIdsInRound = await WatchServerLevelChangeStream();
                 SetTouchedCollectionsCSLastChecked(touchedMuIdsInRound);
                 await ResetCollectionsUntouchedSincePreviousRoundAsync(touchedMuIdsInRound);
             }
             else
             {
                 _log.WriteLine($"{_syncBackPrefix}No resume token found for server-level change stream. Waiting for 60 seconds before retrying.", LogType.Warning);
-                await InitializeResumeTokensAsync(cancellationToken);
-                await Task.Delay(60 * 1000, cancellationToken);
+                using var initCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                await InitializeResumeTokensAsync(initCts.Token);
+                await Task.Delay(60 * 1000, initCts.Token);
             }
 
             if (loop == 1 || loop % 4 == 0)
@@ -153,35 +152,18 @@ namespace OnlineMongoMigrationProcessor
                 // do nothing
             }
         }
-        private async Task<HashSet<string>> WatchServerLevelChangeStream(CancellationToken cancellationToken)
+        private async Task<HashSet<string>> WatchServerLevelChangeStream()
         {
             MigrationJobContext.AddVerboseLog("ServerLevelChangeStreamProcessor.WatchServerLevelChangeStream: starting");
 
             var state = new ServerWatchState();
             var batchCountersInitializedInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var touchedMuIdsInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            int maxAwaitSeconds = 5;
+            int maxAwaitSeconds = Math.Max(5, (int)(GetBatchDurationInSeconds(1.0f) * 0.8));
             BsonDocument[] pipelineArray = Array.Empty<BsonDocument>();
 
             try
             {
-                // Calculate MaxAwaitTime from the cancellation token timeout
-                // Use 80% of cancellation timeout or 5 seconds minimum to ensure cursor returns before cancellation
-                if (cancellationToken.CanBeCanceled)
-                {
-                    try
-                    {
-                        // Try to get timeout from CancellationTokenSource if available
-                        // Fall back to 5 seconds if we can't determine it
-                        var timeout = GetBatchDurationInSeconds(1.0f);
-                        maxAwaitSeconds = Math.Max(5, (int)(timeout * 0.8));
-                    }
-                    catch
-                    {
-                        maxAwaitSeconds = 5;
-                    }
-                }
-
                 // Create pipeline for server-level change stream
                 List<BsonDocument> pipeline = new List<BsonDocument>();
                 _namespaceFilterApplied = BuildServerLevelNamespaceFilterPipeline(pipeline);
@@ -225,16 +207,19 @@ namespace OnlineMongoMigrationProcessor
                 pipelineArray = pipeline.ToArray();
 
                 // Watch at client level (server-level) with a dedicated 5-minute cursor creation timeout
+                _log.WriteLine($"{_syncBackPrefix}[temp] Creating server-level change stream cursor...", LogType.Info);
                 using var cursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
                 IChangeStreamCursor<ChangeStreamDocument<BsonDocument>>? cursor = null;
                 var cursorCreationSw = Stopwatch.StartNew();
                 try
                 {
-                    cursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cursorCreationCts.Token);
+                    cursor = await Task.Run(() =>
+                        _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cursorCreationCts.Token),
+                        cursorCreationCts.Token);
                 }
                 catch (OperationCanceledException) when (cursorCreationCts.IsCancellationRequested)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (5 min) for server-level change stream.", LogType.Warning);
+                    _log.WriteLine($"{_syncBackPrefix}[temp] Cursor creation timed out (5 min) for server-level change stream.", LogType.Warning);
                     return touchedMuIdsInRound;
                 }
                 finally
@@ -242,20 +227,27 @@ namespace OnlineMongoMigrationProcessor
                     cursorCreationSw.Stop();
                 }
 
+                _log.WriteLine($"{_syncBackPrefix}[temp] Server-level cursor created in {cursorCreationSw.Elapsed.TotalSeconds:F1}s. Starting processing...", LogType.Info);
+
                 if (cursorCreationSw.Elapsed.TotalSeconds > GetBatchDurationInSeconds(1.0f))
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Cursor creation for server-level change stream took {cursorCreationSw.Elapsed.TotalSeconds:F1}s, exceeding batch duration of {GetBatchDurationInSeconds(1.0f)}s", LogType.Warning);
+                    _log.WriteLine($"{_syncBackPrefix}[temp] Cursor creation for server-level change stream took {cursorCreationSw.Elapsed.TotalSeconds:F1}s, exceeding batch duration of {GetBatchDurationInSeconds(1.0f)}s", LogType.Warning);
                 }
 
                 using (cursor)
                 {
+                    // Create a fresh batch-duration CTS that starts NOW (after cursor creation),
+                    // so processing always gets the full batch time regardless of how long cursor creation took.
+                    using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                    var batchToken = batchCts.Token;
+
                     if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
                     {
-                        await ProcessLegacyWatchLoopAsync(cursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                     }
                     else
                     {
-                        await ProcessModernWatchLoopAsync(cursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                     }
                 }
             }
@@ -303,11 +295,13 @@ namespace OnlineMongoMigrationProcessor
                     var retryCursorCreationSw = Stopwatch.StartNew();
                     try
                     {
-                        retryCursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, retryCursorCreationCts.Token);
+                        retryCursor = await Task.Run(() =>
+                            _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, retryCursorCreationCts.Token),
+                            retryCursorCreationCts.Token);
                     }
                     catch (OperationCanceledException) when (retryCursorCreationCts.IsCancellationRequested)
                     {
-                        _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (5 min) during StartAtOperationTime fallback.", LogType.Warning);
+                        _log.WriteLine($"{_syncBackPrefix}[temp] Cursor creation timed out (5 min) during StartAtOperationTime fallback.", LogType.Warning);
                         return touchedMuIdsInRound;
                     }
                     finally
@@ -317,14 +311,17 @@ namespace OnlineMongoMigrationProcessor
 
                     if (retryCursorCreationSw.Elapsed.TotalSeconds > GetBatchDurationInSeconds(1.0f))
                     {
-                        _log.WriteLine($"{_syncBackPrefix}Cursor creation for server-level fallback took {retryCursorCreationSw.Elapsed.TotalSeconds:F1}s, exceeding batch duration of {GetBatchDurationInSeconds(1.0f)}s", LogType.Warning);
+                        _log.WriteLine($"{_syncBackPrefix}[temp] Cursor creation for server-level fallback took {retryCursorCreationSw.Elapsed.TotalSeconds:F1}s, exceeding batch duration of {GetBatchDurationInSeconds(1.0f)}s", LogType.Warning);
                     }
                     using (retryCursor)
                     {
+                        using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                        var retryBatchToken = retryBatchCts.Token;
+
                         if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
-                            await ProcessLegacyWatchLoopAsync(retryCursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                         else
-                            await ProcessModernWatchLoopAsync(retryCursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                     }
 
                     _log.WriteLine($"{_syncBackPrefix}StartAtOperationTime fallback succeeded.", LogType.Warning);
