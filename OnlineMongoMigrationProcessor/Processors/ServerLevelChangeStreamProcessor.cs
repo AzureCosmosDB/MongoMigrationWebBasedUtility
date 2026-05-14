@@ -29,7 +29,6 @@ namespace OnlineMongoMigrationProcessor
         protected OrderedUniqueList<string> _uniqueCollectionKeys;
         private readonly ConcurrentDictionary<string, BsonDocument> _userFilterCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, IMongoCollection<BsonDocument>> _targetCollectionCache = new(StringComparer.OrdinalIgnoreCase);
-        private readonly ConcurrentDictionary<string, DateTime> _lastMuPersistUtc = new(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> _touchedMuIdsInPreviousRound = new(StringComparer.OrdinalIgnoreCase);
         private bool _hasTouchedBaseline = false;
         private bool _namespaceFilterApplied = false;
@@ -44,6 +43,21 @@ namespace OnlineMongoMigrationProcessor
             public ChangeStreamOperationType LatestOperationType { get; set; } = ChangeStreamOperationType.Insert;
             public string LatestDocumentKey { get; set; } = string.Empty;
             public string LatestCollectionKey { get; set; } = string.Empty;
+            public bool HasFailures { get; set; }
+
+            /// <summary>Accumulated per-MU batch stats, applied to MU objects only on the final flush.</summary>
+            public Dictionary<string, MuBatchStats> BatchStats { get; } = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private sealed class MuBatchStats
+        {
+            public long EventCount { get; set; }
+            public string LatestResumeToken { get; set; } = string.Empty;
+            public DateTime LatestTimestamp { get; set; } = DateTime.MinValue;
+            public long TotalReadDurationMs { get; set; }
+            public long TotalWriteDurationMs { get; set; }
+            public ChangeStreamOperationType LatestOperationType { get; set; }
+            public string LatestDocumentKey { get; set; } = string.Empty;
         }
 
 
@@ -106,8 +120,6 @@ namespace OnlineMongoMigrationProcessor
         private async Task ProcessServerLevelRoundAsync(long loop)
         {
             int seconds = GetBatchDurationInSeconds(1.0f); // Use full duration for server-level
-            using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
-            CancellationToken cancellationToken = cancellationTokenSource.Token;
 
             _log.WriteLine($"{_syncBackPrefix}Processing round {loop} for server - level change stream. Batch Duration {seconds} seconds");
 
@@ -115,15 +127,16 @@ namespace OnlineMongoMigrationProcessor
 
             if (!string.IsNullOrEmpty(resumeToken))
             {
-                var touchedMuIdsInRound = await WatchServerLevelChangeStream(cancellationToken);
+                var touchedMuIdsInRound = await WatchServerLevelChangeStream();
                 SetTouchedCollectionsCSLastChecked(touchedMuIdsInRound);
                 await ResetCollectionsUntouchedSincePreviousRoundAsync(touchedMuIdsInRound);
             }
             else
             {
                 _log.WriteLine($"{_syncBackPrefix}No resume token found for server-level change stream. Waiting for 60 seconds before retrying.", LogType.Warning);
-                await InitializeResumeTokensAsync(cancellationToken);
-                await Task.Delay(60 * 1000, cancellationToken);
+                using var initCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                await InitializeResumeTokensAsync(initCts.Token);
+                await Task.Delay(60 * 1000, initCts.Token);
             }
 
             if (loop == 1 || loop % 4 == 0)
@@ -153,35 +166,18 @@ namespace OnlineMongoMigrationProcessor
                 // do nothing
             }
         }
-        private async Task<HashSet<string>> WatchServerLevelChangeStream(CancellationToken cancellationToken)
+        private async Task<HashSet<string>> WatchServerLevelChangeStream()
         {
             MigrationJobContext.AddVerboseLog("ServerLevelChangeStreamProcessor.WatchServerLevelChangeStream: starting");
 
             var state = new ServerWatchState();
             var batchCountersInitializedInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var touchedMuIdsInRound = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            int maxAwaitSeconds = 5;
+            int maxAwaitSeconds = Math.Max(5, (int)(GetBatchDurationInSeconds(1.0f) * 0.8));
             BsonDocument[] pipelineArray = Array.Empty<BsonDocument>();
 
             try
             {
-                // Calculate MaxAwaitTime from the cancellation token timeout
-                // Use 80% of cancellation timeout or 5 seconds minimum to ensure cursor returns before cancellation
-                if (cancellationToken.CanBeCanceled)
-                {
-                    try
-                    {
-                        // Try to get timeout from CancellationTokenSource if available
-                        // Fall back to 5 seconds if we can't determine it
-                        var timeout = GetBatchDurationInSeconds(1.0f);
-                        maxAwaitSeconds = Math.Max(5, (int)(timeout * 0.8));
-                    }
-                    catch
-                    {
-                        maxAwaitSeconds = 5;
-                    }
-                }
-
                 // Create pipeline for server-level change stream
                 List<BsonDocument> pipeline = new List<BsonDocument>();
                 _namespaceFilterApplied = BuildServerLevelNamespaceFilterPipeline(pipeline);
@@ -224,23 +220,34 @@ namespace OnlineMongoMigrationProcessor
 
                 pipelineArray = pipeline.ToArray();
 
-                // Watch at client level (server-level) with a dedicated 5-minute cursor creation timeout
-                using var cursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+                // Watch at client level (server-level) with a dedicated 10-minute cursor creation timeout
+                _log.WriteLine($"{_syncBackPrefix}Creating server-level change stream cursor...", LogType.Debug);
+                using var cursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
                 IChangeStreamCursor<ChangeStreamDocument<BsonDocument>>? cursor = null;
                 var cursorCreationSw = Stopwatch.StartNew();
                 try
                 {
-                    cursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cursorCreationCts.Token);
+                    cursor = await Task.Run(() =>
+                        _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cursorCreationCts.Token),
+                        cursorCreationCts.Token);
                 }
                 catch (OperationCanceledException) when (cursorCreationCts.IsCancellationRequested)
                 {
-                    _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (5 min) for server-level change stream.", LogType.Warning);
+                    _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (10 min) for server-level change stream.", LogType.Warning);
+                    if (_namespaceFilterApplied)
+                    {
+                        MigrationJobContext.CurrentlyActiveJob.UseClientSideCSFilter = true;
+                        MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                        _log.WriteLine($"{_syncBackPrefix}Namespace filter has {pipelineArray.Length} stage(s) with {_migrationUnitsToProcess.Count} collections. Switching to unfiltered server-level watch with client-side filtering.", LogType.Warning);
+                    }
                     return touchedMuIdsInRound;
                 }
                 finally
                 {
                     cursorCreationSw.Stop();
                 }
+
+                _log.WriteLine($"{_syncBackPrefix}Server-level cursor created in {cursorCreationSw.Elapsed.TotalSeconds:F1}s. Starting processing...", LogType.Debug);
 
                 if (cursorCreationSw.Elapsed.TotalSeconds > GetBatchDurationInSeconds(1.0f))
                 {
@@ -249,13 +256,39 @@ namespace OnlineMongoMigrationProcessor
 
                 using (cursor)
                 {
+                    // Create a fresh batch-duration CTS that starts NOW (after cursor creation),
+                    // so processing always gets the full batch time regardless of how long cursor creation took.
+                    using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                    var batchToken = batchCts.Token;
+
                     if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
                     {
-                        await ProcessLegacyWatchLoopAsync(cursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                     }
                     else
                     {
-                        await ProcessModernWatchLoopAsync(cursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                    }
+
+                    // Advance resume token using postBatchResumeToken when all changes
+                    // were persisted successfully (or no events were received).
+                    // If any write failed, keep the last change-event token so we
+                    // re-process from that point on the next round.
+                    if (!state.HasFailures)
+                    {
+                        try
+                        {
+                            var postBatchToken = cursor.GetResumeToken();
+                            if (postBatchToken != null)
+                            {
+                                state.LatestResumeToken = postBatchToken.ToJson();
+                                state.LatestTimestamp = DateTime.UtcNow;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level stream: {ex.Message}", LogType.Debug);
+                        }
                     }
                 }
             }
@@ -298,16 +331,24 @@ namespace OnlineMongoMigrationProcessor
                         MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
                     };
 
-                    using var retryCursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+                    using var retryCursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
                     IChangeStreamCursor<ChangeStreamDocument<BsonDocument>>? retryCursor;
                     var retryCursorCreationSw = Stopwatch.StartNew();
                     try
                     {
-                        retryCursor = _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, retryCursorCreationCts.Token);
+                        retryCursor = await Task.Run(() =>
+                            _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, retryCursorCreationCts.Token),
+                            retryCursorCreationCts.Token);
                     }
                     catch (OperationCanceledException) when (retryCursorCreationCts.IsCancellationRequested)
                     {
-                        _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (5 min) during StartAtOperationTime fallback.", LogType.Warning);
+                        _log.WriteLine($"{_syncBackPrefix}Cursor creation timed out (10 min) during StartAtOperationTime fallback.", LogType.Warning);
+                        if (_namespaceFilterApplied)
+                        {
+                            MigrationJobContext.CurrentlyActiveJob.UseClientSideCSFilter = true;
+                            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                            _log.WriteLine($"{_syncBackPrefix}Switching to unfiltered server-level watch with client-side filtering for {_migrationUnitsToProcess.Count} collections.", LogType.Warning);
+                        }
                         return touchedMuIdsInRound;
                     }
                     finally
@@ -321,10 +362,32 @@ namespace OnlineMongoMigrationProcessor
                     }
                     using (retryCursor)
                     {
+                        using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                        var retryBatchToken = retryBatchCts.Token;
+
                         if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
-                            await ProcessLegacyWatchLoopAsync(retryCursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                         else
-                            await ProcessModernWatchLoopAsync(retryCursor, cancellationToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+
+                        // Advance resume token using postBatchResumeToken when all
+                        // changes were persisted successfully (or no events received).
+                        if (!state.HasFailures)
+                        {
+                            try
+                            {
+                                var postBatchToken = retryCursor.GetResumeToken();
+                                if (postBatchToken != null)
+                                {
+                                    state.LatestResumeToken = postBatchToken.ToJson();
+                                    state.LatestTimestamp = DateTime.UtcNow;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level fallback stream: {ex.Message}", LogType.Debug);
+                            }
+                        }
                     }
 
                     _log.WriteLine($"{_syncBackPrefix}StartAtOperationTime fallback succeeded.", LogType.Warning);
@@ -358,6 +421,9 @@ namespace OnlineMongoMigrationProcessor
                     {
                         await FlushAndCheckpointAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound, true);
                     }
+                    // Apply accumulated batch stats for MUs that were flushed in earlier
+                    // mid-batch cycles and didn't appear in the final flush results.
+                    ApplyRemainingBatchStats(state, touchedMuIdsInRound);
                     SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey);
 
                 }
@@ -486,7 +552,7 @@ namespace OnlineMongoMigrationProcessor
         {
             try
             {
-                await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist);
+                await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist, state);
                 SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey);
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
@@ -501,6 +567,13 @@ namespace OnlineMongoMigrationProcessor
         {
             // In monitor-all mode, keep full stream visibility.
             if (_monitorAllCollections)
+            {
+                return false;
+            }
+
+            // If a previous cursor creation timed out with server-side filtering,
+            // skip the pipeline and use client-side filtering for subsequent rounds.
+            if (MigrationJobContext.CurrentlyActiveJob.UseClientSideCSFilter)
             {
                 return false;
             }
@@ -575,10 +648,6 @@ namespace OnlineMongoMigrationProcessor
                 return;
 
             UpdateResumeToken(latestResumeToken, latestOperationType, latestDocumentKey, latestCollectionKey);
-
-            // Server-level UI "Time Since Last Change" reads job.CSLastChecked.
-            // Refresh it on every successful checkpoint so lag display stays current.
-            MigrationJobContext.CurrentlyActiveJob.CSLastChecked = DateTime.UtcNow;
 
             if (!_syncBack)
                 MigrationJobContext.CurrentlyActiveJob.CursorUtcTimestamp = latestTimestamp;
@@ -773,7 +842,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private async Task BulkProcessAllChangesAsync(Dictionary<string, AccumulatedChangesTracker> accumulatedChangesInColl, HashSet<string> batchCountersInitializedInRound, HashSet<string> touchedMuIdsInRound, bool forcePersist)
+        private async Task BulkProcessAllChangesAsync(Dictionary<string, AccumulatedChangesTracker> accumulatedChangesInColl, HashSet<string> batchCountersInitializedInRound, HashSet<string> touchedMuIdsInRound, bool forcePersist, ServerWatchState? watchState = null)
         {
             var entriesToProcess = CollectEntriesToProcess(accumulatedChangesInColl);
 
@@ -787,7 +856,7 @@ namespace OnlineMongoMigrationProcessor
             // Await all parallel writes
             var results = await Task.WhenAll(tasks);
 
-            ApplyBulkWriteResults(results, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist);
+            ApplyBulkWriteResults(results, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist, watchState);
 
             // Parent job persistence is handled by SetJobResumeToken after each successful flush checkpoint.
         }
@@ -873,10 +942,13 @@ namespace OnlineMongoMigrationProcessor
             (string collectionKey, MigrationUnit mu, AccumulatedChangesTracker docs, bool success)[] results,
             HashSet<string> batchCountersInitializedInRound,
             HashSet<string> touchedMuIdsInRound,
-            bool forcePersist)
+            bool forcePersist,
+            ServerWatchState? watchState = null)
         {
             foreach (var (collectionKey, mu, docs, success) in results)
             {
+                if (!success && watchState != null)
+                    watchState.HasFailures = true;
                 if (success && !string.IsNullOrEmpty(docs.LatestResumeToken))
                 {
                     var flushedEventCount = docs.TotalEventCount;
@@ -888,33 +960,28 @@ namespace OnlineMongoMigrationProcessor
                     else
                         mu.SyncBackCursorUtcTimestamp = docs.LatestTimestamp;
 
-                    if (flushedEventCount > 0)
+                    // Accumulate stats locally; they are applied to MU on the final flush.
+                    if (watchState != null && flushedEventCount > 0)
                     {
-                        mu.CSLastResumeTokenWithChange = docs.LatestResumeToken;
-                        mu.CSLastChangeUTCTime = docs.LatestTimestamp;
-                        mu.CSAvgReadLatencyInMS = Math.Round((double)docs.CSTotalReadDurationInMS / flushedEventCount, 2);
-                        mu.CSAvgWriteLatencyInMS = Math.Round((double)docs.CSTotaWriteDurationInMS / flushedEventCount, 2);
+                        if (!watchState.BatchStats.TryGetValue(mu.Id, out var stats))
+                        {
+                            stats = new MuBatchStats();
+                            watchState.BatchStats[mu.Id] = stats;
+                        }
+                        stats.EventCount += flushedEventCount;
+                        stats.LatestResumeToken = docs.LatestResumeToken;
+                        stats.LatestTimestamp = docs.LatestTimestamp;
+                        stats.TotalReadDurationMs += docs.CSTotalReadDurationInMS;
+                        stats.TotalWriteDurationMs += docs.CSTotaWriteDurationInMS;
+                        stats.LatestOperationType = docs.LatestOperationType;
+                        stats.LatestDocumentKey = docs.LatestDocumentKey;
                     }
 
-                    if (batchCountersInitializedInRound.Add(mu.Id))
+                    if (forcePersist)
                     {
-                        mu.CSUpdatesInLastBatch = 0;
-                        mu.CSNormalizedUpdatesInLastBatch = 0;
-                    }
-
-                    mu.CSUpdatesInLastBatch += flushedEventCount;
-                    mu.CSNormalizedUpdatesInLastBatch = mu.CSUpdatesInLastBatch;
-                    mu.UpdateParentJob();
-
-                    var now = DateTime.UtcNow;
-                    bool shouldPersistMu = forcePersist
-                        || !_lastMuPersistUtc.TryGetValue(mu.Id, out var lastPersistedUtc)
-                        || (now - lastPersistedUtc).TotalSeconds >= 2;
-
-                    if (shouldPersistMu)
-                    {
+                        ApplyBatchStatsToMu(mu, watchState);
+                        mu.UpdateParentJob();
                         MigrationJobContext.SaveMigrationUnit(mu, false);
-                        _lastMuPersistUtc[mu.Id] = now;
                     }
                 }
 
@@ -922,7 +989,61 @@ namespace OnlineMongoMigrationProcessor
                 {
                     docs.Reset(true);
                 }
+                else
+                {
+                    // Track any failure so postBatchResumeToken is not advanced
+                    // past events that were not fully persisted.
+                }
             }
+        }
+
+        private void ApplyBatchStatsToMu(MigrationUnit mu, ServerWatchState? watchState)
+        {
+            if (watchState == null || !watchState.BatchStats.TryGetValue(mu.Id, out var stats))
+            {
+                mu.CSUpdatesInLastBatch = 0;
+                mu.CSNormalizedUpdatesInLastBatch = 0;
+                return;
+            }
+
+            mu.CSUpdatesInLastBatch = stats.EventCount;
+            mu.CSNormalizedUpdatesInLastBatch = stats.EventCount;
+            mu.CSLastResumeTokenWithChange = stats.LatestResumeToken;
+            mu.CSLastChangeUTCTime = stats.LatestTimestamp;
+            mu.CSAvgReadLatencyInMS = Math.Round((double)stats.TotalReadDurationMs / stats.EventCount, 2);
+            mu.CSAvgWriteLatencyInMS = Math.Round((double)stats.TotalWriteDurationMs / stats.EventCount, 2);
+
+            // Mark as applied so ApplyRemainingBatchStats skips it.
+            watchState.BatchStats.Remove(mu.Id);
+        }
+
+        /// <summary>
+        /// Applies accumulated batch stats for MUs that were fully flushed during
+        /// mid-batch cycles and did not appear in the final flush results.
+        /// </summary>
+        private void ApplyRemainingBatchStats(ServerWatchState state, HashSet<string> touchedMuIdsInRound)
+        {
+            if (state.BatchStats.Count == 0)
+                return;
+
+            foreach (var (muId, stats) in state.BatchStats)
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(muId);
+                if (mu == null)
+                    continue;
+
+                mu.CSUpdatesInLastBatch = stats.EventCount;
+                mu.CSNormalizedUpdatesInLastBatch = stats.EventCount;
+                mu.CSLastResumeTokenWithChange = stats.LatestResumeToken;
+                mu.CSLastChangeUTCTime = stats.LatestTimestamp;
+                mu.CSAvgReadLatencyInMS = Math.Round((double)stats.TotalReadDurationMs / stats.EventCount, 2);
+                mu.CSAvgWriteLatencyInMS = Math.Round((double)stats.TotalWriteDurationMs / stats.EventCount, 2);
+
+                mu.UpdateParentJob();
+                MigrationJobContext.SaveMigrationUnit(mu, false);
+            }
+
+            state.BatchStats.Clear();
         }
 
         // Server-level equivalent of AutoReplayFirstChangeInResumeToken
