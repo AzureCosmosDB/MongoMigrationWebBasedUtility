@@ -45,6 +45,13 @@ namespace OnlineMongoMigrationProcessor
                
         public bool CSPostProcessingStarted { get; set; }
         public ChangeStreamLevel ChangeStreamLevel { get; set; }
+
+        /// <summary>
+        /// When true, server-level change stream skips the $match pipeline and uses
+        /// client-side namespace filtering. Set automatically when cursor creation
+        /// times out with a server-side filter.
+        /// </summary>
+        public bool UseClientSideCSFilter { get; set; }
         
         /// <summary>
         /// Minimum log level to write to logs. Default is Info (Error=0, Info=1, Debug=2, Verbose=3)
