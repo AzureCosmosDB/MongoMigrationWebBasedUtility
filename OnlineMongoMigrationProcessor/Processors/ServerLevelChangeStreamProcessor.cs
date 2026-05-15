@@ -139,10 +139,6 @@ namespace OnlineMongoMigrationProcessor
                 await Task.Delay(60 * 1000, initCts.Token);
             }
 
-            if (loop == 1 || loop % 4 == 0)
-            {
-                await AggressiveCSCleanupAsync();
-            }
         }
 
         private async Task InitializeResumeTokensAsync(CancellationToken token)
@@ -196,7 +192,7 @@ namespace OnlineMongoMigrationProcessor
 
                 // Handle initial document replay for server-level streams
                 bool initialReplayCompleted = GetInitialDocumentReplayedStatus();
-                if (!initialReplayCompleted && !MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun && MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode != ChangeStreamMode.Aggressive)
+                if (!initialReplayCompleted && !MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
                 {
                     if (!AutoReplayFirstChangeInResumeToken())
                     {

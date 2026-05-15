@@ -162,7 +162,7 @@
                         <label for="change-stream-mode" class="form-label" title="Configure when change stream processing begins during migration.">
                             Change Stream Mode
                         </label>                
-                        <select id="change-stream-mode" value="@SelectedChangeStreamMode" class="form-select" @onchange="OnChangeStreamModeChanged" disabled="@(!NewMode || cdcMode == CDCMode.Offline || jobType == JobType.RUOptimizedCopy)">
+                        <select id="change-stream-mode" value="@SelectedChangeStreamMode" class="form-select" @onchange="OnChangeStreamModeChanged" disabled="@(!NewMode || cdcMode == CDCMode.Offline || jobType == JobType.RUOptimizedCopy || changeStreamLevel == ChangeStreamLevel.Server)">
                             <option value="Delayed" title="Start change stream processing after all collections are completed. This mode is ideal when migrating a large number of collections.">Delayed</option>
                             <option value="Immediate" title="Start change stream processing immediately as each collection is processed.">Immediate</option>
                             <option value="Aggressive" title="Use aggressive change stream processing when the oplog is small or the write rate is very high. Avoid this mode if a large number of collections need to be migrated.">Aggressive</option>
@@ -426,6 +426,12 @@
         var val = e?.Value?.ToString() ?? "Collection";
         SelectedChangeStreamScope = val;
         changeStreamLevel = val == "Server" ? ChangeStreamLevel.Server : ChangeStreamLevel.Collection;
+
+        if (changeStreamLevel == ChangeStreamLevel.Server)
+        {
+            changeStreamMode = ChangeStreamMode.Delayed;
+            SelectedChangeStreamMode = "Delayed";
+        }
     }
 
     private void OnChangeStreamModeChanged(ChangeEventArgs e)
