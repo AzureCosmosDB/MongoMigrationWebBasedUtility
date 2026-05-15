@@ -785,7 +785,11 @@ When creating or resuming a job, you can tailor behavior via these options:
 - Skip Indexes
     - If ON: Skips index creation on target (data only). Forced ON for RU-optimized copy. You can create indexes separately before migration.
 
-- Change Stream Modes
+- Change Stream Scope (configured in the **Advanced** tab of the **New Job Details** screen)
+    - **Collection**: Opens a separate change stream per collection. Collections are batched together and processed in round-robin fashion, so each collection is watched only during its turn. This can lead to higher lag when migrating many collections because each collection must wait for its batch slot. Best when the number of collections is small (roughly < 50) or when only a few collections receive frequent writes.
+    - **Server**: Opens a single server-level change stream that captures changes across all databases and collections in one stream. Because every change is seen immediately regardless of the number of collections, lag stays low even with hundreds of collections. Recommended when migrating a large number of collections and most of them are updated often. Not supported for RU-optimized copy jobs.
+
+- Change Stream Modes (configured in the **Advanced** tab; applies to Collection-level scope)
     - Delayed: Start change stream processing after all collections are completed. This mode is ideal when migrating a large number of collections.
     - Immediate: Start change stream processing immediately as each collection is processed.
     - Aggressive: Use aggressive change stream processing when the oplog is small or the write rate is very high. Avoid this mode if a large number of collections need to be migrated.
