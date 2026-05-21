@@ -214,6 +214,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     result.Failures += batchResult.Failures;
                     result.Skipped += batchResult.Skipped;
                     result.WriteLatencyMS += batchResult.WriteLatencyMS;
+                    result.FailedDocumentKeys.AddRange(batchResult.FailedDocumentKeys);
                     
                     if (!batchResult.Success)
                     {
@@ -373,6 +374,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 result.WriteLatencyMS += insertResult.WriteLatencyMS;
                 result.Success &= insertResult.Success;
                 result.Errors.AddRange(insertResult.Errors);
+                result.FailedDocumentKeys.AddRange(insertResult.FailedDocumentKeys);
             }
 
             if (updateOps.Any())
@@ -386,6 +388,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 result.WriteLatencyMS += updateResult.WriteLatencyMS;
                 result.Success &= updateResult.Success;
                 result.Errors.AddRange(updateResult.Errors);
+                result.FailedDocumentKeys.AddRange(updateResult.FailedDocumentKeys);
             }
 
             if (deleteOps.Any())
@@ -399,6 +402,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 result.WriteLatencyMS += deleteResult.WriteLatencyMS;
                 result.Success &= deleteResult.Success;
                 result.Errors.AddRange(deleteResult.Errors);
+                result.FailedDocumentKeys.AddRange(deleteResult.FailedDocumentKeys);
             }
 
             return result;
@@ -585,6 +589,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             {
                                 result.Failures += otherErrors.Count;
                                 _log.WriteLine($"{_logPrefix}Insert errors in {collection.CollectionNamespace.FullName}: {string.Join(", ", otherErrors.Select(e => e.Message))}", LogType.Warning);
+                                
                             }
                             break; // Exit retry loop after handling BulkWriteException
                         }
@@ -598,6 +603,11 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             }
                             else
                             {
+                                // Log failed document keys for the entire batch
+                                var failedKeys = deduplicatedInserts.Where(e => e.DocumentKey != null).Select(e => e.DocumentKey.ToJson()).ToList();
+                                result.FailedDocumentKeys.AddRange(failedKeys);
+                                _log.WriteLine($"{_logPrefix}Insert deadlock exhausted retries. Failed DocumentKeys: [{string.Join(", ", failedKeys.Take(20))}]{(failedKeys.Count > 20 ? $"... (+{failedKeys.Count - 20} more)" : "")} in {collection.CollectionNamespace.FullName}", LogType.Error);
+
                                 string errorMsg = $"CRITICAL: Unable to process insert batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts due to persistent deadlock. Data loss prevention requires job termination.";
                                 _log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
                                 result.Success = false;
@@ -616,6 +626,11 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             }
                             else
                             {
+                                // Log failed document keys for the entire batch
+                                var failedKeys = deduplicatedInserts.Where(e => e.DocumentKey != null).Select(e => e.DocumentKey.ToJson()).ToList();
+                                result.FailedDocumentKeys.AddRange(failedKeys);
+                                _log.WriteLine($"{_logPrefix}Insert transient error exhausted retries. Failed DocumentKeys: [{string.Join(", ", failedKeys.Take(20))}]{(failedKeys.Count > 20 ? $"... (+{failedKeys.Count - 20} more)" : "")} in {collection.CollectionNamespace.FullName}", LogType.Error);
+
                                 string errorMsg = $"CRITICAL: Unable to process insert batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts. Detials: {ex}";
                                 _log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
                                 result.Success = false;
@@ -758,8 +773,13 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             }
                             else
                             {
+                                // Log failed document keys for the entire batch
+                                var failedKeys = groupedUpdates.Where(e => e.DocumentKey != null).Select(e => e.DocumentKey.ToJson()).ToList();
+                                result.FailedDocumentKeys.AddRange(failedKeys);
+                                _log.WriteLine($"{_logPrefix}Update deadlock exhausted retries. Failed DocumentKeys: [{string.Join(", ", failedKeys.Take(20))}]{(failedKeys.Count > 20 ? $"... (+{failedKeys.Count - 20} more)" : "")} in {collection.CollectionNamespace.FullName}", LogType.Error);
+
                                 string errorMsg = $"CRITICAL: Unable to process update batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts due to persistent deadlock.";
-                                _log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
+                                //_log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
                                 result.Success = false;
                                 result.Errors.Add(errorMsg);
                                 throw new InvalidOperationException(errorMsg);
@@ -776,8 +796,13 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             }
                             else
                             {
+                                // Log failed document keys for the entire batch
+                                var failedKeys = groupedUpdates.Where(e => e.DocumentKey != null).Select(e => e.DocumentKey.ToJson()).ToList();
+                                result.FailedDocumentKeys.AddRange(failedKeys);
+                                _log.WriteLine($"{_logPrefix}Update transient error exhausted retries. Failed DocumentKeys: [{string.Join(", ", failedKeys.Take(20))}]{(failedKeys.Count > 20 ? $"... (+{failedKeys.Count - 20} more)" : "")} in {collection.CollectionNamespace.FullName}", LogType.Error);
+
                                 string errorMsg = $"CRITICAL: Unable to process update batch for {collection.CollectionNamespace.FullName} after {MAX_RETRIES} retry attempts. Details: {ex}";
-                                _log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
+                                //_log.WriteLine($"{_logPrefix}{errorMsg}", LogType.Error);
                                 result.Success = false;
                                 result.Errors.Add(errorMsg);
                                 throw new InvalidOperationException(errorMsg);
@@ -1216,6 +1241,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
         public int Failures { get; set; }
         public int Skipped { get; set; }
         public List<string> Errors { get; set; } = new List<string>();
+        public List<string> FailedDocumentKeys { get; set; } = new List<string>();
         public long WriteLatencyMS { get; set; } = 0;
     }
 }
