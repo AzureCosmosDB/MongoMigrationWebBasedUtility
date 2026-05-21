@@ -72,7 +72,8 @@ namespace OnlineMongoMigrationProcessor
 
             if (useServerLevel)
             {
-                _log.WriteLine($"{(syncBack ? "SyncBack: " : "")}Using server-level change stream processor.");
+                bool clientSideFilter = MigrationJobContext.CurrentlyActiveJob.UseClientSideCSFilter;
+                _log.WriteLine($"{(syncBack ? "SyncBack: " : "")}Using server-level change stream processor{(clientSideFilter ? " (client-side namespace filtering, no server-side $match pipeline)" : "")}.");
                 return new ServerLevelChangeStreamProcessor(log, sourceClient, targetClient,  muCache ,config, syncBack, migrationWorker);
             }
             else

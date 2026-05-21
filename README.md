@@ -26,6 +26,7 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
   - [Schema Migration Tool](#schema-migration-tool)
   - [Add a New Job](#add-a-new-job)
   - [Migration modes](#migration-modes)
+  - [Job options and behaviors](#job-options-and-behaviors)
   - [Get List of Collections](#get-list-of-collections)
   - [View a Job](#view-a-job)
   - [Update Web App Settings](#update-web-app-settings)
@@ -34,7 +35,6 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
   - [Dynamic Scaling of MongoDump/Restore Workers](#dynamic-scaling-of-mongodumprestore-workers)
   - [Difference Between Immediate Pause and Controlled Pause](#difference-between-immediate-pause-and-controlled-pause)
   - [Multiple Partitioners for ObjectId and Benefits of Selecting DataType for _id](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id)
-- [Job options and behaviors](#job-options-and-behaviors)
 - [Collections input formats](#collections-input-formats)
   - [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format)
 - [Job lifecycle controls in Job Viewer](#job-lifecycle-controls-in-job-viewer)
@@ -207,6 +207,47 @@ Migrations can be done in two ways:
 #### Oplog retention size
 
 For online jobs, ensure that the oplog retention size of the source MongoDB is large enough to store operations for at least the duration of both the download and upload activities. If the oplog retention size is too small and there is a high volume of write operations, the online migration may fail or be unable to read all documents from the change stream in time.
+
+### Job options and behaviors
+
+When creating or resuming a job, you can tailor behavior via these options:
+
+- Migration tool
+    - MongoDump and MongoRestore: Uses mongo-tools. Best for moving from self-hosted or Atlas to Cosmos DB. Requires access to Mongo Tools ZIP URL configured in Settings.
+    - MongoDB Driver: Uses the driver for bulk copy and change stream catch-up.
+    - MongoDB Driver (Cosmos DB RU read optimized): Optimized for Cosmos DB Mongo vCore as source. Skips index creation and uses RU-friendly read patterns. Filters on collections are not supported for this mode.
+
+- Migration mode
+    - Offline: Snapshot-only copy. Job completes automatically when copy finishes.
+    - Online: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
+
+- Append Mode
+    - If ON: Keeps existing target data and appends new documents. No collection drop. Good for incremental top-ups.
+    - If OFF: Target collections are overwritten. A confirmation checkbox is required to proceed.
+
+- Skip Indexes
+    - If ON: Skips index creation on target (data only). Forced ON for RU-optimized copy. You can create indexes separately before migration.
+
+- Change Stream Scope (configured in the **Advanced** tab of the **New Job Details** screen)
+    - **Collection**: Opens a separate change stream per collection. Collections are batched together and processed in round-robin fashion, so each collection is watched only during its turn. This can lead to higher lag when migrating many collections because each collection must wait for its batch slot. Best when the number of collections is small (roughly < 50) or when only a few collections receive frequent writes.
+    - **Server**: Opens a single server-level change stream that captures changes across all databases and collections in one stream. Because every change is seen immediately regardless of the number of collections, lag stays low even with hundreds of collections. Recommended when migrating a large number of collections and most of them are updated often. Not supported for RU-optimized copy jobs.
+
+- Change Stream Modes (configured in the **Advanced** tab; applies to Collection-level scope)
+    - Delayed: Start change stream processing after all collections are completed. This mode is ideal when migrating a large number of collections.
+    - Immediate: Start change stream processing immediately as each collection is processed.
+    - Aggressive: Use aggressive change stream processing when the oplog is small or the write rate is very high. Avoid this mode if a large number of collections need to be migrated.
+
+- Post Migration Sync Back
+    - For online jobs, after Cut Over you can enable syncing from target back to source. This reduces rollback risk. UI shows Time Since Sync Back once active.
+
+- All collections use ObjectId for the _id field
+    - If ON: Automatically applies `"DataTypeFor_Id": "ObjectId"` to all collections in the job, enabling ObjectId-specific optimizations.
+    - Benefits: Faster partitioning (6x speedup), optimized chunk boundaries, leverages timestamp-based partitioning strategies.
+    - If OFF: Each collection's _id type is auto-detected, or you can specify DataTypeFor_Id individually via JSON format.
+    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for performance details.
+
+- Simulation Mode (No Writes to Target)
+    - Runs a dry-run where reads occur but no writes are performed on target. Useful for validation and sizing.
 
 ### Get List of Collections
 
@@ -764,47 +805,6 @@ The tool automatically calculates optimal chunk count based on:
 **Result**: Balanced parallelism without creating too many tiny chunks or too few large chunks.
 
 
-
-## Job options and behaviors
-
-When creating or resuming a job, you can tailor behavior via these options:
-
-- Migration tool
-    - MongoDump and MongoRestore: Uses mongo-tools. Best for moving from self-hosted or Atlas to Cosmos DB. Requires access to Mongo Tools ZIP URL configured in Settings.
-    - MongoDB Driver: Uses the driver for bulk copy and change stream catch-up.
-    - MongoDB Driver (Cosmos DB RU read optimized): Optimized for Cosmos DB Mongo vCore as source. Skips index creation and uses RU-friendly read patterns. Filters on collections are not supported for this mode.
-
-- Migration mode
-    - Offline: Snapshot-only copy. Job completes automatically when copy finishes.
-    - Online: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
-
-- Append Mode
-    - If ON: Keeps existing target data and appends new documents. No collection drop. Good for incremental top-ups.
-    - If OFF: Target collections are overwritten. A confirmation checkbox is required to proceed.
-
-- Skip Indexes
-    - If ON: Skips index creation on target (data only). Forced ON for RU-optimized copy. You can create indexes separately before migration.
-
-- Change Stream Scope (configured in the **Advanced** tab of the **New Job Details** screen)
-    - **Collection**: Opens a separate change stream per collection. Collections are batched together and processed in round-robin fashion, so each collection is watched only during its turn. This can lead to higher lag when migrating many collections because each collection must wait for its batch slot. Best when the number of collections is small (roughly < 50) or when only a few collections receive frequent writes.
-    - **Server**: Opens a single server-level change stream that captures changes across all databases and collections in one stream. Because every change is seen immediately regardless of the number of collections, lag stays low even with hundreds of collections. Recommended when migrating a large number of collections and most of them are updated often. Not supported for RU-optimized copy jobs.
-
-- Change Stream Modes (configured in the **Advanced** tab; applies to Collection-level scope)
-    - Delayed: Start change stream processing after all collections are completed. This mode is ideal when migrating a large number of collections.
-    - Immediate: Start change stream processing immediately as each collection is processed.
-    - Aggressive: Use aggressive change stream processing when the oplog is small or the write rate is very high. Avoid this mode if a large number of collections need to be migrated.
-
-- Post Migration Sync Back
-    - For online jobs, after Cut Over you can enable syncing from target back to source. This reduces rollback risk. UI shows Time Since Sync Back once active.
-
-- All collections use ObjectId for the _id field
-    - If ON: Automatically applies `"DataTypeFor_Id": "ObjectId"` to all collections in the job, enabling ObjectId-specific optimizations.
-    - Benefits: Faster partitioning (6x speedup), optimized chunk boundaries, leverages timestamp-based partitioning strategies.
-    - If OFF: Each collection's _id type is auto-detected, or you can specify DataTypeFor_Id individually via JSON format.
-    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for performance details.
-
-- Simulation Mode (No Writes to Target)
-    - Runs a dry-run where reads occur but no writes are performed on target. Useful for validation and sizing.
 
 ## Collections input formats
 

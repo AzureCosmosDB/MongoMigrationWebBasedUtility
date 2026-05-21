@@ -465,7 +465,7 @@ namespace OnlineMongoMigrationProcessor
 
         
 
-        protected async Task BulkProcessChangesAsync(
+        protected async Task<int> BulkProcessChangesAsync(
             MigrationUnit mu,
             IMongoCollection<BsonDocument> collection,
             List<ChangeStreamDocument<BsonDocument>> insertEvents,
@@ -527,7 +527,7 @@ namespace OnlineMongoMigrationProcessor
                 if (!result.Success)
                 {
                     IncrementFailureCounter(mu, result.Failures);
-                    _log.WriteLine($"{_syncBackPrefix}Bulk processing had {result.Failures} failures for {collectionKey}", LogType.Debug);
+                    _log.WriteLine($"{_syncBackPrefix}Bulk processing had {result.Failures} failures for {collectionKey}. Failed DocumentKeys: [{string.Join(", ", result.FailedDocumentKeys.Take(50))}]{(result.FailedDocumentKeys.Count > 50 ? $"... (+{result.FailedDocumentKeys.Count - 50} more)" : "")}", LogType.Error);
                     
                     // If there were critical errors that would cause data loss, stop the job
                     if (result.Errors.Any(e => e.Contains("CRITICAL")))
@@ -540,8 +540,10 @@ namespace OnlineMongoMigrationProcessor
                 else if (result.Failures > 0)
                 {
                     IncrementFailureCounter(mu, result.Failures);
-                    _log.WriteLine($"{_syncBackPrefix}Bulk processing had {result.Failures} non-critical failures for {collectionKey}", LogType.Debug);
+                    _log.WriteLine($"{_syncBackPrefix}Bulk processing had {result.Failures} non-critical failures for {collectionKey}. Failed DocumentKeys: [{string.Join(", ", result.FailedDocumentKeys.Take(50))}]{(result.FailedDocumentKeys.Count > 50 ? $"... (+{result.FailedDocumentKeys.Count - 50} more)" : "")}", LogType.Error);
                 }
+
+                return result.Failures;
                 
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL") && ex.Message.Contains("persistent deadlock"))

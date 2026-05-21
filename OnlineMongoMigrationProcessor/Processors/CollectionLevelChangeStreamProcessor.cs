@@ -711,7 +711,7 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 // Flush accumulated changes - convert Dictionary.Values to List for BulkProcessChangesAsync
-                await BulkProcessChangesAsync(
+                int failureCount = await BulkProcessChangesAsync(
                     mu,
                     targetCollection,
                     insertEvents: accumulatedChangesInColl.DocsToBeInserted.Values.ToList(),
@@ -728,24 +728,35 @@ namespace OnlineMongoMigrationProcessor
                 // postBatchResumeToken, causing a spurious "Timestamp mismatch" exception.
                 if (!string.IsNullOrEmpty(accumulatedChangesInColl.LatestResumeToken) && accumulatedChangesInColl.TotalChangesCount > 0)
                 {
-                    var (currentTimestamp, currentResumeToken, _, _) = GetResumeParameters(mu);
-                    string collectionNamespace = $"{mu.DatabaseName}.{mu.CollectionName}";
-                    
-                    // We don't allow going backwards in time
-                    if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp >= TimeSpan.FromSeconds(0))
+                    // Do NOT advance resume token if there were any failures - this prevents
+                    // skipping over changes that failed to write to the target
+                    if (failureCount > 0)
                     {
-                        SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
-                        mu.CSLastResumeTokenWithChange = accumulatedChangesInColl.LatestResumeToken;
-                        mu.CSLastChangeUTCTime = accumulatedChangesInColl.LatestTimestamp;
-                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                        string collectionNamespace = $"{mu.DatabaseName}.{mu.CollectionName}";
+                        _log.WriteLine($"{_syncBackPrefix}Skipping resume token update for {collectionNamespace} due to {failureCount} write failure(s) in this batch. Resume token remains at current position to allow retry on next cycle.", LogType.Warning);
+                        _log.ShowInMonitor($"{_syncBackPrefix}Resume token NOT advanced for {collectionNamespace} - {failureCount} failure(s) detected. Changes will be retried.");
                     }
                     else
                     {
-                        _log.WriteLine($"Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken} for {collectionNamespace}", LogType.Error);
-                        throw new Exception($"{_syncBackPrefix} Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}");
+                        var (currentTimestamp, currentResumeToken, _, _) = GetResumeParameters(mu);
+                        string collectionNamespace = $"{mu.DatabaseName}.{mu.CollectionName}";
+                        
+                        // We don't allow going backwards in time
+                        if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp >= TimeSpan.FromSeconds(0))
+                        {
+                            SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
+                            mu.CSLastResumeTokenWithChange = accumulatedChangesInColl.LatestResumeToken;
+                            mu.CSLastChangeUTCTime = accumulatedChangesInColl.LatestTimestamp;
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                        }
+                        else
+                        {
+                            _log.WriteLine($"Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken} for {collectionNamespace}", LogType.Error);
+                            throw new Exception($"{_syncBackPrefix} Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}");
+                        }
+                        
+                        _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
                     }
-                    
-                    _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
                 }
 
                 // Clear collections to free memory
