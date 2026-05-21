@@ -105,6 +105,7 @@ namespace OnlineMongoMigrationProcessor
         private PendingTasksCompletedHandler? _onPendingTasksCompleted;
 
         private bool _processNewTasks = true;
+        private volatile bool _stopped = false; // Volatile flag to prevent queued timer callbacks from executing after stop
 
         // Cached duplicate settings (read once at Initialize)
         private bool _ignoreDuplicatesAndContinueRestore = false;
@@ -372,6 +373,7 @@ namespace OnlineMongoMigrationProcessor
                     _onMigrationUnitCompleted = onMigrationUnitCompleted;
                     _onPendingTasksCompleted = onPendingTasksCompleted;
                     _processNewTasks = true;
+                    _stopped = false;
 
                     // Calculate optimal concurrency
                     int maxDumpWorkers, maxRestoreWorkers;
@@ -772,6 +774,11 @@ namespace OnlineMongoMigrationProcessor
         /// </summary>
         private void OnTimerTick(object? sender, System.Timers.ElapsedEventArgs e)
         {
+            // Fast exit for already-stopped coordinator. This catches queued thread pool
+            // callbacks that fire after Stop() has been called on the timer.
+            if (_stopped)
+                return;
+
             // gets called often, avoid detailed logs
             // Prevent re-entrant calls
             if (!Monitor.TryEnter(_timerLock))
@@ -782,16 +789,39 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                // Check for cancellation or pause
-                if (_processCts?.Token.IsCancellationRequested == true || MigrationJobContext.ControlledPauseRequested)
+                // Double-check after acquiring the lock
+                if (_stopped)
+                    return;
+
+                // Check for cancellation, pause, or job stopped
+                if (_processCts?.Token.IsCancellationRequested == true ||
+                    MigrationJobContext.ControlledPauseRequested ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsStarted == false)
                 {
                     if (_processTimer != null && _timerStarted && _processNewTasks)
                     {
                         _processNewTasks = false;
 
-                        _log?.WriteLine("Controlled pause detected - stopped processing new tasks.", LogType.Warning);
+                        if (MigrationJobContext.ControlledPauseRequested)
+                        {
+                            _log?.WriteLine("Controlled pause detected - stopped processing new tasks.", LogType.Warning);
+                        }
+                        else
+                        {
+                            // Stop the timer immediately for non-controlled pause/cancel
+                            _stopped = true;
+                            _processTimer.Stop();
+                            _timerStarted = false;
+                            _log?.WriteLine("Job paused/cancelled - timer stopped immediately.", LogType.Warning);
+                            return;
+                        }
                     }
-                    //return;
+                    else if (!MigrationJobContext.ControlledPauseRequested)
+                    {
+                        // Non-controlled pause/cancel but _processNewTasks already false — nothing left to do
+                        return;
+                    }
                 }
 
                 if (_processNewTasks)
@@ -1090,10 +1120,12 @@ namespace OnlineMongoMigrationProcessor
                     return;
                 }
 
-                // Check for controlled pause before spawning any workers
-                if (MigrationJobContext.ControlledPauseRequested)
+                // Check for pause/cancel before spawning any workers
+                if (_stopped || MigrationJobContext.ControlledPauseRequested ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsStarted == false)
                 {
-                    _log?.WriteLine("[ProcessPendingDumps] Controlled pause detected - skipping dump processing", LogType.Debug);
+                    _log?.WriteLine("[ProcessPendingDumps] Pause/cancel detected - skipping dump processing", LogType.Debug);
                     return;
                 }
 
@@ -1128,10 +1160,12 @@ namespace OnlineMongoMigrationProcessor
                 int spawned = 0;
                 foreach (var context in pendingContexts)
                 {
-                    // Check for controlled pause before spawning any workers
-                    if (MigrationJobContext.ControlledPauseRequested)
+                    // Check for pause/cancel before spawning each worker
+                    if (_stopped || MigrationJobContext.ControlledPauseRequested ||
+                        MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true ||
+                        MigrationJobContext.CurrentlyActiveJob?.IsStarted == false)
                     {
-                        _log?.WriteLine("[ProcessPendingDumps] Controlled pause detected - skipping dump processing", LogType.Debug);
+                        _log?.WriteLine("[ProcessPendingDumps] Pause/cancel detected - skipping dump processing", LogType.Debug);
                         return;
                     }
 
@@ -1239,10 +1273,12 @@ namespace OnlineMongoMigrationProcessor
                     return;
                 }
 
-                // Check for controlled pause before spawning any workers
-                if (MigrationJobContext.ControlledPauseRequested)
+                // Check for pause/cancel before spawning any workers
+                if (_stopped || MigrationJobContext.ControlledPauseRequested ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsStarted == false)
                 {
-                    _log?.WriteLine("[ProcessPendingRestores] Controlled pause detected - skipping restore processing", LogType.Debug);
+                    _log?.WriteLine("[ProcessPendingRestores] Pause/cancel detected - skipping restore processing", LogType.Debug);
                     return;
                 }
 
@@ -1319,10 +1355,12 @@ namespace OnlineMongoMigrationProcessor
                 int spawned = 0;
                 foreach (var context in toDispatch)
                 {
-                    // Check for controlled pause before spawning any workers
-                    if (MigrationJobContext.ControlledPauseRequested)
+                    // Check for pause/cancel before spawning each worker
+                    if (_stopped || MigrationJobContext.ControlledPauseRequested ||
+                        MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true ||
+                        MigrationJobContext.CurrentlyActiveJob?.IsStarted == false)
                     {
-                        _log?.WriteLine("[ProcessPendingRestores] Controlled pause detected - skipping restore processing", LogType.Debug);
+                        _log?.WriteLine("[ProcessPendingRestores] Pause/cancel detected - skipping restore processing", LogType.Debug);
                         return;
                     }
 
@@ -3145,6 +3183,17 @@ namespace OnlineMongoMigrationProcessor
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.StopCoordinatedProcessing");
             try
             {
+                // Set stopped flag first - volatile write ensures any in-flight or
+                // queued OnTimerTick callbacks exit immediately without doing work.
+                _stopped = true;
+
+                // Signal cancellation so any in-flight async work sees it too.
+                _processCts?.Cancel();
+
+                // Stop the timer outside the lock to prevent new ticks from firing
+                // while we wait for an in-flight tick to release _timerLock.
+                _processTimer?.Stop();
+
                 lock (_timerLock)
                 {
                     if (_processTimer != null)
