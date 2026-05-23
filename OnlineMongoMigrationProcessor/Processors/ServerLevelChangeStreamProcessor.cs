@@ -84,7 +84,7 @@ namespace OnlineMongoMigrationProcessor
             ConfigureMonitoringMode();
 
             long loop = 0;
-            while (!token.IsCancellationRequested && !ExecutionCancelled)
+            while (!token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
             {
                 try
                 {
@@ -1019,8 +1019,7 @@ namespace OnlineMongoMigrationProcessor
 
             mu.CSUpdatesInLastBatch = stats.EventCount;
             mu.CSNormalizedUpdatesInLastBatch = stats.EventCount;
-            mu.CSLastResumeTokenWithChange = stats.LatestResumeToken;
-            mu.CSLastChangeUTCTime = stats.LatestTimestamp;
+            mu.SetCSLastChange(_syncBack, stats.LatestTimestamp, stats.LatestResumeToken);
             mu.CSAvgReadLatencyInMS = Math.Round((double)stats.TotalReadDurationMs / stats.EventCount, 2);
             mu.CSAvgWriteLatencyInMS = Math.Round((double)stats.TotalWriteDurationMs / stats.EventCount, 2);
 
@@ -1045,8 +1044,7 @@ namespace OnlineMongoMigrationProcessor
 
                 mu.CSUpdatesInLastBatch = stats.EventCount;
                 mu.CSNormalizedUpdatesInLastBatch = stats.EventCount;
-                mu.CSLastResumeTokenWithChange = stats.LatestResumeToken;
-                mu.CSLastChangeUTCTime = stats.LatestTimestamp;
+                mu.SetCSLastChange(_syncBack, stats.LatestTimestamp, stats.LatestResumeToken);
                 mu.CSAvgReadLatencyInMS = Math.Round((double)stats.TotalReadDurationMs / stats.EventCount, 2);
                 mu.CSAvgWriteLatencyInMS = Math.Round((double)stats.TotalWriteDurationMs / stats.EventCount, 2);
 

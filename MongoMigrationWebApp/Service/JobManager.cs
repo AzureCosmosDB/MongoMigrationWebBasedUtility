@@ -383,12 +383,9 @@ namespace MongoMigrationWebApp.Service
                 job.ProcessingSyncBack = true;
                 MigrationJobContext.SaveMigrationJob(job);
 
-                //// Check if a migration worker is already processing this or another job
-                //if (MigrationWorker != null && MigrationWorker.IsProcessRunning(job.Id))
-                //{
-                //    Helper.LogToFile($"MigrationWorker already processing job {job.Id}, skipping");
-                //    return Task.CompletedTask;
-                //}
+                // Stop the forward change stream on the existing worker before creating a new one,
+                // to prevent echo/feedback loops where changes bounce between directions.
+                MigrationWorker?.StopMigration();
 
                 MigrationWorker = new MigrationWorker();
                 

@@ -61,7 +61,7 @@ namespace OnlineMongoMigrationProcessor
             long emptyLoops = 0;
             DateTime lastResumeTokenCheck = DateTime.MinValue;
 
-            while (!token.IsCancellationRequested && !ExecutionCancelled)
+            while (!token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
             {
                 var totalKeys = sortedKeys.Count;
 
@@ -83,7 +83,7 @@ namespace OnlineMongoMigrationProcessor
                 // Reset empty loops counter when we have collections to process
                 emptyLoops = ResetEmptyLoopsCounterIfNeeded(emptyLoops, totalKeys);
 
-                while (index < totalKeys && !token.IsCancellationRequested && !ExecutionCancelled)
+                while (index < totalKeys && !token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
                 {
                     var batchKeys = sortedKeys.Skip(index).Take(_concurrentProcessors).ToList();
                     int seconds = CalculateBatchDuration(batchKeys);
