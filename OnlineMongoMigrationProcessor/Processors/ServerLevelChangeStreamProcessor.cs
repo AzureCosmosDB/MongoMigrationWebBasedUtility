@@ -253,38 +253,50 @@ namespace OnlineMongoMigrationProcessor
 
                 using (cursor)
                 {
-                    // Create a fresh batch-duration CTS that starts NOW (after cursor creation),
-                    // so processing always gets the full batch time regardless of how long cursor creation took.
-                    using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
-                    var batchToken = batchCts.Token;
+                    try
+                    {
+                        // Create a fresh batch-duration CTS that starts NOW (after cursor creation),
+                        // so processing always gets the full batch time regardless of how long cursor creation took.
+                        using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                        var batchToken = batchCts.Token;
 
-                    if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
-                    {
-                        await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-                    }
-                    else
-                    {
-                        await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-                    }
-
-                    // Advance resume token using postBatchResumeToken when all changes
-                    // were persisted successfully (or no events were received).
-                    // If any write failed, keep the last change-event token so we
-                    // re-process from that point on the next round.
-                    if (!state.HasFailures)
-                    {
-                        try
+                        if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
                         {
-                            var postBatchToken = cursor.GetResumeToken();
-                            if (postBatchToken != null)
-                            {
-                                state.LatestResumeToken = postBatchToken.ToJson();
-                                state.LatestTimestamp = DateTime.UtcNow;
-                            }
+                            await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level stream: {ex.Message}", LogType.Debug);
+                            await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected when batch CTS fires — fall through to postBatchResumeToken capture below
+                    }
+                    finally
+                    {
+                        // Advance resume token using postBatchResumeToken when all changes
+                        // were persisted successfully (or no events were received).
+                        // If any write failed, keep the last change-event token so we
+                        // re-process from that point on the next round.
+                        // This MUST be in a finally block so the token is captured even when
+                        // the batch times out (OperationCanceledException), otherwise idle
+                        // rounds never advance the token and it eventually expires.
+                        if (!state.HasFailures)
+                        {
+                            try
+                            {
+                                var postBatchToken = cursor.GetResumeToken();
+                                if (postBatchToken != null)
+                                {
+                                    state.LatestResumeToken = postBatchToken.ToJson();
+                                    state.LatestTimestamp = DateTime.UtcNow;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level stream: {ex.Message}", LogType.Debug);
+                            }
                         }
                     }
                 }
@@ -358,30 +370,39 @@ namespace OnlineMongoMigrationProcessor
                     }
                     using (retryCursor)
                     {
-                        using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
-                        var retryBatchToken = retryBatchCts.Token;
-
-                        if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
-                            await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-                        else
-                            await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-
-                        // Advance resume token using postBatchResumeToken when all
-                        // changes were persisted successfully (or no events received).
-                        if (!state.HasFailures)
+                        try
                         {
-                            try
+                            using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                            var retryBatchToken = retryBatchCts.Token;
+
+                            if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
+                                await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            else
+                                await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Expected when batch CTS fires — fall through to postBatchResumeToken capture below
+                        }
+                        finally
+                        {
+                            // Advance resume token using postBatchResumeToken when all
+                            // changes were persisted successfully (or no events received).
+                            if (!state.HasFailures)
                             {
-                                var postBatchToken = retryCursor.GetResumeToken();
-                                if (postBatchToken != null)
+                                try
                                 {
-                                    state.LatestResumeToken = postBatchToken.ToJson();
-                                    state.LatestTimestamp = DateTime.UtcNow;
+                                    var postBatchToken = retryCursor.GetResumeToken();
+                                    if (postBatchToken != null)
+                                    {
+                                        state.LatestResumeToken = postBatchToken.ToJson();
+                                        state.LatestTimestamp = DateTime.UtcNow;
+                                    }
                                 }
-                            }
-                            catch (Exception ex)
-                            {
-                                _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level fallback stream: {ex.Message}", LogType.Debug);
+                                catch (Exception ex)
+                                {
+                                    _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level fallback stream: {ex.Message}", LogType.Debug);
+                                }
                             }
                         }
                     }
