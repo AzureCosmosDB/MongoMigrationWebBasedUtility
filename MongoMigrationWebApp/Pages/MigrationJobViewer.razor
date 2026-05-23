@@ -793,9 +793,9 @@ else if (@_showLogBackupFile)
     private DateTime GetSortValueForTimestamp(MigrationUnitBasic mu)
     {
         if (CurrentlyLoadedMigrationJob?.ProcessingSyncBack == true)
-            return mu.SyncBackCursorUtcTimestamp;
+            return mu.GetCursorUtcTimestamp(true);
         else
-            return mu.CursorUtcTimestamp;
+            return mu.GetCursorUtcTimestamp(false);
     }
 
 

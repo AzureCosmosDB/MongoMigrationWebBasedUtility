@@ -126,12 +126,12 @@ else
                 <td class="group-cell">
                     <div><span class="lbl">Mode:</span> @Helper.GetChangeStreamMode(MigrationJob)</div>
                     <div><span class="lbl">Started On (UTC):</span> @GetChangeStreamStartedOnForDisplay(mu, MigrationJob)</div>
-                    <div><span class="lbl">Start Resume Token:</span> @(mu.OriginalResumeToken ?? "N/A")</div>
-                    <div><span class="lbl">Current Timestamp:</span> @mu.CursorUtcTimestamp</div>
-                    <div><span class="lbl">Current Resume Token:</span> @(mu.ResumeToken ?? "N/A")</div>
-                    <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(mu.ResumeDocumentKey) ? "N/A" : mu.InitialDocumenReplayed.ToString())</div>
-                    <div><span class="lbl">First Change Document:</span> @(mu.ResumeDocumentKey?.ToString() ?? "N/A")</div>
-                    <div><span class="lbl">First Change Operation:</span> @(string.IsNullOrEmpty(mu.ResumeDocumentKey) ? "N/A" : mu.ResumeTokenOperation.ToString())</div>
+                    <div><span class="lbl">Start Resume Token:</span> @(mu.GetOriginalResumeToken(false) ?? "N/A")</div>
+                    <div><span class="lbl">Current Timestamp:</span> @mu.GetCursorUtcTimestamp(false)</div>
+                    <div><span class="lbl">Current Resume Token:</span> @(mu.GetResumeToken(false) ?? "N/A")</div>
+                    <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(mu.GetResumeDocumentKeyForDirection(false)) ? "N/A" : mu.GetInitialDocumenReplayed(false).ToString())</div>
+                    <div><span class="lbl">First Change Document:</span> @(mu.GetResumeDocumentKeyForDirection(false)?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">First Change Operation:</span> @(string.IsNullOrEmpty(mu.GetResumeDocumentKeyForDirection(false)) ? "N/A" : mu.GetResumeTokenOperationForDirection(false).ToString())</div>
                     <div><span class="lbl">Last Event Age:</span> @Helper.GetTimestampDiff(mu, false)</div>
                     <div><span class="lbl">Last Batch Count:</span> @FormatLong(mu.CSUpdatesInLastBatch)</div>
                     <div><span class="lbl">Inserted:</span> @FormatLong(mu.CSDocsInserted) (from @FormatLong(mu.CSDInsertEvents) events)</div>
@@ -141,15 +141,21 @@ else
                     <div><span class="lbl">Failed (with retries):</span> @FormatLong(mu.CSErrors)</div>
                     <div><span class="lbl">Avg Read Latency (ms):</span> @mu.CSAvgReadLatencyInMS.ToString("F2")</div>
                     <div><span class="lbl">Avg Write Latency (ms):</span> @mu.CSAvgWriteLatencyInMS.ToString("F2")</div>
-                    <div><span class="lbl">Last Change UTC Time:</span> @(mu.CSLastChangeUTCTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
-                    <div><span class="lbl">Last Resume Token With Change:</span> @(mu.CSLastResumeTokenWithChange ?? "N/A")</div>
+                    <div><span class="lbl">Last Change UTC Time:</span> @(mu.GetCSLastChangeUTCTime(false)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                    <div><span class="lbl">Last Resume Token With Change:</span> @(mu.GetCSLastResumeTokenWithChange(false) ?? "N/A")</div>
                     @if (Helper.GetChangeStreamMode(MigrationJob) == "Aggressive" && mu.AggressiveCacheDeleted)
                     {
                         <div><span class="lbl">Aggressive:</span> Completed on @(mu.AggressiveCacheDeletedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A") UTC</div>
                     }
                 </td>
                 <td class="group-cell">
-                        <div><span class="lbl">Started On (UTC):</span> @(mu.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Started On (UTC):</span> @(mu.GetChangeStreamStartedOn(true)?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">Start Resume Token:</span> @(mu.GetOriginalResumeToken(true) ?? "N/A")</div>
+                    <div><span class="lbl">Current Timestamp:</span> @mu.GetCursorUtcTimestamp(true)</div>
+                    <div><span class="lbl">Current Resume Token:</span> @(mu.GetResumeToken(true) ?? "N/A")</div>
+                    <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(mu.GetResumeDocumentKeyForDirection(true)) ? "N/A" : mu.GetInitialDocumenReplayed(true).ToString())</div>
+                    <div><span class="lbl">First Change Document:</span> @(mu.GetResumeDocumentKeyForDirection(true)?.ToString() ?? "N/A")</div>
+                    <div><span class="lbl">First Change Operation:</span> @(string.IsNullOrEmpty(mu.GetResumeDocumentKeyForDirection(true)) ? "N/A" : mu.GetResumeTokenOperationForDirection(true).ToString())</div>
                     <div><span class="lbl">Last Event Age:</span> @Helper.GetTimestampDiff(mu, true)</div>
                     <div><span class="lbl">Last Batch Count:</span> @FormatLong(mu.SyncBackUpdateEvents)</div>
                     <div><span class="lbl">Inserted:</span> @FormatLong(mu.SyncBackDocsInserted) (from @FormatLong(mu.SyncBackInsertEvents) events)</div>
@@ -157,6 +163,8 @@ else
                     <div><span class="lbl">Updated:</span> @FormatLong(mu.SyncBackDocsUpdated) (from @FormatLong(mu.SyncBackUpdateEvents) events)</div>
                     <div><span class="lbl">Duplicate Processed:</span> @FormatLong(mu.SyncBackDuplicateDocsSkipped) skipped</div>
                     <div><span class="lbl">Failed (with retries):</span> @FormatLong(mu.SyncBackErrors)</div>
+                    <div><span class="lbl">Last Change UTC Time:</span> @(mu.GetCSLastChangeUTCTime(true)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                    <div><span class="lbl">Last Resume Token With Change:</span> @(mu.GetCSLastResumeTokenWithChange(true) ?? "N/A")</div>
                 </td>
                
                 <td class="group-cell">
@@ -223,7 +231,7 @@ else
     private static string GetChangeStreamStartedOnForDisplay(MigrationUnit mu, MigrationJob migrationJob)
     {
         var isServerLevel = migrationJob.ChangeStreamLevel == ChangeStreamLevel.Server;
-        var startedOn = isServerLevel ? migrationJob.ChangeStreamStartedOn : mu.ChangeStreamStartedOn;
+        var startedOn = isServerLevel ? migrationJob.GetChangeStreamStartedOn(false) : mu.GetChangeStreamStartedOn(false);
         return startedOn?.ToString() ?? "N/A";
     }
 }

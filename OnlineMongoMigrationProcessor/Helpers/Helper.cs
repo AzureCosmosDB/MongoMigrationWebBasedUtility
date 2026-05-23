@@ -542,10 +542,11 @@ namespace OnlineMongoMigrationProcessor
             if (mu.ResetChangeStream)
                 return "NA";
 
-            if (!mu.CSLastChangeUTCTime.HasValue || mu.CSLastChangeUTCTime.Value == DateTime.MinValue)
+            var lastChangeTime = mu.GetCSLastChangeUTCTime(isSyncBack);
+            if (!lastChangeTime.HasValue || lastChangeTime.Value == DateTime.MinValue)
                 return "NA";
 
-            return GetTimestampDiff(mu.CSLastChangeUTCTime.Value);
+            return GetTimestampDiff(lastChangeTime.Value);
         }
 
         public static string GetTimestampDiff(DateTime timestamp)
