@@ -126,9 +126,17 @@ namespace OnlineMongoMigrationProcessor.Workers
             try
             {
                 _activeJobId=string.Empty;
-                _log.WriteLine("StopMigration called - cancelling all tokens and stopping processor", LogType.Debug);
+                _log.WriteLine("StopMigration called - cancelling all tokens and stopping processor", LogType.Warning);
                 _cts?.Cancel();
                 _compare_cts?.Cancel();
+
+                // Signal the coordinator to stop BEFORE killing processes.
+                // This prevents HandleDumpFailure/HandleRestoreFailure from re-enqueueing
+                // killed chunks for retry during the window between kill and StopCoordinatedProcessing.
+                if (_migrationProcessor is DumpRestoreProcessor drp)
+                {
+                    drp.SignalStop();
+                }
                 
                 // Kill all active mongodump and mongorestore processes
                 MigrationJobContext.KillAllMigrationProcesses();
