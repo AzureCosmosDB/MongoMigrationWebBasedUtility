@@ -194,17 +194,13 @@ namespace OnlineMongoMigrationProcessor
                    
                     
                     // Check cursor timestamp based on syncBack mode
-                    bool hasCursorTimestamp = _syncBack 
-                        ? mu.SyncBackCursorUtcTimestamp > DateTime.MinValue 
-                        : mu.CursorUtcTimestamp > DateTime.MinValue;
+                    bool hasCursorTimestamp = mu.GetCursorUtcTimestamp(_syncBack) > DateTime.MinValue;
 
                     //for RUOptimizedCopy job type, also check for resume token if cursor timestamp is not set
                     if (!hasCursorTimestamp && MigrationJobContext.CurrentlyActiveJob.JobType==JobType.RUOptimizedCopy)
                     {
                         var muFull = MigrationJobContext.GetMigrationUnit(mu.Id);
-                        hasCursorTimestamp =_syncBack
-                            ? !string.IsNullOrEmpty(muFull.SyncBackResumeToken)
-                            : !string.IsNullOrEmpty(muFull.ResumeToken);
+                        hasCursorTimestamp = !string.IsNullOrEmpty(muFull.GetResumeToken(_syncBack));
                     }
 
 
@@ -424,11 +420,7 @@ namespace OnlineMongoMigrationProcessor
                         continue;
 
                     // Check if both ResumeToken and OriginalResumeToken are not set
-                    bool needToSetToken = false;
-                    if (_syncBack)
-                        needToSetToken = string.IsNullOrEmpty(mu.SyncBackResumeToken) && !mu.ResetChangeStream;
-                    else
-                        needToSetToken = string.IsNullOrEmpty(mu.ResumeToken) && !mu.ResetChangeStream;
+                    bool needToSetToken = string.IsNullOrEmpty(mu.GetResumeToken(_syncBack)) && !mu.ResetChangeStream;
 
 
                     if (needToSetToken)
@@ -581,48 +573,38 @@ namespace OnlineMongoMigrationProcessor
 
         private (DateTime timeStamp, string resumeToken, string version, DateTime startedOn) GetResumeParameters(MigrationUnit mu)
         {
-            DateTime timeStamp;
-            string resumeToken;
-            string? version;
-            DateTime startedOn;
+            DateTime timeStamp = mu.GetCursorUtcTimestamp(_syncBack);
+            string resumeToken = mu.GetResumeToken(_syncBack) ?? string.Empty;
+            string version = !_syncBack ? MigrationJobContext.CurrentlyActiveJob.SourceServerVersion! : "8";
+            DateTime startedOn = mu.GetChangeStreamStartedOn(_syncBack) ?? DateTime.MinValue;
 
-            if (!_syncBack)
-            {
-                timeStamp = mu.CursorUtcTimestamp;
-                resumeToken = mu.ResumeToken ?? string.Empty;
-                version = MigrationJobContext.CurrentlyActiveJob.SourceServerVersion;
-                startedOn = mu.ChangeStreamStartedOn.HasValue ? mu.ChangeStreamStartedOn.Value : DateTime.MinValue;
-            }
-            else
-            {
-                timeStamp = mu.SyncBackCursorUtcTimestamp;
-                resumeToken = mu.SyncBackResumeToken ?? string.Empty;
-                version = "8";
-                startedOn = mu.SyncBackChangeStreamStartedOn.HasValue ? mu.SyncBackChangeStreamStartedOn.Value : DateTime.MinValue;
-            }
-
-            return (timeStamp, resumeToken, version!, startedOn);
+            return (timeStamp, resumeToken, version, startedOn);
         }
 
 
         private async Task HandleAutoReplayIfNeeded(MigrationUnit mu, string collectionKey, IMongoCollection<BsonDocument>? targetCollection)
         {
-            if (!mu.InitialDocumenReplayed && 
+            // Use SyncBack-specific fields when in SyncBack mode
+            bool initialDocReplayed = mu.GetInitialDocumenReplayed(_syncBack);
+
+            if (!initialDocReplayed && 
                 !MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun && 
                 MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode != ChangeStreamMode.Aggressive)
             {
                 // If ResumeDocumentKey is empty the token came from a postBatchResumeToken
                 // (no actual change detected). Nothing to replay — mark as done.
-                var documentKey = mu.ResumeDocumentKey ?? mu.ResumeDocumentId;
+                var documentKey = mu.GetResumeDocumentKeyForDirection(_syncBack);
+                var opType = mu.GetResumeTokenOperationForDirection(_syncBack);
+
                 if (string.IsNullOrEmpty(documentKey))
                 {
-                    mu.InitialDocumenReplayed = true;
+                    mu.SetInitialDocumenReplayed(_syncBack, true);
                     MigrationJobContext.SaveMigrationUnit(mu, false);
                     _log.WriteLine($"{_syncBackPrefix}No first change to replay for {collectionKey} (postBatchResumeToken), skipping auto-replay", LogType.Debug);
                     return;
                 }
 
-                _log.WriteLine($"{_syncBackPrefix}Auto-replaying first change for {collectionKey} - ResumeDocKey: {mu.ResumeDocumentKey}, Operation: {mu.ResumeTokenOperation}", LogType.Debug);
+                _log.WriteLine($"{_syncBackPrefix}Auto-replaying first change for {collectionKey} - ResumeDocKey: {documentKey}, Operation: {opType}", LogType.Debug);
                 
                 if (targetCollection == null)
                 {
@@ -634,11 +616,11 @@ namespace OnlineMongoMigrationProcessor
                 var replaySourceDb = replaySourceClient.GetDatabase(_syncBack ? mu.GetEffectiveTargetDatabaseName() : mu.DatabaseName);
                 var replaySourceCollection = replaySourceDb.GetCollection<BsonDocument>(_syncBack ? mu.GetEffectiveTargetCollectionName() : mu.CollectionName);
                 
-                if (AutoReplayFirstChangeInResumeToken(documentKey, mu.ResumeTokenOperation, replaySourceCollection, targetCollection!, mu))
+                if (AutoReplayFirstChangeInResumeToken(documentKey, opType, replaySourceCollection, targetCollection!, mu))
                 {
-                    mu.InitialDocumenReplayed = true;
-                    mu.CSLastChangeUTCTime = mu.CursorUtcTimestamp;
-                    mu.CSLastResumeTokenWithChange = _syncBack ? mu.SyncBackResumeToken : mu.ResumeToken;
+                    mu.SetInitialDocumenReplayed(_syncBack, true);
+                    var (csTime, csToken, _, _) = GetResumeParameters(mu);
+                    mu.SetCSLastChange(_syncBack, csTime, csToken);
                     MigrationJobContext.SaveMigrationUnit(mu, true);
                     _log.WriteLine($"{_syncBackPrefix}Auto-replay successful for {collectionKey}, proceeding with change stream", LogType.Debug);
                 }
@@ -653,9 +635,9 @@ namespace OnlineMongoMigrationProcessor
                 // In Aggressive or Simulated mode, auto-replay is skipped — the change stream
                 // handles the first change itself.  Mark the flag so the UI doesn't show a
                 // misleading "False".
-                if (!mu.InitialDocumenReplayed)
+                if (!initialDocReplayed)
                 {
-                    mu.InitialDocumenReplayed = true;
+                    mu.SetInitialDocumenReplayed(_syncBack, true);
                     MigrationJobContext.SaveMigrationUnit(mu, false);
                     _log.WriteLine($"{_syncBackPrefix}Auto-replay not needed for {collectionKey} (IsSimulated={MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun}, ChangeStreamMode={MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode}), marking InitialDocumenReplayed=true", LogType.Debug);
                 }
@@ -745,8 +727,7 @@ namespace OnlineMongoMigrationProcessor
                         if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp >= TimeSpan.FromSeconds(0))
                         {
                             SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
-                            mu.CSLastResumeTokenWithChange = accumulatedChangesInColl.LatestResumeToken;
-                            mu.CSLastChangeUTCTime = accumulatedChangesInColl.LatestTimestamp;
+                            mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
                             MigrationJobContext.SaveMigrationUnit(mu, true);
                         }
                         else
@@ -774,7 +755,7 @@ namespace OnlineMongoMigrationProcessor
         private async Task WatchCollection(MigrationUnit mu, ChangeStreamOptions options, IMongoCollection<BsonDocument> changeStreamCollection, IMongoCollection<BsonDocument> targetCollection, int seconds)
         {
             string collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
-            _log.WriteLine($"{_syncBackPrefix}WatchCollection started for {collectionKey} - Duration: {seconds}s, ResumeToken: {(!string.IsNullOrEmpty(mu.ResumeToken) ? "SET" : "NOT SET")}", LogType.Debug);
+            _log.WriteLine($"{_syncBackPrefix}WatchCollection started for {collectionKey} - Duration: {seconds}s, ResumeToken: {(!string.IsNullOrEmpty(mu.GetResumeToken(_syncBack)) ? "SET" : "NOT SET")}", LogType.Debug);
 
             BsonDocument userFilterDoc = MongoHelper.GetFilterDoc(mu.UserFilter);
                         
@@ -789,7 +770,7 @@ namespace OnlineMongoMigrationProcessor
             accumulatedChangesInColl.Reset();
 
 
-            string currentPos= mu.ResumeToken ;
+            string currentPos= mu.GetResumeToken(_syncBack) ;
 
             // creating the watch cursor
             System.Diagnostics.Stopwatch readStopwatch = new System.Diagnostics.Stopwatch();
@@ -924,7 +905,7 @@ namespace OnlineMongoMigrationProcessor
                             collectionKey,
                             MigrationJobContext.CurrentlyActiveJob?.Id ?? string.Empty,
                             currentPos ?? string.Empty,
-                            mu.ResumeToken ?? string.Empty,
+                            mu.GetResumeToken(_syncBack) ?? string.Empty,
                             mu.CSUpdatesInLastBatch,
                             readStopwatch.ElapsedMilliseconds,
                             _syncBack,
@@ -1306,13 +1287,13 @@ namespace OnlineMongoMigrationProcessor
                     // did NOT set them (e.g. all events had null FullDocument).
                     // This avoids overwriting the real change token with a
                     // postBatchResumeToken which has a different (shorter) format.
-                    if (string.IsNullOrEmpty(mu.CSLastResumeTokenWithChange))
+                    var currentCSLastToken = mu.GetCSLastResumeTokenWithChange(_syncBack);
+                    if (string.IsNullOrEmpty(currentCSLastToken))
                     {
                         var (curTs, curToken, _, _) = GetResumeParameters(mu);
                         if (!string.IsNullOrEmpty(curToken))
                         {
-                            mu.CSLastResumeTokenWithChange = curToken;
-                            mu.CSLastChangeUTCTime = curTs;
+                            mu.SetCSLastChange(_syncBack, curTs, curToken);
                         }
                     }
                 }

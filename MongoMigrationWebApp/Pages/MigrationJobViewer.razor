@@ -793,9 +793,9 @@ else if (@_showLogBackupFile)
     private DateTime GetSortValueForTimestamp(MigrationUnitBasic mu)
     {
         if (CurrentlyLoadedMigrationJob?.ProcessingSyncBack == true)
-            return mu.SyncBackCursorUtcTimestamp;
+            return mu.GetCursorUtcTimestamp(true);
         else
-            return mu.CursorUtcTimestamp;
+            return mu.GetCursorUtcTimestamp(false);
     }
 
 
@@ -1683,10 +1683,12 @@ else if (@_showLogBackupFile)
         }
     }
 
-    private void PauseJobImmediate()
+    private async Task PauseJobImmediate()
     {
         _errorMessage = string.Empty;
-        JobManager.StopMigration();
+        // Run StopMigration on a background thread so the Blazor circuit isn't blocked
+        // by the 30-second worker await in StopCoordinatedProcessing.
+        await Task.Run(() => JobManager.StopMigration());
         if (MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob))
             return;
         _refreshTimer = null;

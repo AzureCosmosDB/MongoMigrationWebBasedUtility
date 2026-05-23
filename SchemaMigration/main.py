@@ -32,10 +32,10 @@ if __name__ == "__main__":
 
     # Connect to the source and destination MongoDB instances
     print_verbose(verbose, "Connecting to source MongoDB instance...")
-    source_client = MongoClient(source_uri)
+    source_client = MongoClient(source_uri, tlsAllowInvalidCertificates=True)
     print_verbose(verbose, "Successfully connected to source")
     print_verbose(verbose, "Connecting to destination MongoDB instance...")
-    dest_client = MongoClient(dest_uri)
+    dest_client = MongoClient(dest_uri, tlsAllowInvalidCertificates=True)
     print_verbose(verbose, "Successfully connected to destination")
 
     # Load the configuration from the JSON file

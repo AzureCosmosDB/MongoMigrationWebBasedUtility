@@ -40,6 +40,15 @@ namespace OnlineMongoMigrationProcessor
 
         public DateTime CursorUtcTimestamp { get; set; }
         public DateTime SyncBackCursorUtcTimestamp { get; set; }
+
+        public DateTime GetCursorUtcTimestamp(bool syncBack)
+            => syncBack ? SyncBackCursorUtcTimestamp : CursorUtcTimestamp;
+
+        public void SetCursorUtcTimestamp(bool syncBack, DateTime value)
+        {
+            if (syncBack) SyncBackCursorUtcTimestamp = value;
+            else CursorUtcTimestamp = value;
+        }
         public double DumpPercent { get; set; }
         public double RestorePercent { get; set; }
         public bool DumpComplete { get; set; }
@@ -49,6 +58,10 @@ namespace OnlineMongoMigrationProcessor
         public bool ResetChangeStream { get; set; }
         public DataType? DataTypeFor_Id { get; set; } = null;
         public DateTime? CSLastChangeUTCTime { get; set; }
+        public DateTime? SyncBackCSLastChangeUTCTime { get; set; }
+
+        public DateTime? GetCSLastChangeUTCTime(bool syncBack)
+            => syncBack ? SyncBackCSLastChangeUTCTime : CSLastChangeUTCTime;
 
         public ChangeStreamError OpLogError { get; set; } = ChangeStreamError.None;
 
@@ -112,6 +125,15 @@ namespace OnlineMongoMigrationProcessor
        
        
         public string? ResumeToken { get; set; }
+
+        public string? GetResumeToken(bool syncBack)
+            => syncBack ? SyncBackResumeToken : ResumeToken;
+
+        public void SetResumeToken(bool syncBack, string? value)
+        {
+            if (syncBack) SyncBackResumeToken = value;
+            else ResumeToken = value;
+        }
         public string? OriginalResumeToken { get; set; }
 
         public bool InitialDocumenReplayed { get; set; } = false;
@@ -133,10 +155,24 @@ namespace OnlineMongoMigrationProcessor
         public long CSNormalizedUpdatesInLastBatch { get; set; }
         public int CSLastBatchDurationSeconds { get; set; }
         public string? CSLastResumeTokenWithChange { get; set; }
+        public string? SyncBackCSLastResumeTokenWithChange { get; set; }
 
         public string? UserFilter { get; set; }
         public string? SyncBackResumeToken { get; set; }
+        public string? SyncBackOriginalResumeToken { get; set; }
+        public bool SyncBackInitialDocumenReplayed { get; set; } = false;
+        public ChangeStreamOperationType SyncBackResumeTokenOperation { get; set; }
+        public string? SyncBackResumeDocumentKey { get; set; }
         public DateTime? SyncBackChangeStreamStartedOn { get; set; }
+
+        public DateTime? GetChangeStreamStartedOn(bool syncBack)
+            => syncBack ? SyncBackChangeStreamStartedOn : ChangeStreamStartedOn;
+
+        public void SetChangeStreamStartedOn(bool syncBack, DateTime? value)
+        {
+            if (syncBack) SyncBackChangeStreamStartedOn = value;
+            else ChangeStreamStartedOn = value;
+        }
 
         public long EstimatedDocCount { get; set; }
        
@@ -171,6 +207,86 @@ namespace OnlineMongoMigrationProcessor
         public long MaxDocsPerChunk;
 
         public List<MigrationChunk> MigrationChunks { get; set; }
+
+        #region SyncBack-aware helpers
+
+        public bool GetInitialDocumenReplayed(bool syncBack)
+            => syncBack ? SyncBackInitialDocumenReplayed : InitialDocumenReplayed;
+
+        public void SetInitialDocumenReplayed(bool syncBack, bool value)
+        {
+            if (syncBack) SyncBackInitialDocumenReplayed = value;
+            else InitialDocumenReplayed = value;
+        }
+
+        public string? GetOriginalResumeToken(bool syncBack)
+            => syncBack ? SyncBackOriginalResumeToken : OriginalResumeToken;
+
+        public void SetOriginalResumeToken(bool syncBack, string? value)
+        {
+            if (syncBack) SyncBackOriginalResumeToken = value;
+            else OriginalResumeToken = value;
+        }
+
+        public string? GetResumeDocumentKeyForDirection(bool syncBack)
+            => syncBack ? SyncBackResumeDocumentKey : (ResumeDocumentKey ?? ResumeDocumentId);
+
+        public ChangeStreamOperationType GetResumeTokenOperationForDirection(bool syncBack)
+            => syncBack ? SyncBackResumeTokenOperation : ResumeTokenOperation;
+
+        public void SetResumeDocumentInfo(bool syncBack, ChangeStreamOperationType opType, string? documentKey)
+        {
+            if (syncBack)
+            {
+                SyncBackResumeTokenOperation = opType;
+                SyncBackResumeDocumentKey = documentKey;
+            }
+            else
+            {
+                ResumeTokenOperation = opType;
+                ResumeDocumentId = documentKey;
+                ResumeDocumentKey = documentKey;
+            }
+        }
+
+        public string? GetCSLastResumeTokenWithChange(bool syncBack)
+            => syncBack ? SyncBackCSLastResumeTokenWithChange : CSLastResumeTokenWithChange;
+
+        public void SetCSLastChange(bool syncBack, DateTime? time, string? token)
+        {
+            if (syncBack)
+            {
+                SyncBackCSLastChangeUTCTime = time;
+                SyncBackCSLastResumeTokenWithChange = token;
+            }
+            else
+            {
+                CSLastChangeUTCTime = time;
+                CSLastResumeTokenWithChange = token;
+            }
+        }
+
+        public void ClearResumeDocumentInfo(bool syncBack)
+        {
+            if (syncBack)
+            {
+                SyncBackInitialDocumenReplayed = false;
+                SyncBackResumeDocumentKey = null;
+                SyncBackResumeTokenOperation = default;
+                SyncBackCSLastResumeTokenWithChange = null;
+                SyncBackCSLastChangeUTCTime = null;
+            }
+            else
+            {
+                InitialDocumenReplayed = false;
+                ResumeDocumentKey = null;
+                ResumeTokenOperation = default;
+                CSLastResumeTokenWithChange = null;
+                CSLastChangeUTCTime = null;
+            }
+        }
+
+        #endregion
 
         public MigrationUnit(MigrationJob job, string databaseName, string collectionName, List<MigrationChunk> migrationChunks)
         {
@@ -234,6 +350,7 @@ namespace OnlineMongoMigrationProcessor
             mub.SkippedDueToMaxRetries = this.SkippedDueToMaxRetries;
             mub.FailedOperation = this.FailedOperation;
             mub.CSLastChangeUTCTime = this.CSLastChangeUTCTime;
+            mub.SyncBackCSLastChangeUTCTime = this.SyncBackCSLastChangeUTCTime;
             mub.OpLogError = this.OpLogError;
             return mub;
         }
