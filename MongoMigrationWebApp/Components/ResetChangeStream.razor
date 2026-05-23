@@ -215,9 +215,7 @@
         var processingSyncBack = MigrationJobContext.CurrentlyActiveJob?.ProcessingSyncBack ?? false;
         
         return MigrationUnits
-            .Where(mu => processingSyncBack 
-                ? !string.IsNullOrEmpty(mu.SyncBackResumeToken) 
-                : !string.IsNullOrEmpty(mu.ResumeToken))
+            .Where(mu => !string.IsNullOrEmpty(mu.GetResumeToken(processingSyncBack)))
             .ToList();
     }
 

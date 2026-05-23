@@ -160,18 +160,22 @@ namespace OnlineMongoMigrationProcessor
             return TaskResult.Success;
         }     
 
-        
+        /// <summary>
+        /// Signals the coordinator to stop immediately (sets flags + cancels CTS)
+        /// without awaiting in-flight workers. Call before KillAllMigrationProcesses.
+        /// </summary>
+        public void SignalStop()
+        {
+            _coordinator?.SignalStop();
+        }
 
         public override void StopProcessing(bool updateStatus = true)
         {
             _log.WriteLine("Stopping DumpRestoreProcessor...");
 
-            // Stop the coordinator timer and clear manifests
+            // Stop the coordinator timer, clear manifests, and await in-flight workers
             if (_coordinator!=null)
               _coordinator.StopCoordinatedProcessing();
-            
-            // Give time for any active timer callbacks to complete
-            System.Threading.Thread.Sleep(500);
             
             // Call base implementation
             base.StopProcessing(updateStatus);

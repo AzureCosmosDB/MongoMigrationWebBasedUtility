@@ -132,6 +132,92 @@ namespace OnlineMongoMigrationProcessor
         public DateTime? SyncBackChangeStreamStartedOn { get; set; }
         public DateTime SyncBackCursorUtcTimestamp { get; set; }
 
+        #region SyncBack-aware helpers
+
+        public DateTime GetCursorUtcTimestamp(bool syncBack)
+            => syncBack ? SyncBackCursorUtcTimestamp : CursorUtcTimestamp;
+
+        public void SetCursorUtcTimestamp(bool syncBack, DateTime value)
+        {
+            if (syncBack) SyncBackCursorUtcTimestamp = value;
+            else CursorUtcTimestamp = value;
+        }
+
+        public DateTime? GetChangeStreamStartedOn(bool syncBack)
+            => syncBack ? SyncBackChangeStreamStartedOn : ChangeStreamStartedOn;
+
+        public void SetChangeStreamStartedOn(bool syncBack, DateTime? value)
+        {
+            if (syncBack) SyncBackChangeStreamStartedOn = value;
+            else ChangeStreamStartedOn = value;
+        }
+
+        public string GetResumeToken(bool syncBack)
+            => (syncBack ? SyncBackResumeToken : ResumeToken) ?? string.Empty;
+
+        public void SetResumeToken(bool syncBack, string? value)
+        {
+            if (syncBack) SyncBackResumeToken = value;
+            else ResumeToken = value;
+        }
+
+        public string? GetOriginalResumeToken(bool syncBack)
+            => syncBack ? SyncBackOriginalResumeToken : OriginalResumeToken;
+
+        public void SetOriginalResumeToken(bool syncBack, string? value)
+        {
+            if (syncBack) SyncBackOriginalResumeToken = value;
+            else OriginalResumeToken = value;
+        }
+
+        public bool GetInitialDocumenReplayed(bool syncBack)
+            => syncBack ? SyncBackInitialDocumenReplayed : InitialDocumenReplayed;
+
+        public void SetInitialDocumenReplayed(bool syncBack, bool value)
+        {
+            if (syncBack) SyncBackInitialDocumenReplayed = value;
+            else InitialDocumenReplayed = value;
+        }
+
+        public ChangeStreamOperationType GetResumeTokenOperation(bool syncBack)
+            => syncBack ? SyncBackResumeTokenOperation : ResumeTokenOperation;
+
+        public string GetResumeDocumentKey(bool syncBack)
+        {
+            if (syncBack)
+                return SyncBackResumeDocumentKey ?? SyncBackResumeDocumentId ?? string.Empty;
+            return ResumeDocumentKey ?? ResumeDocumentId ?? string.Empty;
+        }
+
+        public string GetResumeCollectionKey(bool syncBack)
+            => (syncBack ? SyncBackResumeCollectionKey : ResumeCollectionKey) ?? string.Empty;
+
+        public void SetResumeTokenInfo(bool syncBack, string resumeToken, ChangeStreamOperationType operationType, string documentKey, string collectionKey)
+        {
+            if (syncBack)
+            {
+                SyncBackResumeToken = resumeToken;
+                if (string.IsNullOrEmpty(SyncBackOriginalResumeToken))
+                    SyncBackOriginalResumeToken = resumeToken;
+                SyncBackResumeTokenOperation = operationType;
+                SyncBackResumeDocumentId = documentKey;
+                SyncBackResumeDocumentKey = documentKey;
+                SyncBackResumeCollectionKey = collectionKey;
+            }
+            else
+            {
+                ResumeToken = resumeToken;
+                if (string.IsNullOrEmpty(OriginalResumeToken))
+                    OriginalResumeToken = resumeToken;
+                ResumeTokenOperation = operationType;
+                ResumeDocumentId = documentKey;
+                ResumeDocumentKey = documentKey;
+                ResumeCollectionKey = collectionKey;
+            }
+        }
+
+        #endregion
+
         public List<MigrationUnitBasic>? MigrationUnitBasics { get; set; }
 
         public bool Persist()

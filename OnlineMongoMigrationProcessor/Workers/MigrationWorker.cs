@@ -126,9 +126,17 @@ namespace OnlineMongoMigrationProcessor.Workers
             try
             {
                 _activeJobId=string.Empty;
-                _log.WriteLine("StopMigration called - cancelling all tokens and stopping processor", LogType.Debug);
+                _log.WriteLine("StopMigration called - cancelling all tokens and stopping processor", LogType.Warning);
                 _cts?.Cancel();
                 _compare_cts?.Cancel();
+
+                // Signal the coordinator to stop BEFORE killing processes.
+                // This prevents HandleDumpFailure/HandleRestoreFailure from re-enqueueing
+                // killed chunks for retry during the window between kill and StopCoordinatedProcessing.
+                if (_migrationProcessor is DumpRestoreProcessor drp)
+                {
+                    drp.SignalStop();
+                }
                 
                 // Kill all active mongodump and mongorestore processes
                 MigrationJobContext.KillAllMigrationProcesses();
@@ -1160,13 +1168,13 @@ namespace OnlineMongoMigrationProcessor.Workers
                 MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack = true;
                 if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server)
                 {
-                    if (MigrationJobContext.CurrentlyActiveJob.SyncBackChangeStreamStartedOn==null||MigrationJobContext.CurrentlyActiveJob.SyncBackChangeStreamStartedOn.HasValue == false)
-                        MigrationJobContext.CurrentlyActiveJob.SyncBackChangeStreamStartedOn = DateTime.UtcNow;
+                    if (!MigrationJobContext.CurrentlyActiveJob.GetChangeStreamStartedOn(true).HasValue)
+                        MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(true, DateTime.UtcNow);
                 }
                 else
                 {
-                    if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn==null|| MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.HasValue == false)
-                        MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn = DateTime.UtcNow;
+                    if (!MigrationJobContext.CurrentlyActiveJob.GetChangeStreamStartedOn(false).HasValue)
+                        MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(false, DateTime.UtcNow);
                 }
 
                 List<Task> resumeTokenTasks = new List<Task>();
@@ -1190,9 +1198,9 @@ namespace OnlineMongoMigrationProcessor.Workers
                 {
                     var mu= MigrationJobContext.GetMigrationUnit(mub.Id);
 
-                    if (!mu.SyncBackChangeStreamStartedOn.HasValue)
+                    if (!mu.GetChangeStreamStartedOn(true).HasValue)
                     {
-                        mu.SyncBackChangeStreamStartedOn = DateTime.UtcNow;
+                        mu.SetChangeStreamStartedOn(true, DateTime.UtcNow);
                         mu.CSLastChecked = DateTime.MinValue;
                         MigrationJobContext.SaveMigrationUnit(mu, true);
                         var setResumeResult = await SetCollectionResumeToken(mu, true, ctsToken, resumeTokenTasks);
@@ -1636,6 +1644,10 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             //for delayed mode only, at the start no collections are valid, hence IsOfflineJobCompleted gives false positive
             if (!Helper.AnyValidCollection(MigrationJobContext.CurrentlyActiveJob) && MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode == ChangeStreamMode.Delayed)
+                return;
+
+            //for server-level change streams, wait for all collections to complete offline migration before starting CS
+            if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && !Helper.IsOfflineJobCompleted(MigrationJobContext.CurrentlyActiveJob))
                 return;
 
 

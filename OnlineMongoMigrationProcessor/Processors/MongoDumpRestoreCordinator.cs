@@ -96,6 +96,8 @@ namespace OnlineMongoMigrationProcessor
         private readonly ConcurrentQueue<DumpRestoreProcessContext> _cleanupQueue = new();
         private readonly ConcurrentDictionary<string, byte> _cleanupQueueIndex = new();
         private int _cleanupLoopRunning = 0; // 0 = idle, 1 = running
+        // Track all spawned worker tasks so StopCoordinatedProcessing can await them.
+        private readonly ConcurrentBag<Task> _activeWorkerTasks = new();
         private System.Timers.Timer? _processTimer;
         private readonly int _timerIntervalMs = 2000; // Check every 2 seconds
         private bool _coordinatorInitialized = false;
@@ -735,6 +737,9 @@ namespace OnlineMongoMigrationProcessor
                     _cleanupQueueIndex.Clear();
                     _cleanupLoopRunning = 0;
 
+                    // Clear tracked worker tasks
+                    while (_activeWorkerTasks.TryTake(out _)) { }
+
                     // Dispose worker pools
                     _dumpPool?.Dispose();
                     _dumpPool = null;
@@ -1196,7 +1201,8 @@ namespace OnlineMongoMigrationProcessor
 
                         MigrationJobContext.SaveMigrationUnit(mu, true);
 
-                        _ = Task.Run(async () => await ProcessChunkForDownload(context), cancellationToken);
+                        var workerTask = Task.Run(async () => await ProcessChunkForDownload(context), cancellationToken);
+                        _activeWorkerTasks.Add(workerTask);
                     }
                     else
                     {
@@ -1384,7 +1390,8 @@ namespace OnlineMongoMigrationProcessor
 
                         _log?.WriteLine($"[ProcessPendingRestores] Spawning restore worker for {mu?.DatabaseName}.{mu?.CollectionName}[{context.ChunkIndex}] (worker {spawned}/{availableWorkers})", LogType.Debug);                        // Spawn worker task
                         var cancellationToken = _processCts?.Token ?? CancellationToken.None;
-                        _ = Task.Run(async () => await ProcessChunkForRestore(context), cancellationToken);
+                        var workerTask = Task.Run(async () => await ProcessChunkForRestore(context), cancellationToken);
+                        _activeWorkerTasks.Add(workerTask);
                     }
                     else
                     {
@@ -1430,8 +1437,10 @@ namespace OnlineMongoMigrationProcessor
             {
                 _log?.WriteLine($"Coordinator: Starting dump for {dbName}.{colName}[{chunkIndex}]", LogType.Debug);
 
-                // Check cancellation
-                if (_processCts?.Token.IsCancellationRequested == true)
+                // Check cancellation or job stopped
+                if (_processCts?.Token.IsCancellationRequested == true ||
+                    _stopped ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsStarted == false)
                 {
                     HandleDumpFailure(context, TaskResult.Canceled);
                     return;
@@ -2151,19 +2160,10 @@ namespace OnlineMongoMigrationProcessor
             {
                 _log?.WriteLine($"Coordinator: Starting restore for {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[{chunkIndex}]", LogType.Debug);
 
-                // ===== TEMPORARY TEST CODE - REMOVE THIS BLOCK AFTER TESTING =====
-                // Simulate restore failure for chunk index 1 (2nd chunk) to test skip logic
-                //if (chunkIndex == 1 && sourceColName== "smalldocs_22M"  && context.RetryCount<2)
-                //{
-                //    _log?.WriteLine($"[TEST] Simulating restore failure for chunk 1: {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[1]", LogType.Warning);
-                //    HandleRestoreFailure(context, TaskResult.Retry);
-                //    _restorePool?.Release();
-                //    return;
-                //}
-                // ===== END TEMPORARY TEST CODE =====
-
-                // Check cancellation
-                if (_processCts?.Token.IsCancellationRequested == true)
+                // Check cancellation or job stopped
+                if (_processCts?.Token.IsCancellationRequested == true ||
+                    _stopped ||
+                    MigrationJobContext.CurrentlyActiveJob?.IsStarted == false)
                 {
                     HandleRestoreFailure(context, TaskResult.Canceled);
                     return;
@@ -2636,6 +2636,15 @@ namespace OnlineMongoMigrationProcessor
                 return;
             }
 
+            // If coordinator is stopped (e.g. job being stopped/paused), don't retry.
+            // Without this check, killed processes would be re-enqueued during the
+            // window between KillAllMigrationProcesses and StopCoordinatedProcessing.
+            if (_stopped || _processCts?.Token.IsCancellationRequested == true)
+            {
+                _downloadManifest.TryRemove(context.Id, out _);
+                return;
+            }
+
             try
             {
                 context.LastError = ex;
@@ -2715,6 +2724,13 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
+                _uploadManifest.TryRemove(context.Id, out _);
+                return;
+            }
+
+            // If coordinator is stopped (e.g. job being stopped/paused), don't retry.
+            if (_stopped || _processCts?.Token.IsCancellationRequested == true)
+            {
                 _uploadManifest.TryRemove(context.Id, out _);
                 return;
             }
@@ -2861,7 +2877,8 @@ namespace OnlineMongoMigrationProcessor
             if (Interlocked.CompareExchange(ref _cleanupLoopRunning, 1, 0) == 0)
             {
                 var ct = _processCts?.Token ?? CancellationToken.None;
-                _ = Task.Run(() => RunCleanupLoopAsync(ct), ct);
+                var cleanupTask = Task.Run(() => RunCleanupLoopAsync(ct), ct);
+                _activeWorkerTasks.Add(cleanupTask);
             }
         }
 
@@ -2909,7 +2926,8 @@ namespace OnlineMongoMigrationProcessor
                     !_cleanupQueue.IsEmpty &&
                     Interlocked.CompareExchange(ref _cleanupLoopRunning, 1, 0) == 0)
                 {
-                    _ = Task.Run(() => RunCleanupLoopAsync(cancellationToken), cancellationToken);
+                    var cleanupTask = Task.Run(() => RunCleanupLoopAsync(cancellationToken), cancellationToken);
+                    _activeWorkerTasks.Add(cleanupTask);
                 }
             }
         }
@@ -3178,6 +3196,18 @@ namespace OnlineMongoMigrationProcessor
         /// <summary>
         /// Stops the coordinator timer. Thread-safe.
         /// </summary>
+        /// <summary>
+        /// Signals the coordinator to stop accepting/spawning new work immediately.
+        /// Call this BEFORE killing processes so that HandleDumpFailure/HandleRestoreFailure
+        /// don't re-enqueue killed chunks for retry.
+        /// </summary>
+        public void SignalStop()
+        {
+            _stopped = true;
+            _processNewTasks = false;
+            _processCts?.Cancel();
+        }
+
         public void StopCoordinatedProcessing()
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.StopCoordinatedProcessing");
@@ -3222,6 +3252,31 @@ namespace OnlineMongoMigrationProcessor
                     ClearQueue(_downloadBacklog);
                     ClearQueue(_uploadBacklog);
                     ClearQueue(_pendingMigrationUnits);
+                }
+
+                // After the timer lock is released no new tasks can be spawned.
+                // Drain and await all in-flight worker tasks so zombie threads cannot
+                // outlive the coordinator and corrupt persisted state on resume.
+                var pendingTasks = new List<Task>();
+                while (_activeWorkerTasks.TryTake(out var t))
+                    pendingTasks.Add(t);
+
+                if (pendingTasks.Count > 0)
+                {
+                    _log?.WriteLine($"Waiting for {pendingTasks.Count} in-flight worker(s) to finish...", LogType.Info);
+                    try
+                    {
+                        Task.WaitAll(pendingTasks.ToArray(), TimeSpan.FromSeconds(30));
+                    }
+                    catch (AggregateException)
+                    {
+                        // Expected — cancelled or failed worker tasks
+                    }
+                    _log?.WriteLine("All in-flight workers completed.", LogType.Info);
+
+                    // Safety net: kill any mongodump/mongorestore processes that a zombie
+                    // worker may have spawned while we were waiting for tasks to finish.
+                    MigrationJobContext.KillAllMigrationProcesses();
                 }
             }
             catch (Exception ex)

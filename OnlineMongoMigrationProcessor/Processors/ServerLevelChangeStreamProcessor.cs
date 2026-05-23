@@ -217,6 +217,7 @@ namespace OnlineMongoMigrationProcessor
                 pipelineArray = pipeline.ToArray();
 
                 // Watch at client level (server-level) with a dedicated 10-minute cursor creation timeout
+                var watchClient = _syncBack ? _targetClient : _sourceClient;
                 _log.WriteLine($"{_syncBackPrefix}Creating server-level change stream cursor...", LogType.Debug);
                 using var cursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
                 IChangeStreamCursor<ChangeStreamDocument<BsonDocument>>? cursor = null;
@@ -224,7 +225,7 @@ namespace OnlineMongoMigrationProcessor
                 try
                 {
                     cursor = await Task.Run(() =>
-                        _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cursorCreationCts.Token),
+                        watchClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, options, cursorCreationCts.Token),
                         cursorCreationCts.Token);
                 }
                 catch (OperationCanceledException) when (cursorCreationCts.IsCancellationRequested)
@@ -252,38 +253,50 @@ namespace OnlineMongoMigrationProcessor
 
                 using (cursor)
                 {
-                    // Create a fresh batch-duration CTS that starts NOW (after cursor creation),
-                    // so processing always gets the full batch time regardless of how long cursor creation took.
-                    using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
-                    var batchToken = batchCts.Token;
+                    try
+                    {
+                        // Create a fresh batch-duration CTS that starts NOW (after cursor creation),
+                        // so processing always gets the full batch time regardless of how long cursor creation took.
+                        using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                        var batchToken = batchCts.Token;
 
-                    if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
-                    {
-                        await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-                    }
-                    else
-                    {
-                        await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-                    }
-
-                    // Advance resume token using postBatchResumeToken when all changes
-                    // were persisted successfully (or no events were received).
-                    // If any write failed, keep the last change-event token so we
-                    // re-process from that point on the next round.
-                    if (!state.HasFailures)
-                    {
-                        try
+                        if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
                         {
-                            var postBatchToken = cursor.GetResumeToken();
-                            if (postBatchToken != null)
-                            {
-                                state.LatestResumeToken = postBatchToken.ToJson();
-                                state.LatestTimestamp = DateTime.UtcNow;
-                            }
+                            await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level stream: {ex.Message}", LogType.Debug);
+                            await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected when batch CTS fires — fall through to postBatchResumeToken capture below
+                    }
+                    finally
+                    {
+                        // Advance resume token using postBatchResumeToken when all changes
+                        // were persisted successfully (or no events were received).
+                        // If any write failed, keep the last change-event token so we
+                        // re-process from that point on the next round.
+                        // This MUST be in a finally block so the token is captured even when
+                        // the batch times out (OperationCanceledException), otherwise idle
+                        // rounds never advance the token and it eventually expires.
+                        if (!state.HasFailures)
+                        {
+                            try
+                            {
+                                var postBatchToken = cursor.GetResumeToken();
+                                if (postBatchToken != null)
+                                {
+                                    state.LatestResumeToken = postBatchToken.ToJson();
+                                    state.LatestTimestamp = DateTime.UtcNow;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level stream: {ex.Message}", LogType.Debug);
+                            }
                         }
                     }
                 }
@@ -301,9 +314,7 @@ namespace OnlineMongoMigrationProcessor
                 _log.WriteLine($"{_syncBackPrefix}Resume token invalid for server-level change stream (Code: {mcex.Code}). Falling back to StartAtOperationTime.", LogType.Warning);
 
                 // Determine the best timestamp to resume from
-                DateTime fallbackTime = _syncBack
-                    ? MigrationJobContext.CurrentlyActiveJob.SyncBackCursorUtcTimestamp
-                    : MigrationJobContext.CurrentlyActiveJob.CursorUtcTimestamp;
+                DateTime fallbackTime = MigrationJobContext.CurrentlyActiveJob.GetCursorUtcTimestamp(_syncBack);
 
                 if (fallbackTime <= DateTime.MinValue)
                     fallbackTime = MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn ?? DateTime.MinValue;
@@ -327,13 +338,14 @@ namespace OnlineMongoMigrationProcessor
                         MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
                     };
 
+                    var retryWatchClient = _syncBack ? _targetClient : _sourceClient;
                     using var retryCursorCreationCts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
                     IChangeStreamCursor<ChangeStreamDocument<BsonDocument>>? retryCursor;
                     var retryCursorCreationSw = Stopwatch.StartNew();
                     try
                     {
                         retryCursor = await Task.Run(() =>
-                            _sourceClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, retryCursorCreationCts.Token),
+                            retryWatchClient.Watch<ChangeStreamDocument<BsonDocument>>(pipelineArray, retryOptions, retryCursorCreationCts.Token),
                             retryCursorCreationCts.Token);
                     }
                     catch (OperationCanceledException) when (retryCursorCreationCts.IsCancellationRequested)
@@ -358,30 +370,39 @@ namespace OnlineMongoMigrationProcessor
                     }
                     using (retryCursor)
                     {
-                        using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
-                        var retryBatchToken = retryBatchCts.Token;
-
-                        if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
-                            await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-                        else
-                            await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
-
-                        // Advance resume token using postBatchResumeToken when all
-                        // changes were persisted successfully (or no events received).
-                        if (!state.HasFailures)
+                        try
                         {
-                            try
+                            using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                            var retryBatchToken = retryBatchCts.Token;
+
+                            if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
+                                await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            else
+                                await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Expected when batch CTS fires — fall through to postBatchResumeToken capture below
+                        }
+                        finally
+                        {
+                            // Advance resume token using postBatchResumeToken when all
+                            // changes were persisted successfully (or no events received).
+                            if (!state.HasFailures)
                             {
-                                var postBatchToken = retryCursor.GetResumeToken();
-                                if (postBatchToken != null)
+                                try
                                 {
-                                    state.LatestResumeToken = postBatchToken.ToJson();
-                                    state.LatestTimestamp = DateTime.UtcNow;
+                                    var postBatchToken = retryCursor.GetResumeToken();
+                                    if (postBatchToken != null)
+                                    {
+                                        state.LatestResumeToken = postBatchToken.ToJson();
+                                        state.LatestTimestamp = DateTime.UtcNow;
+                                    }
                                 }
-                            }
-                            catch (Exception ex)
-                            {
-                                _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level fallback stream: {ex.Message}", LogType.Debug);
+                                catch (Exception ex)
+                                {
+                                    _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for server-level fallback stream: {ex.Message}", LogType.Debug);
+                                }
                             }
                         }
                     }
@@ -645,10 +666,7 @@ namespace OnlineMongoMigrationProcessor
 
             UpdateResumeToken(latestResumeToken, latestOperationType, latestDocumentKey, latestCollectionKey);
 
-            if (!_syncBack)
-                MigrationJobContext.CurrentlyActiveJob.CursorUtcTimestamp = latestTimestamp;
-            else
-                MigrationJobContext.CurrentlyActiveJob.SyncBackCursorUtcTimestamp = latestTimestamp;
+            MigrationJobContext.CurrentlyActiveJob.SetCursorUtcTimestamp(_syncBack, latestTimestamp);
 
             MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
@@ -951,10 +969,7 @@ namespace OnlineMongoMigrationProcessor
                     touchedMuIdsInRound.Add(mu.Id);
 
                     UpdateResumeToken(docs.LatestResumeToken, docs.LatestOperationType, docs.LatestDocumentKey, collectionKey);
-                    if (!_syncBack)
-                        mu.CursorUtcTimestamp = docs.LatestTimestamp;
-                    else
-                        mu.SyncBackCursorUtcTimestamp = docs.LatestTimestamp;
+                    mu.SetCursorUtcTimestamp(_syncBack, docs.LatestTimestamp);
 
                     // Accumulate stats locally; they are applied to MU on the final flush.
                     if (watchState != null && flushedEventCount > 0)
@@ -1248,106 +1263,37 @@ namespace OnlineMongoMigrationProcessor
 
         private string GetResumeToken()
         {
-            if (!_syncBack)
-            {
-                return MigrationJobContext.CurrentlyActiveJob.ResumeToken ?? string.Empty;
-            }
-            else
-            {
-                return MigrationJobContext.CurrentlyActiveJob.SyncBackResumeToken ?? string.Empty;
-            }
+            return MigrationJobContext.CurrentlyActiveJob.GetResumeToken(_syncBack);
         }
 
         private bool GetInitialDocumentReplayedStatus()
         {
-            if (!_syncBack)
-            {
-                return MigrationJobContext.CurrentlyActiveJob.InitialDocumenReplayed;
-            }
-            else
-            {
-                return MigrationJobContext.CurrentlyActiveJob.SyncBackInitialDocumenReplayed;
-            }
+            return MigrationJobContext.CurrentlyActiveJob.GetInitialDocumenReplayed(_syncBack);
         }
 
         private void SetInitialDocumentReplayedStatus(bool value)
         {
-            if (!_syncBack)
-            {
-                MigrationJobContext.CurrentlyActiveJob.InitialDocumenReplayed = value;
-            }
-            else
-            {
-                MigrationJobContext.CurrentlyActiveJob.SyncBackInitialDocumenReplayed = value;
-            }
+            MigrationJobContext.CurrentlyActiveJob.SetInitialDocumenReplayed(_syncBack, value);
         }
 
         private ChangeStreamOperationType GetResumeTokenOperation()
         {
-            if (!_syncBack)
-            {
-                return MigrationJobContext.CurrentlyActiveJob.ResumeTokenOperation;
-            }
-            else
-            {
-                return MigrationJobContext.CurrentlyActiveJob.SyncBackResumeTokenOperation;
-            }
+            return MigrationJobContext.CurrentlyActiveJob.GetResumeTokenOperation(_syncBack);
         }
 
         private string GetResumeDocumentKey()
         {
-            if (!_syncBack)
-            {
-                return MigrationJobContext.CurrentlyActiveJob.ResumeDocumentKey 
-                    ?? MigrationJobContext.CurrentlyActiveJob.ResumeDocumentId // Fallback for backward compatibility
-                    ?? string.Empty;
-            }
-            else
-            {
-                return MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentKey 
-                    ?? MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentId // Fallback for backward compatibility
-                    ?? string.Empty;
-            }
+            return MigrationJobContext.CurrentlyActiveJob.GetResumeDocumentKey(_syncBack);
         }
 
         private string GetResumeCollectionKey()
         {
-            if (!_syncBack)
-            {
-                return MigrationJobContext.CurrentlyActiveJob.ResumeCollectionKey ?? string.Empty;
-            }
-            else
-            {
-                return MigrationJobContext.CurrentlyActiveJob.SyncBackResumeCollectionKey ?? string.Empty;
-            }
+            return MigrationJobContext.CurrentlyActiveJob.GetResumeCollectionKey(_syncBack);
         }
 
         private void UpdateResumeToken(string resumeToken, ChangeStreamOperationType operationType, string documentId, string collectionKey)
         {
-            if (!_syncBack)
-            {
-                MigrationJobContext.CurrentlyActiveJob.ResumeToken = resumeToken;
-                if (string.IsNullOrEmpty(MigrationJobContext.CurrentlyActiveJob.OriginalResumeToken))
-                {
-                    MigrationJobContext.CurrentlyActiveJob.OriginalResumeToken = resumeToken;
-                }
-                MigrationJobContext.CurrentlyActiveJob.ResumeTokenOperation = operationType;
-                MigrationJobContext.CurrentlyActiveJob.ResumeDocumentId = documentId; // Deprecated - kept for backward compatibility
-                MigrationJobContext.CurrentlyActiveJob.ResumeDocumentKey = documentId;
-                MigrationJobContext.CurrentlyActiveJob.ResumeCollectionKey = collectionKey;
-            }
-            else
-            {
-                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeToken = resumeToken;
-                if (string.IsNullOrEmpty(MigrationJobContext.CurrentlyActiveJob.SyncBackOriginalResumeToken))
-                {
-                    MigrationJobContext.CurrentlyActiveJob.SyncBackOriginalResumeToken = resumeToken;
-                }
-                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeTokenOperation = operationType;
-                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentId = documentId; // Deprecated - kept for backward compatibility
-                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeDocumentKey = documentId;
-                MigrationJobContext.CurrentlyActiveJob.SyncBackResumeCollectionKey = collectionKey;
-            }
+            MigrationJobContext.CurrentlyActiveJob.SetResumeTokenInfo(_syncBack, resumeToken, operationType, documentId, collectionKey);
         }
 
         private static BsonDocument RenderFilterForRawCollection(FilterDefinition<BsonDocument> filter)

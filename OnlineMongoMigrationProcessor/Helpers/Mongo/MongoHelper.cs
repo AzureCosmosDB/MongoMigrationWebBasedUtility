@@ -596,19 +596,12 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         {
             MigrationJobContext.AddVerboseLog($"{(syncBack ? "SyncBack: " : string.Empty)}Resetting change stream resume token for {mu.DatabaseName}.{mu.CollectionName}");
            
-            if (syncBack)
-            {
-                mu.SyncBackResumeToken = null;
-                mu.SyncBackCursorUtcTimestamp = DateTime.MinValue;
-            }
-            else
-            {
-                mu.ResumeToken = null;
+            mu.SetResumeToken(syncBack, null);
+            if (!syncBack)
                 mu.OriginalResumeToken = null;
-                mu.CursorUtcTimestamp = DateTime.MinValue;
-            }
+            mu.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
 
-            mu.CSLastResumeTokenWithChange = null;
+            mu.SetCSLastChange(syncBack, null, null);
             ResetCounters(mu, syncBack);
         }
 
@@ -656,25 +649,25 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                             return;
                         }
 
-                        resumeToken = mu.ResumeToken ?? string.Empty;
+                        resumeToken = mu.GetResumeToken(false) ?? string.Empty;
                         originalResumeToken = mu.OriginalResumeToken ?? string.Empty;
-                        startedOnUtc = mu.ChangeStreamStartedOn.HasValue ? mu.ChangeStreamStartedOn.Value.ToUniversalTime() : DateTime.UtcNow;
+                        startedOnUtc = mu.GetChangeStreamStartedOn(false)?.ToUniversalTime() ?? DateTime.UtcNow;
                         start = (mu.ChangeStreamStartedOn ?? DateTime.UtcNow).AddMinutes(-15).ToUniversalTime();
                     }
                     if (syncBack)
                     {
                         if (useServerLevel)
                         {
-                            resumeToken = job.SyncBackResumeToken ?? string.Empty;
+                            resumeToken = job.GetResumeToken(true);
                             originalResumeToken = job.OriginalResumeToken ?? string.Empty;
-                            startedOnUtc = job.SyncBackChangeStreamStartedOn.HasValue ? job.SyncBackChangeStreamStartedOn.Value.ToUniversalTime() : DateTime.UtcNow;
+                            startedOnUtc = job.GetChangeStreamStartedOn(true)?.ToUniversalTime() ?? DateTime.UtcNow;
                             start = startedOnUtc;
                         }
                         else
                         {
-                            resumeToken = mu.SyncBackResumeToken ?? string.Empty;
-                            originalResumeToken = mu.SyncBackResumeToken ?? string.Empty;
-                            startedOnUtc = mu.SyncBackChangeStreamStartedOn.HasValue ? mu.SyncBackChangeStreamStartedOn.Value.ToUniversalTime() : DateTime.UtcNow;
+                            resumeToken = mu.GetResumeToken(true) ?? string.Empty;
+                            originalResumeToken = mu.GetOriginalResumeToken(true) ?? string.Empty;
+                            startedOnUtc = mu.GetChangeStreamStartedOn(true)?.ToUniversalTime() ?? DateTime.UtcNow;
                             start = startedOnUtc;
                         }
                     }
@@ -682,9 +675,9 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     {
                         if (useServerLevel)
                         {
-                            resumeToken = job.ResumeToken ?? string.Empty;
+                            resumeToken = job.GetResumeToken(false);
                             originalResumeToken = job.OriginalResumeToken ?? string.Empty;
-                            startedOnUtc= job.ChangeStreamStartedOn.HasValue ? job.ChangeStreamStartedOn.Value.ToUniversalTime() : DateTime.UtcNow;
+                            startedOnUtc = job.GetChangeStreamStartedOn(false)?.ToUniversalTime() ?? DateTime.UtcNow;
                             start = startedOnUtc;
                         }
                     }
@@ -917,25 +910,22 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                         var postBatchTokenJson = postBatchToken.ToJson();
                         if (useServerLevel)
                         {
-                            if (string.IsNullOrEmpty(syncBack ? job.SyncBackResumeToken : job.ResumeToken))
+                            if (string.IsNullOrEmpty(job.GetResumeToken(syncBack)))
                             {
-                                if (syncBack)
-                                    job.SyncBackResumeToken = postBatchTokenJson;
-                                else
-                                    job.ResumeToken = postBatchTokenJson;
+                                job.SetResumeToken(syncBack, postBatchTokenJson);
                                 MigrationJobContext.SaveMigrationJob(job);
                                 log.WriteLine($"Server-level postBatchResumeToken captured (no changes detected)", LogType.Debug);
                             }
                         }
                         else
                         {
-                            var currentToken = syncBack ? mu.SyncBackResumeToken : mu.ResumeToken;
+                            var currentToken = mu.GetResumeToken(syncBack);
                             if (string.IsNullOrEmpty(currentToken))
                             {
                                 SetResumeParameters(mu, DateTime.UtcNow, postBatchTokenJson, syncBack);
-                                mu.InitialDocumenReplayed = true; // No change to replay
+                                mu.SetInitialDocumenReplayed(syncBack, true); // No change to replay
                                 MigrationJobContext.SaveMigrationUnit(mu, true);
-                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected)");
+                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected, syncBack={syncBack})");
                             }
                         }
                     }
@@ -1579,18 +1569,9 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             {
                 // Server-level resume token setting             
               
-                if (syncBack)
-                {
-                    job.SyncBackResumeToken = resumeTokenJson;
-                    token = job.SyncBackOriginalResumeToken;
-                    job.SyncBackCursorUtcTimestamp = timestamp;
-                }
-                else
-                {
-                    job.ResumeToken = resumeTokenJson;
-                    token = job.OriginalResumeToken;
-                    job.CursorUtcTimestamp = timestamp;
-                }
+                job.SetResumeToken(syncBack, resumeTokenJson);
+                token = job.GetOriginalResumeToken(syncBack);
+                job.SetCursorUtcTimestamp(syncBack, timestamp);
 
                 if (string.IsNullOrEmpty(token))
                     isNotSet = true;
@@ -1598,10 +1579,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                 if (isNotSet)
                 {
-                    if (syncBack)
-                        job.SyncBackOriginalResumeToken = resumeTokenJson;
-                    else
-                        job.OriginalResumeToken = resumeTokenJson;
+                    job.SetOriginalResumeToken(syncBack, resumeTokenJson);
 
 
                     job.ResumeTokenOperation = operationType;
@@ -1611,10 +1589,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                     if (muInServerMode != null)
                     {
-                        if (syncBack)
-                            muInServerMode.SyncBackCursorUtcTimestamp = timestamp;
-                        else
-                            muInServerMode.CursorUtcTimestamp = timestamp;
+                        muInServerMode.SetCursorUtcTimestamp(syncBack, timestamp);
 
                         MigrationJobContext.SaveMigrationUnit(muInServerMode, true);
                     }
@@ -1634,23 +1609,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             else if (target is MigrationUnit mu)
             {
-                if (string.IsNullOrEmpty(mu.OriginalResumeToken))
-                    isNotSet = true;
-
+                isNotSet = string.IsNullOrEmpty(mu.GetOriginalResumeToken(syncBack));
 
                 if (isNotSet)                
                 {
-
-                    if (!syncBack)
-                    {
-                        mu.OriginalResumeToken = resumeTokenJson;
-                    }
-
+                    mu.SetOriginalResumeToken(syncBack, resumeTokenJson);
                     SetResumeParameters(mu, timestamp, resumeTokenJson, syncBack);
-
-                    mu.ResumeTokenOperation = operationType;
-                    mu.ResumeDocumentId = documentKeyJson; // Deprecated - kept for backward compatibility
-                    mu.ResumeDocumentKey = documentKeyJson;
+                    mu.SetResumeDocumentInfo(syncBack, operationType, documentKeyJson);
                 }               
                 
                 MigrationJobContext.SaveMigrationUnit(mu,true);
@@ -1660,16 +1625,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
         public static void SetResumeParameters(MigrationUnit mu, DateTime timestamp, string resumeToken, bool syncBack)
         {
-            if (!syncBack)
-            {
-                mu.CursorUtcTimestamp = timestamp;
-                mu.ResumeToken = resumeToken;
-            }
-            else
-            {
-                mu.SyncBackCursorUtcTimestamp = timestamp;
-                mu.SyncBackResumeToken = resumeToken;
-            }
+            mu.SetCursorUtcTimestamp(syncBack, timestamp);
+            mu.SetResumeToken(syncBack, resumeToken);
         }
 
         private static void ResetCounters(MigrationUnit mu, bool syncBack)
@@ -1699,11 +1656,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 mu.SyncBackUpdateEvents = 0;
             }
             mu.ResetChangeStream = false;
-            mu.InitialDocumenReplayed = false;
-            mu.ResumeDocumentKey = null;
-            mu.ResumeTokenOperation = default;
-            mu.CSLastResumeTokenWithChange = null;
-            mu.CSLastChangeUTCTime = null;
+            mu.ClearResumeDocumentInfo(syncBack);
             mu.CSLastChecked = DateTime.MinValue; 
             mu.CSLastBatchDurationSeconds = 0;
             mu.CSNormalizedUpdatesInLastBatch = 0;

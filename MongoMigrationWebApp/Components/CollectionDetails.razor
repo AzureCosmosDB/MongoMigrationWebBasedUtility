@@ -75,12 +75,12 @@
                                     {
                                         <div><span class="lbl">Mode:</span> @Helper.GetChangeStreamMode(MigrationJob)</div>
                                         <div><span class="lbl">Started On (UTC):</span> @GetChangeStreamStartedOnForDisplay(MigrationUnit, MigrationJob)</div>
-                                        <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.OriginalResumeToken ?? "N/A")</div>
-                                        <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.CursorUtcTimestamp</div>
-                                        <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.ResumeToken ?? "N/A")</div>
-                                        <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(MigrationUnit.ResumeDocumentKey) ? "N/A" : MigrationUnit.InitialDocumenReplayed.ToString())</div>
-                                        <div><span class="lbl">First Change Document:</span> @(MigrationUnit.ResumeDocumentKey?.ToString() ?? "N/A")</div>
-                                        <div><span class="lbl">First Change Operation:</span> @(string.IsNullOrEmpty(MigrationUnit.ResumeDocumentKey) ? "N/A" : MigrationUnit.ResumeTokenOperation.ToString())</div>
+                                        <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.GetOriginalResumeToken(false) ?? "N/A")</div>
+                                        <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.GetCursorUtcTimestamp(false)</div>
+                                        <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.GetResumeToken(false) ?? "N/A")</div>
+                                        <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(MigrationUnit.GetResumeDocumentKeyForDirection(false)) ? "N/A" : MigrationUnit.GetInitialDocumenReplayed(false).ToString())</div>
+                                        <div><span class="lbl">First Change Document:</span> @(MigrationUnit.GetResumeDocumentKeyForDirection(false)?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">First Change Operation:</span> @(string.IsNullOrEmpty(MigrationUnit.GetResumeDocumentKeyForDirection(false)) ? "N/A" : MigrationUnit.GetResumeTokenOperationForDirection(false).ToString())</div>
                                         <div><span class="lbl">Inserted:</span> @FormatLong(MigrationUnit.CSDocsInserted) (from @FormatLong(MigrationUnit.CSDInsertEvents) events)</div>
                                         <div><span class="lbl">Deleted:</span> @FormatLong(MigrationUnit.CSDocsDeleted) (from @FormatLong(MigrationUnit.CSDeleteEvents) events)</div>
                                         <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.CSDocsUpdated) (from @FormatLong(MigrationUnit.CSUpdateEvents) events)</div>
@@ -88,8 +88,8 @@
                                         <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.CSErrors)</div>
                                         <div><span class="lbl">Avg Read Latency (ms):</span> @MigrationUnit.CSAvgReadLatencyInMS.ToString("F2")</div>
                                         <div><span class="lbl">Avg Write Latency (ms):</span> @MigrationUnit.CSAvgWriteLatencyInMS.ToString("F2")</div>
-                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationUnit.CSLastChangeUTCTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
-                                        <div><span class="lbl">Last Resume Token With Change:</span> @(MigrationUnit.CSLastResumeTokenWithChange ?? "N/A")</div>
+                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationUnit.GetCSLastChangeUTCTime(false)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                                        <div><span class="lbl">Last Resume Token With Change:</span> @(MigrationUnit.GetCSLastResumeTokenWithChange(false) ?? "N/A")</div>
                                         @if (Helper.GetChangeStreamMode(MigrationJob) == "Aggressive" && MigrationUnit.AggressiveCacheDeleted)
                                         {
                                             <div><span class="lbl">Aggressive:</span> Completed on @(MigrationUnit.AggressiveCacheDeletedOn?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A") UTC</div>
@@ -107,14 +107,20 @@
                                 <td class="group">
                                     @if (MigrationJob != null && Helper.IsOnline(MigrationJob) && (MigrationJob?.SyncBackEnabled ?? false))
                                     {
-                                        <div><span class="lbl">Resume Token:</span> @(MigrationUnit.SyncBackResumeToken ?? "N/A")</div>
-                                        <div><span class="lbl">Started On (UTC):</span> @(MigrationUnit.SyncBackChangeStreamStartedOn?.ToString() ?? "N/A")</div>
-                                        <div><span class="lbl">Cursor Utc Timestamp:</span> @MigrationUnit.SyncBackCursorUtcTimestamp</div>
+                                        <div><span class="lbl">Started On (UTC):</span> @(MigrationUnit.GetChangeStreamStartedOn(true)?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.GetOriginalResumeToken(true) ?? "N/A")</div>
+                                        <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.GetCursorUtcTimestamp(true)</div>
+                                        <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.GetResumeToken(true) ?? "N/A")</div>
+                                        <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(MigrationUnit.GetResumeDocumentKeyForDirection(true)) ? "N/A" : MigrationUnit.GetInitialDocumenReplayed(true).ToString())</div>
+                                        <div><span class="lbl">First Change Document:</span> @(MigrationUnit.GetResumeDocumentKeyForDirection(true)?.ToString() ?? "N/A")</div>
+                                        <div><span class="lbl">First Change Operation:</span> @(string.IsNullOrEmpty(MigrationUnit.GetResumeDocumentKeyForDirection(true)) ? "N/A" : MigrationUnit.GetResumeTokenOperationForDirection(true).ToString())</div>
                                         <div><span class="lbl">Inserted:</span> @FormatLong(MigrationUnit.SyncBackDocsInserted) (from @FormatLong(MigrationUnit.SyncBackInsertEvents) events)</div>
                                         <div><span class="lbl">Deleted:</span> @FormatLong(MigrationUnit.SyncBackDocsDeleted) (from @FormatLong(MigrationUnit.SyncBackDeleteEvents) events)</div>
                                         <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.SyncBackDocsUpdated) (from @FormatLong(MigrationUnit.SyncBackUpdateEvents) events)</div>
                                         <div><span class="lbl">Duplicate Processed:</span> @FormatLong(MigrationUnit.SyncBackDuplicateDocsSkipped) skipped</div>
                                         <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.SyncBackErrors)</div>
+                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationUnit.GetCSLastChangeUTCTime(true)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                                        <div><span class="lbl">Last Resume Token With Change:</span> @(MigrationUnit.GetCSLastResumeTokenWithChange(true) ?? "N/A")</div>
                                     }
                                     else
                                     {
@@ -192,7 +198,7 @@
     private static string GetChangeStreamStartedOnForDisplay(MigrationUnit migrationUnit, MigrationJob migrationJob)
     {
         var isServerLevel = migrationJob.ChangeStreamLevel == ChangeStreamLevel.Server;
-        var startedOn = isServerLevel ? migrationJob.ChangeStreamStartedOn : migrationUnit.ChangeStreamStartedOn;
+        var startedOn = isServerLevel ? migrationJob.GetChangeStreamStartedOn(false) : migrationUnit.GetChangeStreamStartedOn(false);
         return startedOn?.ToString() ?? "N/A";
     }
 

@@ -187,10 +187,27 @@ namespace OnlineMongoMigrationProcessor.Workers
                 // -------------------------
                 if (processType == "MongoDump")
                 {
-                    using var stream = StorageStreamFactory.OpenWriteAsync(outputFilePath, cancellationToken).GetAwaiter().GetResult();
-
-                    _process.StandardOutput.BaseStream.CopyToAsync(stream, cancellationToken).Wait(cancellationToken);
-                    stream.Flush();
+                    Stream? dumpStream = null;
+                    try
+                    {
+                        dumpStream = StorageStreamFactory.OpenWriteAsync(outputFilePath, cancellationToken).GetAwaiter().GetResult();
+                        _process.StandardOutput.BaseStream.CopyToAsync(dumpStream, cancellationToken).Wait(cancellationToken);
+                        dumpStream.Flush();
+                    }
+                    finally
+                    {
+                        if (dumpStream != null)
+                        {
+                            try { dumpStream.Dispose(); }
+                            catch when (cancellationToken.IsCancellationRequested)
+                            {
+                                // Suppress Azure SDK retry exceptions during Dispose/Flush
+                                // when cancellation was requested (process killed during stop).
+                                // Without this, the blob write stream retries StageBlock for
+                                // 23+ seconds, keeping the worker thread alive as a zombie.
+                            }
+                        }
+                    }
                 }
                 else // MongoRestore
                 {

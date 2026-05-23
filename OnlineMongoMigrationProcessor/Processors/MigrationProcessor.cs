@@ -159,6 +159,10 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             //for delayed mode only, at the start no collections are valid, hence IsOfflineJobCompleted gives false positive
             if (!Helper.AnyValidCollection(MigrationJobContext.CurrentlyActiveJob) && MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode == ChangeStreamMode.Delayed)
+                return false;
+
+            //for server-level change streams, wait for all collections to complete offline migration before starting CS
+            if (!Helper.IsOfflineJobCompleted(MigrationJobContext.CurrentlyActiveJob) && MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server)
                 return false;            
 
 
