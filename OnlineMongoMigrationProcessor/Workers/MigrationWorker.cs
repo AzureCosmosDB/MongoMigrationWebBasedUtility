@@ -126,7 +126,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             try
             {
                 _activeJobId=string.Empty;
-                _log.WriteLine("StopMigration called - cancelling all tokens and stopping processor", LogType.Warning);
+                _log.WriteLine("Pause Migration called - cancelling all tokens and stopping processor", LogType.Warning);
                 _cts?.Cancel();
                 _compare_cts?.Cancel();
 
@@ -161,7 +161,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 // Stop percentage timer
                 PercentageUpdater.StopPercentageTimer();
 
-                _log.WriteLine("StopMigration completed - all resources released", LogType.Debug);
+                _log.WriteLine("Pause Migration completed - all resources released", LogType.Debug);
             }
             catch { }
         }
@@ -877,10 +877,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     }
                 }
 
-                _ = Task.Run(async () =>
-                {
-                    await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, 30, syncBack, _cts);
-                });
+                await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, 30, syncBack, _cts);
 
                 context.ServerLevelResumeTokenSet = true;
             }
@@ -1423,10 +1420,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (MigrationJobContext.ControlledPauseRequested)
             {
                 _log.WriteLine("Controlled pause detected, skipping processing..", LogType.Warning);
-                //_migrationProcessor?.StopProcessing(true);
-                //ProcessRunning = false;
-                //JobStarting = false;
-                //StopMigration();
+                _migrationProcessor?.StopChangeStreamProcessor();
                 return true;
             }
             return false;
@@ -1741,6 +1735,9 @@ namespace OnlineMongoMigrationProcessor.Workers
 
         public void SyncBackToSource()
         {
+            // Stop the forward change stream processor before starting syncback
+            // to prevent echo/feedback loops where changes bounce between directions.
+            _migrationProcessor?.StopChangeStreamProcessor();
 
             var dummySourceClient = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]);
             _migrationProcessor = new SyncBackProcessor(_log, dummySourceClient, _config!, this);

@@ -83,6 +83,20 @@ namespace OnlineMongoMigrationProcessor.Processors
         /// Signals processor to stop accepting new work but complete current tasks
         /// </summary>
 
+        /// <summary>
+        /// Stops only the change stream processor, leaving offline workers running.
+        /// </summary>
+        public void StopChangeStreamProcessor()
+        {
+#if !LEGACY_MONGODB_DRIVER
+            if (_changeStreamProcessor != null)
+            {
+                _changeStreamProcessor.ExecutionCancelled = true;
+                MigrationJobContext.AddVerboseLog("MigrationProcessor.StopChangeStreamProcessor: ExecutionCancelled set to true");
+            }
+#endif
+        }
+
 
         protected ProcessorContext SetProcessorContext(MigrationUnit mu, string sourceConnectionString, string targetConnectionString)
         {
