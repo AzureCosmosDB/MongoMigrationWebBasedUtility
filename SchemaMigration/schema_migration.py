@@ -39,13 +39,19 @@ class SchemaMigration:
     # Index option combinations that conflict
     CONFLICTING_INDEX_OPTION_PAIRS = [('sparse', 'partialFilterExpression')]
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, mode: str = "complete", blocking: bool = False):
         """
         Initialize the SchemaMigration class.
 
         :param verbose: Enable verbose output for detailed flow logging.
+        :param mode: Index migration mode - "complete" (all indexes), "preIngestion" (unique only), 
+                     or "postIngestion" (non-unique only). Default: "complete"
+        :param blocking: (postIngestion mode only) If True, prioritize index builds over new write operations
+                         by setting background: false option.
         """
         self.verbose = verbose
+        self.mode = mode
+        self.blocking = blocking
         self.incompatible_indexes = []  # Track indexes with unsupported partialFilterExpression
         self.skipped_index_options = []  # Track indexes with unsupported options (collation, hidden, etc.)
         self.structural_incompatibilities = []  # Track structural issues (text dup, 2dsphere compound, etc.)
@@ -215,68 +221,76 @@ class SchemaMigration:
         dest_db = dest_client[db_name]
         dest_collection = dest_db[collection_name]
 
-        # Check if the destination collection should be dropped
-        if collection_config.drop_if_exists:
-            print("-- Running drop command on target collection")
-            self._print_verbose(f"Dropping existing collection {db_name}.{collection_name} on destination")
-            dest_collection.drop()
-            self._print_verbose(f"Collection dropped successfully")
-        else:
-            self._print_verbose(f"drop_if_exists=False, keeping existing collection if present")
+        post_ingestion_indexes_only = self.mode == "postIngestion"
 
-        # Create the destination collection if it doesn't exist
-        if not collection_name in dest_db.list_collection_names():
-            print("-- Creating target collection")
-            self._print_verbose(f"Collection does not exist on destination, creating new collection")
-            dest_db.create_collection(collection_name)
-            self._print_verbose(f"Collection created successfully")
+        if post_ingestion_indexes_only:
+            print("-- postIngestion mode: skipping collection drop/create, colocation, and shard-key migration")
+            self._print_verbose(
+                "postIngestion mode active: schema-level operations are skipped and only non-unique indexes are processed"
+            )
         else:
-            print("-- Target collection already exists. Skipping creation.")
-            self._print_verbose(f"Collection already exists, skipping creation step")
+            # Check if the destination collection should be dropped
+            if collection_config.drop_if_exists:
+                print("-- Running drop command on target collection")
+                self._print_verbose(f"Dropping existing collection {db_name}.{collection_name} on destination")
+                dest_collection.drop()
+                self._print_verbose(f"Collection dropped successfully")
+            else:
+                self._print_verbose(f"drop_if_exists=False, keeping existing collection if present")
 
-        # Handle colocation if specified
-        if collection_config.co_locate_with:
-            print(f"-- Setting up colocation with collection: {collection_config.co_locate_with}")
-            self._print_verbose(f"Colocation requested with reference collection: {collection_config.co_locate_with}")
-            self._setup_colocation(dest_db, collection_name, collection_config.co_locate_with)
-            self._verify_colocation(dest_client, db_name, collection_name, collection_config.co_locate_with)
-        else:
-            self._print_verbose(f"No colocation configured for this collection")
+            # Create the destination collection if it doesn't exist
+            if not collection_name in dest_db.list_collection_names():
+                print("-- Creating target collection")
+                self._print_verbose(f"Collection does not exist on destination, creating new collection")
+                dest_db.create_collection(collection_name)
+                self._print_verbose(f"Collection created successfully")
+            else:
+                print("-- Target collection already exists. Skipping creation.")
+                self._print_verbose(f"Collection already exists, skipping creation step")
 
-        # Check if shard key should be created
-        if collection_config.migrate_shard_key:
-            self._print_verbose(f"migrate_shard_key=True, checking for shard key on source")
-            try:
-                source_shard_key = self._get_shard_key(source_db, collection_config)
-                if (source_shard_key is not None):
-                    # Only single-field shard keys are supported on the destination
-                    if len(source_shard_key) > 1:
-                        shard_fields = list(source_shard_key.keys())
-                        self._print_warning(f"-- Compound shard key {source_shard_key} is not supported on destination. Only single-field hashed shard keys are allowed.")
-                        self._print_warning(f"   Using first field '{shard_fields[0]}' as the hashed shard key. Please verify this is correct.")
-                        hashed_shard_key = {shard_fields[0]: "hashed"}
+            # Handle colocation if specified
+            if collection_config.co_locate_with:
+                print(f"-- Setting up colocation with collection: {collection_config.co_locate_with}")
+                self._print_verbose(f"Colocation requested with reference collection: {collection_config.co_locate_with}")
+                self._setup_colocation(dest_db, collection_name, collection_config.co_locate_with)
+                self._verify_colocation(dest_client, db_name, collection_name, collection_config.co_locate_with)
+            else:
+                self._print_verbose(f"No colocation configured for this collection")
+
+            # Check if shard key should be created
+            if collection_config.migrate_shard_key:
+                self._print_verbose(f"migrate_shard_key=True, checking for shard key on source")
+                try:
+                    source_shard_key = self._get_shard_key(source_db, collection_config)
+                    if (source_shard_key is not None):
+                        # Only single-field shard keys are supported on the destination
+                        if len(source_shard_key) > 1:
+                            shard_fields = list(source_shard_key.keys())
+                            self._print_warning(f"-- Compound shard key {source_shard_key} is not supported on destination. Only single-field hashed shard keys are allowed.")
+                            self._print_warning(f"   Using first field '{shard_fields[0]}' as the hashed shard key. Please verify this is correct.")
+                            hashed_shard_key = {shard_fields[0]: "hashed"}
+                        else:
+                            # Convert shard key to use hashed value since the destination
+                            # only supports hashed shard keys
+                            hashed_shard_key = {k: "hashed" for k in source_shard_key}
+                        print(f"-- Migrating shard key - {source_shard_key} as hashed: {hashed_shard_key}.")
+                        self._print_verbose(f"Found shard key on source: {source_shard_key}")
+                        self._print_verbose(f"Converted to hashed shard key: {hashed_shard_key}")
+                        self._print_verbose(f"Running shardCollection command on destination")
+                        dest_client.admin.command(
+                            "shardCollection",
+                            f"{db_name}.{collection_name}",
+                            key=hashed_shard_key)
+                        self._print_verbose(f"Shard key applied successfully")
                     else:
-                        # Convert shard key to use hashed value since the destination
-                        # only supports hashed shard keys
-                        hashed_shard_key = {k: "hashed" for k in source_shard_key}
-                    print(f"-- Migrating shard key - {source_shard_key} as hashed: {hashed_shard_key}.")
-                    self._print_verbose(f"Found shard key on source: {source_shard_key}")
-                    self._print_verbose(f"Converted to hashed shard key: {hashed_shard_key}")
-                    self._print_verbose(f"Running shardCollection command on destination")
-                    dest_client.admin.command(
-                        "shardCollection",
-                        f"{db_name}.{collection_name}",
-                        key=hashed_shard_key)
-                    self._print_verbose(f"Shard key applied successfully")
-                else:
-                    self._print_warning(f"-- No shard key found for collection {collection_name}. Skipping shard key setup.")
-                    self._print_verbose(f"Source collection is not sharded, skipping shard key migration")
-            except PermissionError as e:
-                # Permission error already reported in _get_shard_key, continue with migration
-                self._print_verbose(f"Skipping shard key migration due to permission error")
-        else:
-            print("-- Skipping shard key migration for collection")
-            self._print_verbose(f"migrate_shard_key=False, skipping shard key migration")
+                        self._print_warning(f"-- No shard key found for collection {collection_name}. Skipping shard key setup.")
+                        self._print_verbose(f"Source collection is not sharded, skipping shard key migration")
+                except PermissionError as e:
+                    # Permission error already reported in _get_shard_key, continue with migration
+                    self._print_verbose(f"Skipping shard key migration due to permission error")
+            else:
+                print("-- Skipping shard key migration for collection")
+                self._print_verbose(f"migrate_shard_key=False, skipping shard key migration")
 
         # Migrate indexes
         self._print_verbose(f"Reading indexes from source collection")
@@ -311,6 +325,23 @@ class SchemaMigration:
         self._print_verbose(f"Creating {len(index_list)} index(es) on destination")
         created_index_names = set()  # Track created index names to detect conflicts
         has_text_index = False  # Only one text index allowed per collection
+        existing_index_names = set()
+        existing_index_keys = set()
+
+        if self.mode == "postIngestion":
+            dest_indexes = dest_collection.index_information()
+            existing_index_names = set(dest_indexes.keys())
+            existing_index_keys = {
+                tuple(
+                    (field, int(direction) if isinstance(direction, float) else direction)
+                    for field, direction in idx_info.get('key', [])
+                )
+                for idx_info in dest_indexes.values()
+            }
+            self._print_verbose(
+                f"postIngestion mode: found {len(existing_index_names)} existing index(es) on destination to compare for skipping"
+            )
+
         for index_keys, index_options in index_list:
             index_name = index_options.get('name', 'unnamed')
             collection_ns = f"{db_name}.{collection_name}"
@@ -331,6 +362,40 @@ class SchemaMigration:
                     skip_index = True
             if skip_index:
                 continue
+
+            # ── Rule: Mode-based index filtering (preIngestion, postIngestion, or complete) ──
+            is_unique_index = index_options.get('unique', False)
+            
+            if self.mode == "preIngestion":
+                if not is_unique_index:
+                    self._print_warning(f"---- [SKIPPED] Index '{index_name}': Non-unique index (preIngestion mode - only unique indexes are created)")
+                    self._print_verbose(f"  Skipping non-unique index '{index_name}' in preIngestion mode")
+                    continue
+            elif self.mode == "postIngestion":
+                if is_unique_index:
+                    self._print_warning(f"---- [SKIPPED] Index '{index_name}': Unique index (postIngestion mode - only non-unique indexes are created)")
+                    self._print_verbose(f"  Skipping unique index '{index_name}' in postIngestion mode")
+                    continue
+
+                normalized_index_keys = tuple(index_keys)
+                if index_name in existing_index_names or normalized_index_keys in existing_index_keys:
+                    self._print_warning(
+                        f"---- [SKIPPED] Index '{index_name}': Index already exists on destination (postIngestion mode)"
+                    )
+                    self._print_verbose(
+                        f"  Skipping existing index '{index_name}' with keys {index_keys} in postIngestion mode"
+                    )
+                    continue
+
+                # Apply blocking option for postIngestion mode if enabled
+                if self.blocking:
+                    # Set background: false to prioritize index builds over new write operations
+                    if 'background' in index_options:
+                        self._print_verbose(f"  Index '{index_name}': Overriding background option with False (blocking mode)")
+                    else:
+                        self._print_verbose(f"  Index '{index_name}': Setting background=False (blocking mode)")
+                    index_options['background'] = False
+            # else: mode == "complete" - process all indexes
 
             # ── Rule: Only one text index allowed per collection (#1, #2, #42) ──
             is_text_index = any(direction == 'text' for _, direction in index_keys)
@@ -446,6 +511,9 @@ class SchemaMigration:
             self._print_success(f"---- Created index: {index_keys} with options: {index_options}")
             self._print_verbose(f"  Creating index on destination: {index_keys}")
             dest_collection.create_index(index_keys, **index_options)
+            if self.mode == "postIngestion":
+                existing_index_names.add(index_name)
+                existing_index_keys.add(tuple(index_keys))
             self._print_verbose(f"  Index created successfully")
 
     def _transform_partial_filter_expression(
