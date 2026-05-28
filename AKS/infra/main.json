@@ -1,0 +1,259 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.41.2.15936",
+      "templateHash": "4605781888482286993"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for all Azure resources created by this template."
+      }
+    },
+    "ownerTag": {
+      "type": "string",
+      "metadata": {
+        "description": "Owner tag required by Azure Policy."
+      }
+    },
+    "clusterName": {
+      "type": "string",
+      "metadata": {
+        "description": "AKS cluster name. Used to generate resource names."
+      }
+    },
+    "acrName": {
+      "type": "string",
+      "defaultValue": "[take(format('{0}acr', replace(parameters('clusterName'), '-', '')), 50)]",
+      "metadata": {
+        "description": "Azure Container Registry name."
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "[take(format('{0}stor', replace(parameters('clusterName'), '-', '')), 24)]",
+      "metadata": {
+        "description": "Storage account name used for migration artifacts when a preconfigured storage account is not supplied."
+      }
+    },
+    "storageAccountResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional existing storage account resource ID. When supplied, the template reuses that storage account and grants Blob RBAC on it."
+      }
+    },
+    "workloadIdentityName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-workload-id', parameters('clusterName'))]",
+      "metadata": {
+        "description": "Managed identity name used by the workload for Blob access and federated identity."
+      }
+    },
+    "workloadIdentityResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional existing managed identity resource ID. When supplied, the template reuses that identity and skips creation."
+      }
+    }
+  },
+  "variables": {
+    "useExistingStorageAccount": "[not(empty(parameters('storageAccountResourceId')))]",
+    "storageAccountResourceIdParts": "[split(parameters('storageAccountResourceId'), '/')]",
+    "storageAccountSubscriptionId": "[if(empty(parameters('storageAccountResourceId')), subscription().subscriptionId, variables('storageAccountResourceIdParts')[2])]",
+    "storageAccountResourceGroupName": "[if(empty(parameters('storageAccountResourceId')), resourceGroup().name, variables('storageAccountResourceIdParts')[4])]",
+    "effectiveStorageAccountName": "[if(empty(parameters('storageAccountResourceId')), parameters('storageAccountName'), last(variables('storageAccountResourceIdParts')))]",
+    "useExistingWorkloadIdentity": "[not(empty(parameters('workloadIdentityResourceId')))]",
+    "workloadIdentityResourceIdParts": "[split(parameters('workloadIdentityResourceId'), '/')]",
+    "workloadIdentitySubscriptionId": "[if(empty(parameters('workloadIdentityResourceId')), subscription().subscriptionId, variables('workloadIdentityResourceIdParts')[2])]",
+    "workloadIdentityResourceGroupName": "[if(empty(parameters('workloadIdentityResourceId')), resourceGroup().name, variables('workloadIdentityResourceIdParts')[4])]",
+    "effectiveWorkloadIdentityName": "[if(empty(parameters('workloadIdentityResourceId')), parameters('workloadIdentityName'), last(variables('workloadIdentityResourceIdParts')))]"
+  },
+  "resources": [
+    {
+      "condition": "[not(variables('useExistingWorkloadIdentity'))]",
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[variables('effectiveWorkloadIdentityName')]",
+      "location": "[parameters('location')]",
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('acrName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "adminUserEnabled": false
+      },
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      }
+    },
+    {
+      "condition": "[not(variables('useExistingStorageAccount'))]",
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-01-01",
+      "name": "[variables('effectiveStorageAccountName')]",
+      "location": "[parameters('location')]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "properties": {
+        "accessTier": "Hot",
+        "allowBlobPublicAccess": false,
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2",
+        "allowSharedKeyAccess": false
+      },
+      "tags": {
+        "owner": "[parameters('ownerTag')]"
+      }
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), if(variables('useExistingWorkloadIdentity'), extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName'))), 'acrPull')]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+        "principalId": "[if(variables('useExistingWorkloadIdentity'), reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId, reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId)]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName'))]"
+      ]
+    },
+    {
+      "condition": "[not(variables('useExistingStorageAccount'))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName')), if(variables('useExistingWorkloadIdentity'), extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName'))), 'storageBlobDataContributor')]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
+        "principalId": "[if(variables('useExistingWorkloadIdentity'), reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId, reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId)]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('useExistingStorageAccount')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "storageRoleAssignmentExisting",
+      "subscriptionId": "[variables('storageAccountSubscriptionId')]",
+      "resourceGroup": "[variables('storageAccountResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "storageAccountName": {
+            "value": "[variables('effectiveStorageAccountName')]"
+          },
+          "managedIdentityId": "[if(variables('useExistingWorkloadIdentity'), createObject('value', extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName'))), createObject('value', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName'))))]",
+          "managedIdentityPrincipalId": "[if(variables('useExistingWorkloadIdentity'), createObject('value', reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId), createObject('value', reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId))]"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.41.2.15936",
+              "templateHash": "3594985109167760166"
+            }
+          },
+          "parameters": {
+            "storageAccountName": {
+              "type": "string"
+            },
+            "managedIdentityId": {
+              "type": "string"
+            },
+            "managedIdentityPrincipalId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), parameters('managedIdentityId'), 'storageBlobDataContributor')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
+                "principalId": "[parameters('managedIdentityPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "acrLoginServer": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-07-01').loginServer]"
+    },
+    "acrNameResolved": {
+      "type": "string",
+      "value": "[parameters('acrName')]"
+    },
+    "acrResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]"
+    },
+    "storageAccountNameResolved": {
+      "type": "string",
+      "value": "[variables('effectiveStorageAccountName')]"
+    },
+    "storageAccountResourceIdResolved": {
+      "type": "string",
+      "value": "[if(variables('useExistingStorageAccount'), parameters('storageAccountResourceId'), resourceId('Microsoft.Storage/storageAccounts', variables('effectiveStorageAccountName')))]"
+    },
+    "workloadIdentityNameResolved": {
+      "type": "string",
+      "value": "[variables('effectiveWorkloadIdentityName')]"
+    },
+    "workloadIdentityClientId": {
+      "type": "string",
+      "value": "[if(variables('useExistingWorkloadIdentity'), reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').clientId, reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').clientId)]"
+    },
+    "workloadIdentityPrincipalId": {
+      "type": "string",
+      "value": "[if(variables('useExistingWorkloadIdentity'), reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('workloadIdentitySubscriptionId'), variables('workloadIdentityResourceGroupName')), 'Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId, reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')), '2023-01-31').principalId)]"
+    },
+    "workloadIdentityResourceId": {
+      "type": "string",
+      "value": "[if(variables('useExistingWorkloadIdentity'), parameters('workloadIdentityResourceId'), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')))]"
+    },
+    "workloadIdentityResourceIdResolved": {
+      "type": "string",
+      "value": "[if(variables('useExistingWorkloadIdentity'), parameters('workloadIdentityResourceId'), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('effectiveWorkloadIdentityName')))]"
+    }
+  }
+}
