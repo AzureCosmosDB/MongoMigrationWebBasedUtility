@@ -181,6 +181,26 @@ Before running the assessment, ensure that the client machine meets the followin
 
     The `--workers` flag controls how many collections are processed concurrently. Use `1` for sequential behavior. Default is `5`.
 
+    **Optional: Control index migration strategy** using the `--mode` parameter:
+
+    ```cmd
+    # Pre-ingestion phase (create unique indexes only, before data migration)
+    python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string> --mode preIngestion
+
+    # Post-ingestion phase (create non-unique indexes only, after data migration)
+    python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string> --mode postIngestion
+
+    # Post-ingestion with blocking (prioritize index builds over new write operations)
+    python main.py --config-file <path_to_your_json_file> --source-uri <source_mongo_connection_string> --dest-uri <destination_documentdb_connection_string> --mode postIngestion --blocking
+    ```
+
+    The `--mode` flag controls which indexes are created:
+    - `complete` (default): Creates all indexes (both unique and non-unique)
+    - `preIngestion`: Creates only unique indexes before data ingestion
+    - `postIngestion`: Creates only non-unique indexes after data ingestion and skips collection drop/create and shard-key migration
+
+    When using `postIngestion` mode, the optional `--blocking` flag enables blocking index builds, which prioritizes index creation over new write operations (sets `background: false` on indexes). This is useful if you want to ensure indexes are built quickly without allowing concurrent writes during the indexing process.
+
 This process will generate an Azure DocumentDB-optimized schema with index and sharding recommendations based on your workload.
 
 
@@ -202,4 +222,77 @@ This process will generate an Azure DocumentDB-optimized schema with index and s
 | **--dest-uri** | Yes | MongoDB/DocumentDB connection string for the destination database. |
 | **--workers** | No | Number of worker threads used to process collections in parallel. Default is `5`. Use `1` for sequential behavior. Increase this value for faster migrations with many collections. |
 | **--verbose** | No | Enable verbose output mode. When set, displays detailed logging of all operations including connection status, configuration parsing, collection enumeration, and step-by-step migration progress. Useful for debugging and monitoring long-running migrations. |
+| **--mode** | No | Index migration mode: `complete`, `preIngestion`, or `postIngestion`. Default is `complete`. See the "Index Migration Modes" section below for details. |
+| **--blocking** | No | (postIngestion mode only) Enable blocking index builds to prioritize index creation over new write operations. When set, indexes are created with `background: false`. Only applicable when `--mode postIngestion` is used. |
 
+### Index Migration Modes
+
+The schema migration tool supports three index migration modes to optimize your migration workflow:
+
+#### 1. **Complete Mode (default)**
+Creates all indexes (both unique and non-unique) in a single pass.
+
+**Use case:** When you want to migrate all indexes at once. Suitable for smaller datasets or when downtime is not a concern.
+
+```cmd
+python main.py --config-file config.json --source-uri <source> --dest-uri <dest>
+# or explicitly
+python main.py --config-file config.json --source-uri <source> --dest-uri <dest> --mode complete
+```
+
+#### 2. **Pre-Ingestion Mode**
+Creates only unique indexes before data migration begins.
+
+**Use case:** Run this phase before ingesting data into the destination database. Unique indexes help ensure data integrity during the migration process.
+
+```cmd
+python main.py --config-file config.json --source-uri <source> --dest-uri <dest> --mode preIngestion
+```
+
+**Workflow:**
+1. Create destination collections with unique indexes
+2. Verify unique constraints are in place
+3. Begin data migration (from source to destination)
+4. Once data migration completes, proceed to post-ingestion phase
+
+#### 3. **Post-Ingestion Mode**
+Creates only non-unique indexes after data has been migrated.
+
+**Use case:** Run this phase after all data has been ingested into the destination database. Non-unique indexes are created after the data is in place for optimal performance.
+
+In this mode, schema-level operations are skipped:
+- No collection drop/recreate
+- No collection creation
+- No colocation changes
+- No shard-key migration
+- Existing destination indexes are detected and skipped
+
+```cmd
+python main.py --config-file config.json --source-uri <source> --dest-uri <dest> --mode postIngestion
+```
+
+**With blocking option (prioritize index builds):**
+```cmd
+python main.py --config-file config.json --source-uri <source> --dest-uri <dest> --mode postIngestion --blocking
+```
+
+When `--blocking` is enabled, indexes are built with `background: false`, which:
+- Prioritizes index creation over new write operations
+- Holds exclusive locks during index build
+- Faster index creation for non-unique indexes
+- Better for scenarios where index completion time is critical
+
+Refer to the [Azure Cosmos DB index build documentation](https://learn.microsoft.com/en-us/azure/documentdb/how-to-create-indexes#prioritizing-index-builds-over-new-write-operations-using-the-blocking-option) for more information on the blocking option.
+
+**Example Migration Workflow:**
+
+```bash
+# Step 1: Pre-ingestion - Create unique indexes only
+python main.py --config-file config.json --source-uri mongodb://source --dest-uri mongodb://dest --mode preIngestion
+
+# Step 2: Data Migration (using separate tools or scripts)
+# Migrate data from source to destination...
+
+# Step 3: Post-ingestion - Create non-unique indexes with blocking
+python main.py --config-file config.json --source-uri mongodb://source --dest-uri mongodb://dest --mode postIngestion --blocking
+```
