@@ -19,13 +19,16 @@ namespace OnlineMongoMigrationProcessor
     internal class DumpRestoreProcessor : MigrationProcessor
     {
         private readonly string _jobId;
+        private readonly string _processorRunId;
         private MongoDumpRestoreCordinator _coordinator;
 
         public DumpRestoreProcessor(Log log, MongoClient sourceClient, MigrationSettings config, MigrationWorker? migrationWorker = null)
             : base(log, sourceClient, config, migrationWorker)
         {
             MigrationJobContext.AddVerboseLog("DumpRestoreProcessor: Constructor called");
-            _jobId = MigrationJobContext.CurrentlyActiveJob.Id ?? throw new InvalidOperationException("Job ID cannot be null");            
+            _jobId = MigrationJobContext.CurrentlyActiveJob.Id ?? throw new InvalidOperationException("Job ID cannot be null");
+            _processorRunId = Guid.NewGuid().ToString("N");
+            _log.WriteLine($"DumpRestoreProcessor initialized with ProcessorRunId={_processorRunId} for JobId={_jobId}", LogType.Info);
             
         }
 
@@ -117,6 +120,7 @@ namespace OnlineMongoMigrationProcessor
                     MongoToolsFolder,
                     _config.MongoDumpToolPath,
                     _config.MongoRestoreToolPath,
+                    _processorRunId,
                     onMigrationUnitCompleted: OnMigrationUnitCompleted,
                     onPendingTasksCompleted: OnPendingTasksCompleted
                 );

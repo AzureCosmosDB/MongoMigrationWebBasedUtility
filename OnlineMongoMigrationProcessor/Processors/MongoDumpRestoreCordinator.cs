@@ -63,6 +63,7 @@ namespace OnlineMongoMigrationProcessor
         private string? _mongoToolsFolder;
         private string? _mongoDumpToolPath;
         private string? _mongoRestoreToolPath;
+        private string _processorRunId = string.Empty;
 
         private string _mongoDumpOutputFolder = Path.Combine(Helper.GetWorkingFolder(), "mongodump");
         private readonly SemaphoreSlim _uploadLock = new(1, 1);
@@ -355,7 +356,7 @@ namespace OnlineMongoMigrationProcessor
         /// <param name="log">Logger instance</param>
         /// <param name="mongoToolsFolder">Optional path to mongo tools folder</param>
         /// <param name="onMigrationUnitCompleted">Optional callback invoked when a migration unit completes</param>
-        public void Initialize(string jobId, Log log, string? mongoToolsFolder = null, string? mongoDumpToolPath = null, string? mongoRestoreToolPath = null, MigrationUnitCompletedHandler? onMigrationUnitCompleted = null, PendingTasksCompletedHandler? onPendingTasksCompleted=null)
+        public void Initialize(string jobId, Log log, string? mongoToolsFolder = null, string? mongoDumpToolPath = null, string? mongoRestoreToolPath = null, string? processorRunId = null, MigrationUnitCompletedHandler? onMigrationUnitCompleted = null, PendingTasksCompletedHandler? onPendingTasksCompleted=null)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.Initialize: jobId={jobId}, mongoToolsFolder={mongoToolsFolder}");
             try
@@ -372,6 +373,7 @@ namespace OnlineMongoMigrationProcessor
                     _mongoToolsFolder = mongoToolsFolder;
                     _mongoDumpToolPath = mongoDumpToolPath;
                     _mongoRestoreToolPath = mongoRestoreToolPath;
+                    _processorRunId = string.IsNullOrWhiteSpace(processorRunId) ? string.Empty : processorRunId;
                     _onMigrationUnitCompleted = onMigrationUnitCompleted;
                     _onPendingTasksCompleted = onPendingTasksCompleted;
                     _processNewTasks = true;
@@ -933,6 +935,7 @@ namespace OnlineMongoMigrationProcessor
                         var context = new DumpRestoreProcessContext
                         {
                             Id = contextId,
+                            ProcessorRunId = _processorRunId,
                             MigrationUnitId = mu.Id,
                             ChunkIndex = i,
                             State = ProcessState.Pending,
@@ -981,6 +984,7 @@ namespace OnlineMongoMigrationProcessor
                         var context = new DumpRestoreProcessContext
                         {
                             Id = contextId,
+                            ProcessorRunId = _processorRunId,
                             MigrationUnitId = mu.Id,
                             ChunkIndex = i,
                             State = ProcessState.Pending,
@@ -1063,6 +1067,7 @@ namespace OnlineMongoMigrationProcessor
                         var context = new DumpRestoreProcessContext
                         {
                             Id = contextId,
+                            ProcessorRunId = _processorRunId,
                             MigrationUnitId = mu.Id,
                             ChunkIndex = i,
                             State = ProcessState.Pending,
@@ -2155,10 +2160,13 @@ namespace OnlineMongoMigrationProcessor
             string targetDbName = mu.GetEffectiveTargetDatabaseName();
             string targetColName = mu.GetEffectiveTargetCollectionName();
             int chunkIndex = context.ChunkIndex;
+            string chunkId = (chunkIndex >= 0 && chunkIndex < mu.MigrationChunks.Count)
+                ? (mu.MigrationChunks[chunkIndex].Id ?? string.Empty)
+                : string.Empty;
 
             try
             {
-                _log?.WriteLine($"Coordinator: Starting restore for {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[{chunkIndex}]", LogType.Debug);
+                _log?.WriteLine($"Coordinator: Starting restore for {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[{chunkIndex}] (ChunkId={chunkId}, ContextId={context.Id}, ProcessorRunId={_processorRunId})", LogType.Debug);
 
                 // Check cancellation or job stopped
                 if (_processCts?.Token.IsCancellationRequested == true ||
@@ -2621,6 +2629,32 @@ namespace OnlineMongoMigrationProcessor
 
             // Remove from restore manifest
             _uploadManifest.TryRemove(context.Id, out _);
+
+            LogRestoreTerminalOutcome(context, mu, "completed");
+        }
+
+        private void LogRestoreTerminalOutcome(DumpRestoreProcessContext context, MigrationUnit? mu, string outcome)
+        {
+            try
+            {
+                var chunk = (mu != null && context.ChunkIndex >= 0 && context.ChunkIndex < mu.MigrationChunks.Count)
+                    ? mu.MigrationChunks[context.ChunkIndex]
+                    : null;
+
+                string chunkId = chunk?.Id ?? string.Empty;
+                bool isUploaded = chunk?.IsUploaded == true;
+                bool needsCleanup = chunk?.NeedsCleanup == true;
+                long restoredSuccess = chunk?.RestoredSuccessDocCount ?? 0;
+                long restoredFailed = chunk?.RestoredFailedDocCount ?? 0;
+
+                _log?.WriteLine(
+                    $"RestoreTerminalOutcome: Outcome={outcome}; ProcessorRunId={context.ProcessorRunId}; ContextId={context.Id}; MigrationUnitId={context.MigrationUnitId}; ChunkIndex={context.ChunkIndex}; ChunkId={chunkId}; RetryCount={context.RetryCount}; State={context.State}; NeedsCleanup={needsCleanup}; IsUploaded={isUploaded}; RestoredSuccessDocCount={restoredSuccess}; RestoredFailedDocCount={restoredFailed}",
+                    LogType.Debug);
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"Error logging restore terminal outcome for ContextId={context.Id}: {Helper.RedactPii(ex.ToString())}", LogType.Debug);
+            }
         }
 
         /// <summary>
@@ -2724,6 +2758,9 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
+                var pausedMuForLog = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                LogRestoreTerminalOutcome(context, pausedMuForLog, "canceled-controlled-pause");
+
                 _uploadManifest.TryRemove(context.Id, out _);
                 return;
             }
@@ -2731,6 +2768,8 @@ namespace OnlineMongoMigrationProcessor
             // If coordinator is stopped (e.g. job being stopped/paused), don't retry.
             if (_stopped || _processCts?.Token.IsCancellationRequested == true)
             {
+                var stoppedMuForLog = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                LogRestoreTerminalOutcome(context, stoppedMuForLog, "canceled-stop");
                 _uploadManifest.TryRemove(context.Id, out _);
                 return;
             }
@@ -2760,6 +2799,8 @@ namespace OnlineMongoMigrationProcessor
                     {
                         _log.WriteLine($"Max retries for restore complete: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Error);
                     }
+
+                    LogRestoreTerminalOutcome(context, mu, result == TaskResult.Abort ? "failed-abort" : "failed-max-retries");
                 }
                 else
                 {
