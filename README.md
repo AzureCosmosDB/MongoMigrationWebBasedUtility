@@ -20,6 +20,7 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
 - [Azure Deployment Options](#azure-deployment-options)
   - [Option 1: Azure Web App (App Service)](#option-1-azure-web-app-app-service)
   - [Option 2: Azure Container Apps (ACA)](#option-2-azure-container-apps-aca)
+    - [Option 3: Azure Kubernetes Service (AKS)](#option-3-azure-kubernetes-service-aks)
   - [Choosing the Right Deployment](#choosing-the-right-deployment)
 - [On-Premises Deployment](#on-premises-deployment)
 - [How to Use](#how-to-use)
@@ -76,7 +77,7 @@ Effortlessly migrate your MongoDB collections while maintaining control, securit
 
 ## Azure Deployment Options
 
-The MongoDB Migration Web-Based Utility can be deployed to Azure using two different options, each optimized for different workload requirements:
+The MongoDB Migration Web-Based Utility can be deployed to Azure using three different options, each optimized for different workload requirements:
 
 ### Option 1: Azure Web App (App Service)
 
@@ -101,23 +102,34 @@ The MongoDB Migration Web-Based Utility can be deployed to Azure using two diffe
 
 **[📖 Deploy to Azure Container Apps Guide](ACA/README.md)**
 
+### Option 3: Azure Kubernetes Service (AKS)
+
+**Best for**: Teams already operating AKS, multi-instance deployments, and Kubernetes-native operations
+
+- ✅ Full Kubernetes control and workload portability
+- ✅ One Deployment + LoadBalancer Service per instance
+- ✅ Azure Blob storage via Workload Identity (no storage keys required)
+- ✅ Flexible update workflow: full deploy, in-cluster image update, or publish/add new instance
+
+**[📖 Deploy to Azure Kubernetes Service Guide](AKS/README.md)**
+
 ### Choosing the Right Deployment
 
-| Feature | Azure Web App | Azure Container Apps |
-|---------|---------------|----------------------|
-| **Workload Size** | Small to Medium | Medium to Large |
-| **Migration Duration** | < 24 hours | 24+ hours |
-| **CPU** | Shared/Basic tier | Up to 32 dedicated vCores |
-| **Memory** | Up to 14GB (P3V3) | Up to 64GB |
-| **Persistent Storage** | App Service storage | 100GB Azure File Share |
-| **Deployment Time** | < 10 minutes | ~ 15-20 minutes |
-| **Cost** | Lower for small workloads | Optimized for large workloads |
-| **Best Use Case** | Quick migrations, dev/test | Production, large-scale migrations |
+| Feature | Azure Web App | Azure Container Apps | Azure Kubernetes Service |
+|---------|---------------|----------------------|--------------------------|
+| **Workload Size** | Small to Medium | Medium to Large | Medium to Large |
+| **Migration Duration** | < 24 hours | 24+ hours | 24+ hours |
+| **CPU/Memory Model** | App Service plan sizing | Dedicated workload profile sizing | Node pool VM sizing |
+| **Persistent Storage** | App Service storage | Azure File Share mount | Azure Blob + Workload Identity |
+| **Deployment Time** | < 10 minutes | ~ 15-20 minutes | ~ 20-30 minutes |
+| **Operational Model** | PaaS web hosting | Managed containers | Kubernetes-native control |
+| **Best Use Case** | Quick migrations, dev/test | Production, large-scale migrations | If already using AKS |
 
 ### Need Help Deciding?
 
 - **Start small?** Use [Azure Web App](WebApp/DeployToWebApp_README.md) for quick setup and testing
 - **Production migration?** Use [Azure Container Apps](ACA/DeployToACA_README.md) for reliability and performance
+- **Already running AKS?** Use [Azure Kubernetes Service](AKS/README.md) for cluster-native deployment and per-instance service control
 - **Not sure?** Start with Web App and migrate to Container Apps if needed
 
 ## On-Premises Deployment
