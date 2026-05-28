@@ -73,7 +73,7 @@ Parameters marked with `# Optional` are not required.
   -StorageAccountName "<storage-account-name>" ` # Optional (use only when StorageAccountResourceId is not provided)
   -StorageAccountResourceId "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.Storage/storageAccounts/<storage-account-name>" ` # Optional
   -WorkloadIdentityResourceId "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<uami-name>" ` # Optional
-  -StateStoreAppID "<state-store-app-id-base>" ` # Optional
+  -StateStoreAppID "<state-store-app-id-base>" ` # Optional (reuse this value across redeployments to continue viewing existing jobs/logs)
   -InfrastructureSubnetResourceId "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/<subnet-name>" ` # Optional
   -ImageTag "latest" ` # Optional
   -NodeVmSize "<node-vm-size>" ` # Optional
@@ -129,7 +129,7 @@ The script will:
 | `StorageAccountName` | string | `<ClusterName>stor` | Storage account name (only when StorageAccountResourceId not provided) |
 | `StorageAccountResourceId` | string | `""` | Existing storage account resource ID |
 | `WorkloadIdentityResourceId` | string | `""` | Existing user-assigned managed identity resource ID |
-| `StateStoreAppID` | string | `<ClusterName>` | Base StateStore App ID (`-1`, `-2`, ...) |
+| `StateStoreAppID` | string | `<ClusterName>` | App identity key used by StateStore (`-1`, `-2`, ... per instance). Reuse the same base value across redeployments to continue viewing existing jobs and logs. |
 | `InfrastructureSubnetResourceId` | string | `""` | Existing subnet resource ID for BYO subnet mode |
 | `ImageTag` | string | `latest` | Docker image tag |
 | `NodeVmSize` | string | `Standard_D16s_v3` | AKS node size |
@@ -353,6 +353,11 @@ Required runtime values:
 - `BlobContainerName=<blob-container-name>`
 - `StateStoreAppID=<state-store-app-id>`
 - `AZURE_CLIENT_ID=<managed-identity-client-id>`
+
+`StateStoreAppID` guidance:
+- `StateStoreAppID` identifies the app instance in StateStore.
+- If you deploy again and want to continue viewing the same jobs and logs, use the same `StateStoreAppID` values as before.
+- If you use a different `StateStoreAppID`, the deployment is treated as a different app identity in StateStore.
 
 ## Troubleshooting
 
