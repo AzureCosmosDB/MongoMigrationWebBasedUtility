@@ -3,12 +3,18 @@
 This guide explains how to deploy the MongoDB Migration Web-Based Utility to AKS with **direct HTTP access per instance**. Each instance runs as a separate Kubernetes Deployment with its own LoadBalancer Service.
 
 The script supports two networking modes:
-- BYO subnet mode (`InfrastructureSubnetResourceId` provided): internal LoadBalancer exposure.
-- AKS default networking mode (no subnet provided): public LoadBalancer exposure.
+
+- Private access mode (recommended for enterprise/internal use):
+  If you provide `InfrastructureSubnetResourceId`, the app is exposed through an internal LoadBalancer.
+  This means the app is reachable only from inside your private network (VNet/corporate network), not from the public internet.
+
+- Public access mode (recommended for quick testing):
+  If you do not provide `InfrastructureSubnetResourceId`, AKS uses default networking and creates a public LoadBalancer.
+  This means the app gets a public IP and can be reached from the internet (subject to your NSG/firewall rules).
 
 Storage is accessed by the app via Azure Blob SDK + Workload Identity.
 
-The repeatable Azure resource layer is now defined in Bicep at [AKS/infra/main.bicep](AKS/infra/main.bicep). The PowerShell deployment script calls that template, so you can rerun the infrastructure deployment directly with `az deployment group create` when you need to repair or recreate the Azure side of the deployment.
+The repeatable Azure resource layer is defined in Bicep at [AKS/infra/main.bicep](AKS/infra/main.bicep). The PowerShell deployment script calls that template, so you can rerun infrastructure deployment directly with `az deployment group create` to repair or recreate Azure-side resources.
 
 ## Deployment Scripts Overview
 
@@ -27,13 +33,13 @@ Three PowerShell scripts are provided:
 2. `publish-image-to-acr.ps1` - Image publish only
 - Builds and pushes the Docker image to a provided ACR
 - Does not touch AKS resources, pods, secrets, or services
-- Use when an existing AKS customer only needs a refreshed image in ACR
+- Use when you only need a refreshed image in ACR
 
 3. `update-aks-app.ps1` - In-cluster image update
 - Rebuilds (or reuses) the Docker image in ACR
 - Updates container image on selected instances
 - Preserves secrets, volumes, and infrastructure
-- Use for deploying code changes after initial setup when the AKS workload already exists
+- Use for deploying code changes when the AKS workload exists
 
 ## Prerequisites
 
@@ -88,7 +94,7 @@ Notes:
 
 The script will:
 1. Create or reuse ACR
-2. Build and push Docker image (skip if image already exists)
+2. Build and push Docker image (skip build if the image tag exists)
 3. Create or reuse storage account + one Blob container per instance
 4. Create or reuse AKS cluster (OIDC + Workload Identity enabled), using either provided subnet or default networking
 5. Attach ACR to AKS
@@ -211,7 +217,7 @@ kubectl rollout status deployment/<cluster>-1 -n mongomigration
 
 ## Publish to ACR and Deploy Container to Existing AKS
 
-Use this flow when the customer already manages AKS and you need to:
+Use this flow when you manage AKS and need to:
 1. Publish this app image to their ACR.
 2. Deploy (or update) one AKS container instance with required secrets and environment variables.
 
@@ -396,15 +402,15 @@ az role assignment list --assignee <uami-principal-id> --scope <storage-account-
 az aks update --name <cluster> --resource-group <rg> --attach-acr <acr-name>
 ```
 
-## Optional: Add HTTPS Later (Customer Managed)
+## Optional: Add HTTPS Later
 
-Default deployment is HTTP by design. If your customer wants HTTPS later, use one of these patterns.
+Default deployment is HTTP by design. If you want HTTPS later, use one of these patterns.
 
 ### Option A: Keep current HTTP deployment, add ingress + TLS later
 
 1. Install ingress-nginx in the cluster.
 2. Change app Services from `LoadBalancer` to `ClusterIP`.
-3. Create a TLS secret from customer certificate.
+3. Create a TLS secret from your certificate.
 4. Create an Ingress resource with HTTPS and path/host rules.
 5. Point DNS to ingress public IP.
 
