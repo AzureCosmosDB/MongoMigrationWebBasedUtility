@@ -145,6 +145,12 @@ namespace OnlineMongoMigrationProcessor
         {
             _log.WriteLine($"{_syncBackPrefix}Rechecking server for resume token.", LogType.Info);
 
+            // Ensure the transition helper runs so that job.ChangeStreamStartedOn
+            // is set to job.StartedOn when switching from collection-level to
+            // server-level.  Without this, MongoHelper falls back to DateTime.UtcNow
+            // and the server-level stream misses all events between job start and now.
+            ChangeStreamTransitionHelper.TryTransitionCollectionToServerResumeCheckpoint(_log, _syncBack);
+
             try
             {
 
@@ -257,32 +263,37 @@ namespace OnlineMongoMigrationProcessor
                     {
                         // Create a fresh batch-duration CTS that starts NOW (after cursor creation),
                         // so processing always gets the full batch time regardless of how long cursor creation took.
-                        using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                        // Soft deadline at 1x for graceful exit; hard CTS at 2x as safety kill.
+                        var batchSeconds = GetBatchDurationInSeconds(1.0f);
+                        var batchDeadline = DateTime.UtcNow.AddSeconds(batchSeconds);
+                        using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(batchSeconds * 2));
                         var batchToken = batchCts.Token;
 
                         if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
                         {
-                            await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            await ProcessLegacyWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound, batchDeadline);
                         }
                         else
                         {
-                            await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                            await ProcessModernWatchLoopAsync(cursor, batchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound, batchDeadline);
                         }
                     }
                     catch (OperationCanceledException)
                     {
-                        // Expected when batch CTS fires — fall through to postBatchResumeToken capture below
+                        // Hard CTS (2x batch duration) expired — batch took too long
+                        _log.WriteLine($"{_syncBackPrefix}Server-watch batch hard timeout (2x) reached.", LogType.Warning);
                     }
                     finally
                     {
-                        // Advance resume token using postBatchResumeToken when all changes
-                        // were persisted successfully (or no events were received).
-                        // If any write failed, keep the last change-event token so we
-                        // re-process from that point on the next round.
-                        // This MUST be in a finally block so the token is captured even when
-                        // the batch times out (OperationCanceledException), otherwise idle
-                        // rounds never advance the token and it eventually expires.
-                        if (!state.HasFailures)
+                        // Only use postBatchResumeToken when NO events were processed.
+                        // When events were processed, state.LatestResumeToken already
+                        // points to the last actual change event's token (set in
+                        // TryProcessServerChangeAsync). The cursor's postBatchResumeToken
+                        // can be ahead of the last processed event (e.g. if we broke
+                        // mid-foreach), so overwriting would skip unprocessed events.
+                        // For idle rounds (zero events), we still need to advance the
+                        // token so it doesn't expire.
+                        if (!state.HasFailures && state.Counter == 0)
                         {
                             try
                             {
@@ -372,23 +383,28 @@ namespace OnlineMongoMigrationProcessor
                     {
                         try
                         {
-                            using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(GetBatchDurationInSeconds(1.0f)));
+                            var retryBatchSeconds = GetBatchDurationInSeconds(1.0f);
+                            var retryBatchDeadline = DateTime.UtcNow.AddSeconds(retryBatchSeconds);
+                            using var retryBatchCts = new CancellationTokenSource(TimeSpan.FromSeconds(retryBatchSeconds * 2));
                             var retryBatchToken = retryBatchCts.Token;
 
                             if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
-                                await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                                await ProcessLegacyWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound, retryBatchDeadline);
                             else
-                                await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                                await ProcessModernWatchLoopAsync(retryCursor, retryBatchToken, state, batchCountersInitializedInRound, touchedMuIdsInRound, retryBatchDeadline);
                         }
                         catch (OperationCanceledException)
                         {
-                            // Expected when batch CTS fires — fall through to postBatchResumeToken capture below
+                            // Hard CTS (2x batch duration) expired — retry batch took too long
+                            _log.WriteLine($"{_syncBackPrefix}Server-watch retry batch hard timeout (2x) reached.", LogType.Warning);
                         }
                         finally
                         {
-                            // Advance resume token using postBatchResumeToken when all
-                            // changes were persisted successfully (or no events received).
-                            if (!state.HasFailures)
+                            // Only use postBatchResumeToken when NO events were processed
+                            // to keep the token from expiring on idle rounds. When events
+                            // were processed, state.LatestResumeToken already points to
+                            // the last actual change event's token.
+                            if (!state.HasFailures && state.Counter == 0)
                             {
                                 try
                                 {
@@ -458,16 +474,24 @@ namespace OnlineMongoMigrationProcessor
             CancellationToken cancellationToken,
             ServerWatchState state,
             HashSet<string> batchCountersInitializedInRound,
-            HashSet<string> touchedMuIdsInRound)
+            HashSet<string> touchedMuIdsInRound,
+            DateTime batchDeadline)
         {
             foreach (var change in cursor.ToEnumerable(cancellationToken))
             {
-                bool shouldContinue = await TryProcessServerChangeAsync(change, cancellationToken, state, readDurationShareMs: 0);
+                bool shouldContinue = await TryProcessServerChangeAsync(change, state, readDurationShareMs: 0);
                 if (!shouldContinue)
                     break;
-            }
 
-            await FlushAndCheckpointIfNeededAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound);
+                await FlushAndCheckpointIfNeededAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound);
+
+                // Soft deadline: exit gracefully after fully processing this event
+                if (DateTime.UtcNow >= batchDeadline)
+                {
+                    MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Server-watch batch soft deadline reached, exiting gracefully after processing current event");
+                    break;
+                }
+            }
         }
 
         private async Task ProcessModernWatchLoopAsync(
@@ -475,11 +499,13 @@ namespace OnlineMongoMigrationProcessor
             CancellationToken cancellationToken,
             ServerWatchState state,
             HashSet<string> batchCountersInitializedInRound,
-            HashSet<string> touchedMuIdsInRound)
+            HashSet<string> touchedMuIdsInRound,
+            DateTime batchDeadline)
         {
             var readStopwatch = Stopwatch.StartNew();
 
-            while (true)
+            // Soft deadline at 1x for graceful exit; hard CTS at 2x as safety kill
+            while (DateTime.UtcNow < batchDeadline && !cancellationToken.IsCancellationRequested)
             {
                 bool hasBatch = await cursor.MoveNextAsync(cancellationToken);
 
@@ -495,13 +521,12 @@ namespace OnlineMongoMigrationProcessor
                     ? (double)readStopwatch.ElapsedMilliseconds / currentBatchCount
                     : 0;
 
-                cancellationToken.ThrowIfCancellationRequested();
                 if (ExecutionCancelled)
                     break;
 
                 foreach (var change in cursor.Current)
                 {
-                    bool shouldContinue = await TryProcessServerChangeAsync(change, cancellationToken, state, readDurationShareMs);
+                    bool shouldContinue = await TryProcessServerChangeAsync(change, state, readDurationShareMs);
                     if (!shouldContinue)
                         break;
                 }
@@ -509,14 +534,21 @@ namespace OnlineMongoMigrationProcessor
                 if (ExecutionCancelled)
                     break;
 
-                readStopwatch.Restart();
                 await FlushAndCheckpointIfNeededAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound);
+
+                // Soft deadline: exit gracefully after fully processing current batch
+                if (DateTime.UtcNow >= batchDeadline)
+                {
+                    MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Server-watch batch soft deadline reached, exiting gracefully after processing current batch");
+                    break;
+                }
+
+                readStopwatch.Restart();
             }
         }
 
         private async Task<bool> TryProcessServerChangeAsync(
             ChangeStreamDocument<BsonDocument> change,
-            CancellationToken cancellationToken,
             ServerWatchState state,
             double readDurationShareMs)
         {
@@ -537,7 +569,6 @@ namespace OnlineMongoMigrationProcessor
             if (!(_monitorAllCollections || _namespaceFilterApplied || TryResolveQueuedMigrationUnit(state.CollectionKey, out _)))
                 return !ExecutionCancelled;
 
-            cancellationToken.ThrowIfCancellationRequested();
             if (ExecutionCancelled)
                 return false;
 

@@ -463,8 +463,6 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        
-
         protected async Task<int> BulkProcessChangesAsync(
             MigrationUnit mu,
             IMongoCollection<BsonDocument> collection,
@@ -541,6 +539,10 @@ namespace OnlineMongoMigrationProcessor
                 {
                     IncrementFailureCounter(mu, result.Failures);
                     _log.WriteLine($"{_syncBackPrefix}Bulk processing had {result.Failures} non-critical failures for {collectionKey}. Failed DocumentKeys: [{string.Join(", ", result.FailedDocumentKeys.Take(50))}]{(result.FailedDocumentKeys.Count > 50 ? $"... (+{result.FailedDocumentKeys.Count - 50} more)" : "")}", LogType.Error);
+                }
+                else
+                {
+                    // success - no action needed
                 }
 
                 return result.Failures;

@@ -28,7 +28,13 @@
     </h3>
     <div class="d-flex align-items-center mb-3">
 
-        @if (IsResumeEnabled() && !_isLoadingCollections)
+        @if (IsPauseCooldownActive())
+        {
+            <span class="badge bg-warning text-dark mx-2" title="Cooling down after pause. Resume will be available shortly.">
+                <i class="bi bi-hourglass-split"></i> Resume in @GetPauseCooldownSecondsRemaining()s
+            </span>
+        }
+        else if (IsResumeEnabled() && !_isLoadingCollections)
         {
             <div class="btn-group mx-2">
                 <button class="btn btn-primary dropdown-toggle" type="button" id="resumeJobDropdown" data-bs-toggle="dropdown" aria-expanded="false">
@@ -579,6 +585,10 @@ else if (@_showLogBackupFile)
 
     // Loading spinner state for collection loading
     private bool _isLoadingCollections = false;
+
+    // Pause cooldown: 30-second cooling period before resume is allowed
+    private DateTime? _pauseCooldownUntil;
+    private Timer? _pauseCooldownTimer;
 
     // Pagination and filtering properties (kept for UI binding compatibility)
     private string _filterText = string.Empty;
@@ -1343,6 +1353,16 @@ else if (@_showLogBackupFile)
             return false;
         }
 
+        if (CurrentlyLoadedMigrationJob.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Server &&
+            job.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Collection)
+        {
+            _errorMessage = "Change Stream Scope can only transition from Collection to Server for an existing job.";
+            await InvokeAsync(StateHasChanged);
+            return false;
+        }
+
+        ApplySubmittedJobSettings(CurrentlyLoadedMigrationJob, job);
+
         if (!string.IsNullOrEmpty(sourceConnectionString))
             MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id] = sourceConnectionString;
 
@@ -1394,6 +1414,30 @@ else if (@_showLogBackupFile)
 
         StartAutoRefresh();
         return true;
+    }
+
+    private static void ApplySubmittedJobSettings(MigrationJob current, MigrationJob submitted)
+    {
+        current.Name = submitted.Name;
+        current.CDCMode = submitted.CDCMode;
+        current.NameSpaces = submitted.NameSpaces;
+        current.JobType = submitted.JobType;
+        current.IsSimulatedRun = submitted.IsSimulatedRun;
+        current.SkipIndexes = submitted.SkipIndexes;
+        current.AppendMode = submitted.AppendMode;
+        current.EnableParallelProcessing = submitted.EnableParallelProcessing;
+        current.MaxParallelDumpProcesses = submitted.MaxParallelDumpProcesses;
+        current.MaxParallelRestoreProcesses = submitted.MaxParallelRestoreProcesses;
+        current.MaxInsertionWorkersPerCollection = submitted.MaxInsertionWorkersPerCollection;
+        current.CurrentDumpWorkers = submitted.CurrentDumpWorkers;
+        current.CurrentRestoreWorkers = submitted.CurrentRestoreWorkers;
+        current.CurrentInsertionWorkers = submitted.CurrentInsertionWorkers;
+        current.ParallelThreads = submitted.ParallelThreads;
+        current.SyncBackEnabled = submitted.SyncBackEnabled;
+        current.ChangeStreamMode = submitted.ChangeStreamMode;
+        current.ChangeStreamLevel = submitted.ChangeStreamLevel;
+        current.AllCollectionsUseObjectId = submitted.AllCollectionsUseObjectId;
+        current.LogLevel = submitted.LogLevel;
     }
 
     private void RunComparison()
@@ -1689,9 +1733,9 @@ else if (@_showLogBackupFile)
         // Run StopMigration on a background thread so the Blazor circuit isn't blocked
         // by the 30-second worker await in StopCoordinatedProcessing.
         await Task.Run(() => JobManager.StopMigration());
-        if (MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob))
-            return;
+        MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob);
         _refreshTimer = null;
+        StartPauseCooldown();
     }
 
     private void PauseJobControlled()
@@ -1699,8 +1743,8 @@ else if (@_showLogBackupFile)
         _errorMessage = string.Empty;
         MigrationJobContext.RequestControlledPause("UI Button Click");
 
-        if (MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob))
-            return;
+        MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob);
+        StartPauseCooldown();
     }
 
     private async Task IncreaseDumpWorkers()
@@ -1787,7 +1831,7 @@ else if (@_showLogBackupFile)
 
     private bool IsResumeEnabled()
     {
-        return CurrentlyLoadedMigrationJob != null && !CurrentlyLoadedMigrationJob.IsCompleted && !IsJobRunning();
+        return CurrentlyLoadedMigrationJob != null && !CurrentlyLoadedMigrationJob.IsCompleted && !IsJobRunning() && !IsPauseCooldownActive();
     }
 
     private bool CanAutoStart()
@@ -1801,10 +1845,39 @@ else if (@_showLogBackupFile)
         return false;
     }
 
+    private void StartPauseCooldown()
+    {
+        _pauseCooldownUntil = DateTime.UtcNow.AddSeconds(30);
+        _pauseCooldownTimer?.Dispose();
+        _pauseCooldownTimer = new Timer(async _ =>
+        {
+            if (_pauseCooldownUntil.HasValue && DateTime.UtcNow >= _pauseCooldownUntil.Value)
+            {
+                _pauseCooldownUntil = null;
+                _pauseCooldownTimer?.Dispose();
+                _pauseCooldownTimer = null;
+            }
+            await InvokeAsync(StateHasChanged);
+        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
+    }
+
+    private bool IsPauseCooldownActive()
+    {
+        return _pauseCooldownUntil.HasValue && DateTime.UtcNow < _pauseCooldownUntil.Value;
+    }
+
+    private int GetPauseCooldownSecondsRemaining()
+    {
+        if (!_pauseCooldownUntil.HasValue) return 0;
+        return Math.Max(0, (int)Math.Ceiling((_pauseCooldownUntil.Value - DateTime.UtcNow).TotalSeconds));
+    }
+
     public void Dispose()
     {
         _refreshTimer?.Dispose();
         _refreshTimer = null;
+        _pauseCooldownTimer?.Dispose();
+        _pauseCooldownTimer = null;
     }
 
     // Response model for log count API

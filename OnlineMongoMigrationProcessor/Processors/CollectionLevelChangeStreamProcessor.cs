@@ -827,7 +827,9 @@ namespace OnlineMongoMigrationProcessor
 
                     // 2. Process cursor with a fresh batch-duration CTS that starts NOW
                     //    (after cursor creation), so processing always gets the full batch time.
-                    using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+                    // Soft deadline at 1x for graceful exit; hard CTS at 2x as safety kill.
+                    var batchDeadline = DateTime.UtcNow.AddSeconds(seconds);
+                    using var batchCts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds * 2));
 
                     await ProcessChangeStreamCursorAsync(
                         cursor,
@@ -838,7 +840,8 @@ namespace OnlineMongoMigrationProcessor
                         batchCts.Token,
                         seconds,
                         userFilterDoc,
-                        readStopwatch
+                        readStopwatch,
+                        batchDeadline
                     );
 
                     MigrationJobContext.AddVerboseLog($"{_syncBackPrefix} Finished processing for {collectionKey}.");
@@ -860,8 +863,8 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (OperationCanceledException)
                 {
-                    // Batch-duration CTS expired — normal end of batch
-                    _log.WriteLine($"{_syncBackPrefix}Batch duration expired for {collectionKey}.", LogType.Debug);
+                    // Hard CTS (2x batch duration) expired — batch took too long
+                    _log.WriteLine($"{_syncBackPrefix}Batch hard timeout (2x) reached for {collectionKey}.", LogType.Warning);
                 }
                 catch (Exception ex)
                 {
@@ -992,7 +995,8 @@ namespace OnlineMongoMigrationProcessor
             CancellationToken cancellationToken,
             int seconds,
             BsonDocument userFilterDoc,
-            System.Diagnostics.Stopwatch readStopwatch)
+            System.Diagnostics.Stopwatch readStopwatch,
+            DateTime batchDeadline)
         {
 
             string collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
@@ -1003,11 +1007,11 @@ namespace OnlineMongoMigrationProcessor
 
             if (MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3"))
             {
-                sucess = await ProcessMongoDB3xChangeStreamAsync(cursor, mu, changeStreamCollection, targetCollection, accumulatedChangesInColl, cancellationToken, userFilterDoc, collectionKey, readStopwatch);
+                sucess = await ProcessMongoDB3xChangeStreamAsync(cursor, mu, changeStreamCollection, targetCollection, accumulatedChangesInColl, cancellationToken, userFilterDoc, collectionKey, readStopwatch, batchDeadline);
             }
             else
             {
-                sucess = await ProcessMongoDB4xChangeStreamAsync(cursor, mu, changeStreamCollection, targetCollection, accumulatedChangesInColl, cancellationToken, seconds, userFilterDoc, collectionKey, readStopwatch);
+                sucess = await ProcessMongoDB4xChangeStreamAsync(cursor, mu, changeStreamCollection, targetCollection, accumulatedChangesInColl, cancellationToken, seconds, userFilterDoc, collectionKey, readStopwatch, batchDeadline);
             }
 
             return sucess;
@@ -1022,7 +1026,8 @@ namespace OnlineMongoMigrationProcessor
             CancellationToken cancellationToken,
             BsonDocument userFilterDoc,
             string collectionKey,
-            System.Diagnostics.Stopwatch readStopwatch)
+            System.Diagnostics.Stopwatch readStopwatch,
+            DateTime batchDeadline)
         {
             MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.ProcessMongoDB3xChangeStreamAsync: collectionKey={collectionKey}");
 
@@ -1082,6 +1087,13 @@ namespace OnlineMongoMigrationProcessor
 
                     }
 
+                    // Soft deadline: exit gracefully after fully processing this event
+                    if (DateTime.UtcNow >= batchDeadline)
+                    {
+                        MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Batch soft deadline reached for {collectionKey}, exiting gracefully after processing current event");
+                        break;
+                    }
+
                     // Restart stopwatch for next read iteration
                     readStopwatch.Restart();
                 }
@@ -1100,7 +1112,8 @@ namespace OnlineMongoMigrationProcessor
             int seconds,
             BsonDocument userFilterDoc,
             string collectionKey,
-            System.Diagnostics.Stopwatch readStopwatch)
+            System.Diagnostics.Stopwatch readStopwatch,
+            DateTime batchDeadline)
         {
             MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.ProcessMongoDB4xChangeStreamAsync: collectionKey={collectionKey}, seconds={seconds}");
 
@@ -1110,8 +1123,8 @@ namespace OnlineMongoMigrationProcessor
                 {
                     long flushedCount = 0;
 
-                    // Iterate changes detected
-                    while (!cancellationToken.IsCancellationRequested)
+                    // Iterate changes detected (soft deadline at 1x for graceful exit)
+                    while (DateTime.UtcNow < batchDeadline && !cancellationToken.IsCancellationRequested)
                     {
                         var hasNext = await cursor.MoveNextAsync(cancellationToken);
                         if (!hasNext)
@@ -1128,7 +1141,6 @@ namespace OnlineMongoMigrationProcessor
 
                         foreach (var change in cursor.Current)
                         {
-
                             if (cancellationToken.IsCancellationRequested || ExecutionCancelled)
                             {
                                 MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Change stream processing cancelled for {changeStreamCollection!.CollectionNamespace}");
@@ -1169,6 +1181,13 @@ namespace OnlineMongoMigrationProcessor
                                     StopJob($"CRITICAL error during flush. Details: {ex}");
                                     throw; // Re-throw to stop processing
                                 }
+                            }
+
+                            // Soft deadline: exit gracefully after fully processing this event
+                            if (DateTime.UtcNow >= batchDeadline)
+                            {
+                                MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Batch soft deadline reached for {collectionKey}, exiting gracefully after processing current event");
+                                break;
                             }
 
                         }
