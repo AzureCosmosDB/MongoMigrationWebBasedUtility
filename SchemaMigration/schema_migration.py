@@ -47,7 +47,7 @@ class SchemaMigration:
         :param mode: Index migration mode - "complete" (all indexes), "preIngestion" (unique only), 
                      or "postIngestion" (non-unique only). Default: "complete"
         :param blocking: (postIngestion mode only) If True, prioritize index builds over new write operations
-                         by setting background: false option.
+                         by using the createIndexes command with blocking: true.
         """
         self.verbose = verbose
         self.mode = mode
@@ -387,14 +387,11 @@ class SchemaMigration:
                     )
                     continue
 
-                # Apply blocking option for postIngestion mode if enabled
-                if self.blocking:
-                    # Set background: false to prioritize index builds over new write operations
-                    if 'background' in index_options:
-                        self._print_verbose(f"  Index '{index_name}': Overriding background option with False (blocking mode)")
-                    else:
-                        self._print_verbose(f"  Index '{index_name}': Setting background=False (blocking mode)")
-                    index_options['background'] = False
+                # In blocking mode, remove any background option since we'll use
+                # the createIndexes command with blocking: true instead
+                if self.blocking and 'background' in index_options:
+                    self._print_verbose(f"  Index '{index_name}': Removing 'background' option (will use createIndexes blocking mode)")
+                    del index_options['background']
             # else: mode == "complete" - process all indexes
 
             # ── Rule: Only one text index allowed per collection (#1, #2, #42) ──
@@ -510,7 +507,22 @@ class SchemaMigration:
             created_index_names.add(index_name)
             self._print_success(f"---- Created index: {index_keys} with options: {index_options}")
             self._print_verbose(f"  Creating index on destination: {index_keys}")
-            dest_collection.create_index(index_keys, **index_options)
+
+            if self.blocking and self.mode == "postIngestion":
+                # Use createIndexes command with blocking: true to prioritize
+                # index builds over new write operations
+                index_doc = {"key": dict(index_keys)}
+                index_doc.update(index_options)
+                self._print_verbose(f"  Using createIndexes command with blocking=true")
+                dest_db.command(
+                    "createIndexes",
+                    collection_name,
+                    indexes=[index_doc],
+                    blocking=True
+                )
+            else:
+                dest_collection.create_index(index_keys, **index_options)
+
             if self.mode == "postIngestion":
                 existing_index_names.add(index_name)
                 existing_index_keys.add(tuple(index_keys))

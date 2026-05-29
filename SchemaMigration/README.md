@@ -199,7 +199,7 @@ Before running the assessment, ensure that the client machine meets the followin
     - `preIngestion`: Creates only unique indexes before data ingestion
     - `postIngestion`: Creates only non-unique indexes after data ingestion and skips collection drop/create and shard-key migration
 
-    When using `postIngestion` mode, the optional `--blocking` flag enables blocking index builds, which prioritizes index creation over new write operations (sets `background: false` on indexes). This is useful if you want to ensure indexes are built quickly without allowing concurrent writes during the indexing process.
+    When using `postIngestion` mode, the optional `--blocking` flag enables blocking index builds, which prioritizes index creation over new write operations by using the `createIndexes` command with `blocking: true`. This is useful if you want to ensure indexes are built quickly without allowing concurrent writes during the indexing process.
 
 This process will generate an Azure DocumentDB-optimized schema with index and sharding recommendations based on your workload.
 
@@ -223,7 +223,7 @@ This process will generate an Azure DocumentDB-optimized schema with index and s
 | **--workers** | No | Number of worker threads used to process collections in parallel. Default is `5`. Use `1` for sequential behavior. Increase this value for faster migrations with many collections. |
 | **--verbose** | No | Enable verbose output mode. When set, displays detailed logging of all operations including connection status, configuration parsing, collection enumeration, and step-by-step migration progress. Useful for debugging and monitoring long-running migrations. |
 | **--mode** | No | Index migration mode: `complete`, `preIngestion`, or `postIngestion`. Default is `complete`. See the "Index Migration Modes" section below for details. |
-| **--blocking** | No | (postIngestion mode only) Enable blocking index builds to prioritize index creation over new write operations. When set, indexes are created with `background: false`. Only applicable when `--mode postIngestion` is used. |
+| **--blocking** | No | (postIngestion mode only) Enable blocking index builds to prioritize index creation over new write operations. When set, indexes are created using the `createIndexes` command with `blocking: true`. Only applicable when `--mode postIngestion` is used. |
 
 ### Index Migration Modes
 
@@ -276,7 +276,7 @@ python main.py --config-file config.json --source-uri <source> --dest-uri <dest>
 python main.py --config-file config.json --source-uri <source> --dest-uri <dest> --mode postIngestion --blocking
 ```
 
-When `--blocking` is enabled, indexes are built with `background: false`, which:
+When `--blocking` is enabled, indexes are built using the `createIndexes` command with `blocking: true`, which:
 - Prioritizes index creation over new write operations
 - Holds exclusive locks during index build
 - Faster index creation for non-unique indexes
