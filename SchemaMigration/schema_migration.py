@@ -514,12 +514,32 @@ class SchemaMigration:
                 index_doc = {"key": dict(index_keys)}
                 index_doc.update(index_options)
                 self._print_verbose(f"  Using createIndexes command with blocking=true")
-                dest_db.command(
-                    "createIndexes",
-                    collection_name,
-                    indexes=[index_doc],
-                    blocking=True
-                )
+                try:
+                    dest_db.command(
+                        "createIndexes",
+                        collection_name,
+                        indexes=[index_doc],
+                        blocking=True,
+                        maxTimeMS=5000
+                    )
+                except Exception:
+                    pass
+                finally:
+                    # Verify whether the index was actually created despite the timeout
+                    created_indexes = dest_collection.index_information()
+                    normalized_created_keys = {
+                        idx_name: tuple(
+                            (field, int(d) if isinstance(d, float) else d)
+                            for field, d in idx_info.get('key', [])
+                        )
+                        for idx_name, idx_info in created_indexes.items()
+                    }
+                    target_keys = tuple(index_keys)
+                    if index_name not in created_indexes and target_keys not in normalized_created_keys.values():
+                        self._print_error(
+                            f"---- [FAILED] Index '{index_name}' was NOT found on destination after blocking build. "
+                            f"The index may still be building in the background or the operation failed."
+                        )
             else:
                 dest_collection.create_index(index_keys, **index_options)
 
