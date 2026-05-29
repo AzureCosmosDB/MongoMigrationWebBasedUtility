@@ -119,6 +119,7 @@ namespace OnlineMongoMigrationProcessor
         public string? ResumeCollectionKey { get; set; } // CollectionKey (database.collection) for auto replay
         public DateTime? ChangeStreamStartedOn { get; set; }
         public DateTime CursorUtcTimestamp { get; set; }
+        public bool TransitionBootstrapPending { get; set; } = false;
 
         // Global resume token properties for server-level change streams (Sync back)
         public string? SyncBackResumeToken { get; set; }
@@ -131,6 +132,7 @@ namespace OnlineMongoMigrationProcessor
         public string? SyncBackResumeCollectionKey { get; set; } // CollectionKey (database.collection) for sync back auto replay
         public DateTime? SyncBackChangeStreamStartedOn { get; set; }
         public DateTime SyncBackCursorUtcTimestamp { get; set; }
+        public bool SyncBackTransitionBootstrapPending { get; set; } = false;
 
         #region SyncBack-aware helpers
 
@@ -191,6 +193,15 @@ namespace OnlineMongoMigrationProcessor
 
         public string GetResumeCollectionKey(bool syncBack)
             => (syncBack ? SyncBackResumeCollectionKey : ResumeCollectionKey) ?? string.Empty;
+
+        public bool GetTransitionBootstrapPending(bool syncBack)
+            => syncBack ? SyncBackTransitionBootstrapPending : TransitionBootstrapPending;
+
+        public void SetTransitionBootstrapPending(bool syncBack, bool value)
+        {
+            if (syncBack) SyncBackTransitionBootstrapPending = value;
+            else TransitionBootstrapPending = value;
+        }
 
         public void SetResumeTokenInfo(bool syncBack, string resumeToken, ChangeStreamOperationType operationType, string documentKey, string collectionKey)
         {

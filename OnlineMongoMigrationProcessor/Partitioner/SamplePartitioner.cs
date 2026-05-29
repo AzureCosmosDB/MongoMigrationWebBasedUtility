@@ -311,7 +311,7 @@ namespace OnlineMongoMigrationProcessor
                         .Select(doc => doc.GetValue("_id", BsonNull.Value))
                         .Where(value => value != BsonNull.Value)
                         .Distinct()
-                        .OrderBy(value => value)
+                        .OrderBy(value => value, BsonValueOrdinalComparer.Instance)
                         .ToList();
 
                     break;
@@ -472,7 +472,7 @@ namespace OnlineMongoMigrationProcessor
 
             partitionValues = partitionValues
                 .Distinct()
-                .OrderBy(value => value)
+                .OrderBy(value => value, BsonValueOrdinalComparer.Instance)
                 .ToList();
 
             if (partitionValues.Count == 0)
@@ -910,8 +910,8 @@ namespace OnlineMongoMigrationProcessor
                     var currentSample = samples[i];
                     var nextSample = samples[i + 1];
 
-                    string gte = currentSample["_id"].ToJson();
-                    string lt = nextSample["_id"].ToJson();
+                    string gte = SerializeBoundaryForSplit(currentSample["_id"], originalChunk.DataType);
+                    string lt = SerializeBoundaryForSplit(nextSample["_id"], originalChunk.DataType);
 
                     // Create sub-chunk (inherit properties from original)
                     var subChunk = new MigrationChunk(
@@ -931,7 +931,7 @@ namespace OnlineMongoMigrationProcessor
                 if (samples.Count > 0)
                 {
                     var lastSample = samples[samples.Count - 1];
-                    string lastGte = lastSample["_id"].ToJson();
+                    string lastGte = SerializeBoundaryForSplit(lastSample["_id"], originalChunk.DataType);
                     string lastLt = originalChunk.Lt ?? ""; // Prefer Lt
                     string lastLte = ""; // Default empty
                     
@@ -966,6 +966,50 @@ namespace OnlineMongoMigrationProcessor
             {
                 MigrationJobContext.AddVerboseLog($"Error creating sub-chunks from samples: {ex.Message}");
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Serializes a BsonValue boundary for use in sub-chunk Gte/Lt strings.
+        /// Must be consistent with SerializeBoundaryValue in MigrationWorker:
+        /// BinData and Object use ToJson(), all other types use ToString().
+        /// Using ToJson() for String types wraps values in quotes, which corrupts
+        /// the boundary when later parsed back via GetChunkBounds.
+        /// </summary>
+        private static string SerializeBoundaryForSplit(BsonValue value, DataType dataType)
+        {
+            if (value == null || value.IsBsonNull)
+                return string.Empty;
+
+            return dataType switch
+            {
+                DataType.BinData => value.ToJson(),
+                DataType.Object => value.ToJson(),
+                _ => value.ToString()!
+            };
+        }
+
+        /// <summary>
+        /// Compares BsonValues using ordinal (binary) comparison for strings,
+        /// matching MongoDB's default string comparison order.
+        /// BsonValue.CompareTo uses culture-sensitive string.CompareTo() which
+        /// disagrees with MongoDB for characters like _ (underscore), lowercase
+        /// letters, and other symbols (ASCII 91-96, 123-126).
+        /// </summary>
+        private sealed class BsonValueOrdinalComparer : IComparer<BsonValue>
+        {
+            public static readonly BsonValueOrdinalComparer Instance = new();
+
+            public int Compare(BsonValue? x, BsonValue? y)
+            {
+                if (x == null && y == null) return 0;
+                if (x == null) return -1;
+                if (y == null) return 1;
+
+                if (x.BsonType == BsonType.String && y.BsonType == BsonType.String)
+                    return string.Compare(x.AsString, y.AsString, StringComparison.Ordinal);
+
+                return x.CompareTo(y);
             }
         }
 

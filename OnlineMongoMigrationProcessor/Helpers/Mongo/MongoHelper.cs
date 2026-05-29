@@ -111,6 +111,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 if (x == null && y == null) return 0;
                 if (x == null) return -1;
                 if (y == null) return 1;
+
+                // Use ordinal comparison for strings to match MongoDB's binary sort order.
+                // BsonValue.CompareTo uses culture-sensitive string.CompareTo which
+                // disagrees with MongoDB for _ (underscore), lowercase letters, etc.
+                if (x.BsonType == BsonType.String && y.BsonType == BsonType.String)
+                    return string.Compare(x.AsString, y.AsString, StringComparison.Ordinal);
+
                 return x.CompareTo(y);
             }
         }
@@ -613,6 +620,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             // Determine if we should use server-level or collection-level processing
             bool useServerLevel = job.ChangeStreamLevel == ChangeStreamLevel.Server;
             string syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
+            bool forceBootstrapAfterTransition = useServerLevel && job.GetTransitionBootstrapPending(syncBack);
 
             bool skipLoops = false;
             string resumeToken=string.Empty;    
@@ -685,13 +693,18 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     // Check if resume token already exists based on processing level
                     string existingResumeToken = string.Empty;
 
-                    if (!string.IsNullOrEmpty(resumeToken))
+                    if (!string.IsNullOrEmpty(resumeToken) && !forceBootstrapAfterTransition)
                     {
                         if (useServerLevel)
                             log.WriteLine($"{syncBackPrefix}Server-level change stream resume token already set", LogType.Debug);
                         else
                             log.WriteLine($"{syncBackPrefix}Collection-level change stream resume token for {mu.DatabaseName}.{mu.CollectionName} already set", LogType.Debug);
                         return;
+                    }
+
+                    if (forceBootstrapAfterTransition)
+                    {
+                        log.WriteLine($"{syncBackPrefix}Detected Collection->Server transition at startup. Forcing WatchChangeStreamUntilChangeAsync bootstrap.", LogType.Warning);
                     }
                        
 
@@ -721,6 +734,12 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };
                         
                     await WatchChangeStreamUntilChangeAsync(log, client, job, mu, collection, options,  seconds, syncBack, cts, useServerLevel);
+
+                    if (forceBootstrapAfterTransition)
+                    {
+                        job.SetTransitionBootstrapPending(syncBack, false);
+                        MigrationJobContext.SaveMigrationJob(job);
+                    }
 
 
                     isSucessful = true;

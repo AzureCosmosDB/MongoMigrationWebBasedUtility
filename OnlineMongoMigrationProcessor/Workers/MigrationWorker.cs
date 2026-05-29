@@ -859,6 +859,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                 else
                     _log.WriteLine($"Setting up server-level change stream resume token.");
 
+                ChangeStreamTransitionHelper.TryTransitionCollectionToServerResumeCheckpoint(_log, syncBack);
+
 
                 MongoClient mongoClient;
                 if (syncBack)
