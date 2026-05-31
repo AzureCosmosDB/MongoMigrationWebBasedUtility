@@ -286,6 +286,35 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
+        public void ResetChangeStreamCounters(bool syncBack)
+        {
+            if (syncBack)
+            {
+                SyncBackInsertEvents = 0;
+                SyncBackDeleteEvents = 0;
+                SyncBackUpdateEvents = 0;
+                SyncBackErrors = 0;
+                SyncBackDocsInserted = 0;
+                SyncBackDocsDeleted = 0;
+                SyncBackDocsUpdated = 0;
+                SyncBackDuplicateDocsSkipped = 0;
+            }
+            else
+            {
+                CSDInsertEvents = 0;
+                CSDeleteEvents = 0;
+                CSUpdateEvents = 0;
+                CSErrors = 0;
+                CSDocsInserted = 0;
+                CSDocsDeleted = 0;
+                CSDocsUpdated = 0;
+                CSDuplicateDocsSkipped = 0;
+            }
+
+            CSUpdatesInLastBatch = 0;
+            CSNormalizedUpdatesInLastBatch = 0;
+        }
+
         #endregion
 
         public MigrationUnit(MigrationJob job, string databaseName, string collectionName, List<MigrationChunk> migrationChunks)

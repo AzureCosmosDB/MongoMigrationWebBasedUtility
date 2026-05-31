@@ -125,7 +125,6 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 if (difference > 0)
                 {
                     MigrationJobContext.CurrentlyActiveJob.CurrentDumpWorkers = newCount;
-                    MigrationJobContext.CurrentlyActiveJob.MaxParallelDumpProcesses = newCount;
                     log.WriteLine($"Increased dump workers to {newCount} (spawning {difference} new workers)");
                     MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
                     return difference; // Return number of new workers to spawn
@@ -145,7 +144,6 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 if (difference != 0)
                 {
                     MigrationJobContext.CurrentlyActiveJob.CurrentDumpWorkers = newCount;
-                    MigrationJobContext.CurrentlyActiveJob.MaxParallelDumpProcesses = newCount;
                     log.WriteLine($"Reduced dump worker capacity to {newCount}. Active workers will complete naturally.");
                     MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
                 }
@@ -188,7 +186,6 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 if (difference > 0)
                 {
                     MigrationJobContext.CurrentlyActiveJob.CurrentRestoreWorkers = newCount;
-                    MigrationJobContext.CurrentlyActiveJob.MaxParallelRestoreProcesses = newCount;
                     log.WriteLine($"Increased restore workers to {newCount} (spawning {difference} new workers)");
                     MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
                     return difference; // Return number of new workers to spawn
@@ -208,7 +205,6 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 if (difference != 0)
                 {
                     MigrationJobContext.CurrentlyActiveJob.CurrentRestoreWorkers = newCount;
-                    MigrationJobContext.CurrentlyActiveJob.MaxParallelRestoreProcesses = newCount;
                     log.WriteLine($"Reduced restore worker capacity to {newCount}. Active workers will complete naturally.");
                     MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
                 }
@@ -235,7 +231,6 @@ namespace OnlineMongoMigrationProcessor.Helpers
             newCount = ValidateWorkerCount(newCount);
             
             MigrationJobContext.CurrentlyActiveJob.CurrentInsertionWorkers = newCount;
-            MigrationJobContext.CurrentlyActiveJob.MaxInsertionWorkersPerCollection = newCount;
             
             log.WriteLine($"Set insertion workers per collection to {newCount}. Will apply to new restore operations.");
             

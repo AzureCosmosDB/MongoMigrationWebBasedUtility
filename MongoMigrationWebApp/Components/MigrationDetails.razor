@@ -199,15 +199,15 @@
                         <div class="row mb-3">
                             <div class="col-md-4">
                                 <label for="maxDumpWorkers" class="form-label" title="Number of parallel mongodump processes. Leave empty for auto-calculation.">Dump Workers</label>
-                                <input type="number" id="maxDumpWorkers" class="form-control" @bind="maxDumpWorkers" min="0" max="16" placeholder="@($"Auto ({defaultDumpWorkers})")" disabled="@(!NewMode)" />
+                                <input type="number" id="maxDumpWorkers" class="form-control" @bind="maxDumpWorkers" min="0" max="16" placeholder="@($"Auto ({defaultDumpWorkers})")" />
                             </div>
                             <div class="col-md-4">
                                 <label for="maxRestoreWorkers" class="form-label" title="Number of parallel mongorestore processes. Leave empty for auto-calculation.">Restore Workers</label>
-                                <input type="number" id="maxRestoreWorkers" class="form-control" @bind="maxRestoreWorkers" min="0" max="16" placeholder="@($"Auto ({defaultRestoreWorkers})")" disabled="@(!NewMode)" />
+                                <input type="number" id="maxRestoreWorkers" class="form-control" @bind="maxRestoreWorkers" min="0" max="16" placeholder="@($"Auto ({defaultRestoreWorkers})")" />
                             </div>
                             <div class="col-md-4">
                                 <label for="maxInsertionWorkers" class="form-label" title="Number of insertion threads per mongorestore process. Leave empty for auto-calculation.">Insertion Workers</label>
-                                <input type="number" id="maxInsertionWorkers" class="form-control" @bind="maxInsertionWorkers" min="1" max="16" placeholder="@($"Auto ({defaultInsertionWorkers})")" disabled="@(!NewMode)" />
+                                <input type="number" id="maxInsertionWorkers" class="form-control" @bind="maxInsertionWorkers" min="1" max="16" placeholder="@($"Auto ({defaultInsertionWorkers})")" />
                             </div>
                         </div>
                     }
@@ -543,9 +543,9 @@
             skipIndexes = Job?.SkipIndexes ?? false;
             appendMode = Job?.AppendMode ?? false;
             enableParallelProcessing = Job?.EnableParallelProcessing ?? true;
-            maxDumpWorkers = Job?.MaxParallelDumpProcesses;
-            maxRestoreWorkers = Job?.MaxParallelRestoreProcesses;
-            maxInsertionWorkers = Job?.MaxInsertionWorkersPerCollection;
+            maxDumpWorkers = Job?.CurrentDumpWorkers;
+            maxRestoreWorkers = Job?.CurrentRestoreWorkers;
+            maxInsertionWorkers = Job?.CurrentInsertionWorkers;
             parallelThreads = Job?.ParallelThreads == defaultParallelThreads ? null : Job?.ParallelThreads; // Show null if default
             CalculateDefaultWorkerCounts(); // Calculate defaults for display
             logLevel = Job?.LogLevel ?? LogType.Info;
@@ -680,9 +680,6 @@
             SkipIndexes = skipIndexes,
             AppendMode = appendMode,
             EnableParallelProcessing = enableParallelProcessing,
-            MaxParallelDumpProcesses = maxDumpWorkers,
-            MaxParallelRestoreProcesses = maxRestoreWorkers,
-            MaxInsertionWorkersPerCollection = maxInsertionWorkers,
             CurrentDumpWorkers = maxDumpWorkers ?? defaultDumpWorkers,
             CurrentRestoreWorkers = maxRestoreWorkers ?? defaultRestoreWorkers,
             CurrentInsertionWorkers = maxInsertionWorkers ?? defaultInsertionWorkers,

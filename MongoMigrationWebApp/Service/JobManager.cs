@@ -420,19 +420,42 @@ namespace MongoMigrationWebApp.Service
             return MigrationWorker?.IsProcessRunning(id) ?? false;
         }
 
-        public void AdjustDumpWorkers(int newCount)
+        public void AdjustDumpWorkers(int newCount, MigrationJob? job = null)
         {
-            MigrationWorker?.AdjustDumpWorkers(newCount);
+            if (TryAdjustOnLiveWorker(job, () => MigrationWorker!.AdjustDumpWorkers(newCount))) return;
+            if (job != null)
+            {
+                job.CurrentDumpWorkers = newCount;
+                MigrationJobContext.SaveMigrationJob(job);
+            }
         }
 
-        public void AdjustRestoreWorkers(int newCount)
+        public void AdjustRestoreWorkers(int newCount, MigrationJob? job = null)
         {
-            MigrationWorker?.AdjustRestoreWorkers(newCount);
+            if (TryAdjustOnLiveWorker(job, () => MigrationWorker!.AdjustRestoreWorkers(newCount))) return;
+            if (job != null)
+            {
+                job.CurrentRestoreWorkers = newCount;
+                MigrationJobContext.SaveMigrationJob(job);
+            }
         }
 
-        public void AdjustInsertionWorkers(int newCount)
+        public void AdjustInsertionWorkers(int newCount, MigrationJob? job = null)
         {
-            MigrationWorker?.AdjustInsertionWorkers(newCount);
+            if (TryAdjustOnLiveWorker(job, () => MigrationWorker!.AdjustInsertionWorkers(newCount))) return;
+            if (job != null)
+            {
+                job.CurrentInsertionWorkers = newCount;
+                MigrationJobContext.SaveMigrationJob(job);
+            }
+        }
+
+        private bool TryAdjustOnLiveWorker(MigrationJob? job, Action adjust)
+        {
+            if (MigrationWorker == null) return false;
+            if (job != null && !MigrationWorker.IsProcessRunning(job.Id)) return false;
+            adjust();
+            return true;
         }
 
         #endregion

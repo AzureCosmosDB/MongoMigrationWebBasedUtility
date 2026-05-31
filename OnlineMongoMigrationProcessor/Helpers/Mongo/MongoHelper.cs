@@ -706,7 +706,14 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                     if (forceBootstrapAfterTransition)
                     {
-                        log.WriteLine($"{syncBackPrefix}Detected Collection->Server transition at startup. Forcing WatchChangeStreamUntilChangeAsync bootstrap.", LogType.Warning);
+                        if (job.GetServerLevelChangeStreamResetPending(syncBack))
+                        {
+                            log.WriteLine($"{syncBackPrefix} Forcing WatchChangeStreamUntilChangeAsync bootstrap from job StartedOn.", LogType.Warning);
+                        }
+                        else
+                        {
+                            log.WriteLine($"{syncBackPrefix} Forcing WatchChangeStreamUntilChangeAsync bootstrap.", LogType.Warning);
+                        }
                     }
                        
 
@@ -1519,13 +1526,60 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 DataType.ObjectId => $"{{\\\"$oid\\\":\\\"{value.AsObjectId}\\\"}}",
                 DataType.Int => value.AsInt32.ToString(),
                 DataType.Int64 => value.AsInt64.ToString(),
-                DataType.String => $"\\\"{value.AsString}\\\"",
+                DataType.String => $"\\\"{EscapeStringForJsonQueryArg(value.AsString)}\\\"",
                 DataType.Decimal128 => $"{{\\\"$numberDecimal\\\":\\\"{value.AsDecimal128}\\\"}}",
                 DataType.Date => $"{{\\\"$date\\\":\\\"{((BsonDateTime)value).ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}\\\"}}",
                 DataType.Object => value.AsBsonDocument.ToString(),
                 DataType.BinData => $"{{\\\"$binary\\\":{{\\\"base64\\\":\\\"{Convert.ToBase64String(value.AsBsonBinaryData.Bytes)}\\\",\\\"subType\\\":\\\"{((byte)value.AsBsonBinaryData.SubType):x2}\\\"}}}}",
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
             };
+        }
+
+        /// <summary>
+        /// Escapes a string value for safe embedding inside a JSON string literal
+        /// that will be passed as a command-line argument to mongodump/mongorestore.
+        /// Handles control characters, backslashes, and double quotes that would
+        /// otherwise break JSON parsing or argument parsing.
+        /// </summary>
+        private static string EscapeStringForJsonQueryArg(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return value;
+
+            // Fast path: check if escaping is needed
+            bool needsEscaping = false;
+            foreach (char c in value)
+            {
+                if (c < ' ' || c == '\\' || c == '"')
+                {
+                    needsEscaping = true;
+                    break;
+                }
+            }
+            if (!needsEscaping)
+                return value;
+
+            var sb = new StringBuilder(value.Length + 16);
+            foreach (char c in value)
+            {
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '"': sb.Append("\\u0022"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    case '\b': sb.Append("\\b"); break;
+                    case '\f': sb.Append("\\f"); break;
+                    default:
+                        if (c < ' ')
+                            sb.Append($"\\u{(int)c:x4}");
+                        else
+                            sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
         }
 
         public static DateTime BsonTimestampToUtcDateTime(BsonTimestamp bsonTimestamp)
@@ -1709,6 +1763,54 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         }
 
         /// <summary>
+        /// Removes documents from the temp collection whose _id already exists in the target collection.
+        /// Uses the chunk's _id range filter (Gte/Lt/Lte) to efficiently query the target via index scan,
+        /// then deletes matching _ids from temp in batches.
+        /// </summary>
+        public static async Task<long> RemoveDuplicatesFromTempAsync(
+            IMongoCollection<BsonDocument> tempCollection,
+            IMongoCollection<BsonDocument> targetCollection,
+            FilterDefinition<BsonDocument> chunkFilter,
+            int batchSize,
+            string namespaceAndChunk,
+            Log? log,
+            CancellationToken cancellationToken)
+        {
+            long totalRemoved = 0;
+
+            // Query existing _ids in target using the chunk's range filter (efficient index scan)
+            using var cursor = await targetCollection.FindAsync(
+                chunkFilter,
+                new FindOptions<BsonDocument>
+                {
+                    Projection = Builders<BsonDocument>.Projection.Include("_id"),
+                    BatchSize = batchSize
+                },
+                cancellationToken);
+
+            while (await cursor.MoveNextAsync(cancellationToken))
+            {
+                var batch = cursor.Current.ToList();
+                if (batch.Count == 0) continue;
+
+                // Delete these _ids from temp
+                var ids = batch.Select(d => d["_id"]).ToList();
+                var deleteFilter = Builders<BsonDocument>.Filter.In("_id", ids);
+                var deleteResult = await tempCollection.DeleteManyAsync(deleteFilter, cancellationToken);
+                totalRemoved += deleteResult.DeletedCount;
+            }
+
+            if (totalRemoved > 0)
+            {
+                log?.WriteLine(
+                    $"[Merge] Removing duplicates for {namespaceAndChunk}: removed {totalRemoved} duplicate(s) from temp",
+                    LogType.Info);
+            }
+
+            return totalRemoved;
+        }
+
+        /// <summary>
         /// Inserts all documents from the temp collection into the target collection using parallel InsertMany.
         /// Documents that already exist in the target (duplicate _id) are skipped, preserving the existing data.
         /// </summary>
@@ -1731,7 +1833,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             var fatalErrors = new ConcurrentBag<Exception>();
 
             long tempDocCount = await tempCollection.CountDocumentsAsync(FilterDefinition<BsonDocument>.Empty, cancellationToken: cancellationToken);
-            log?.WriteLine($"[Merge] Starting parallel insert for {namespaceAndChunk} with {effectiveThreads} threads, batchSize={batchSize}, tempDocCount={tempDocCount}", LogType.Info);
+            log?.WriteLine($"[Merge] Starting parallel insert for {namespaceAndChunk} with {effectiveThreads} threads, batchSize={batchSize}, Docs to Merge={tempDocCount}", LogType.Info);
 
             using var cursor = await tempCollection.FindAsync(
                 FilterDefinition<BsonDocument>.Empty,
@@ -1795,7 +1897,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 insertTasks.Add(task);
 
                 log?.ShowInMonitor(
-                    $"[Merge] {namespaceAndChunk}: dispatched batch {currentBatchNum}, inserted={Interlocked.Read(ref totalInserted)}, skipped={Interlocked.Read(ref totalSkipped)}");
+                    $"[Merge] {namespaceAndChunk}: dispatched batch {currentBatchNum}, newDocsAdded={Interlocked.Read(ref totalInserted)}, duplicatesSkipped={Interlocked.Read(ref totalSkipped)}");
             }
 
             await Task.WhenAll(insertTasks);
@@ -1808,7 +1910,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
 
             log?.WriteLine(
-                $"[Merge] Completed for {namespaceAndChunk}: inserted={Interlocked.Read(ref totalInserted)}, skipped={Interlocked.Read(ref totalSkipped)}",
+                $"[Merge] Insert phase done for {namespaceAndChunk}: newDocsAdded={Interlocked.Read(ref totalInserted)}, duplicatesSkipped={Interlocked.Read(ref totalSkipped)}",
                 LogType.Info);
 
             return (Interlocked.Read(ref totalInserted), Interlocked.Read(ref totalSkipped));

@@ -88,6 +88,15 @@ namespace OnlineMongoMigrationProcessor
             {
                 try
                 {
+                    // If new collections were added and haven't been restored yet,
+                    // pause the server-level change stream to avoid duplicates.
+                    if (!Helper.IsOfflineJobCompleted(MigrationJobContext.CurrentlyActiveJob))
+                    {
+                        _log.WriteLine($"{_syncBackPrefix}Server-level change stream paused: not all collections have completed offline migration. Waiting 30s.", LogType.Warning);
+                        await Task.Delay(30_000, token);
+                        continue;
+                    }
+
                     loop++;
                     await ProcessServerLevelRoundAsync(loop);
 

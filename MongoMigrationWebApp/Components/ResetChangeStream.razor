@@ -1,5 +1,7 @@
 ﻿@using OnlineMongoMigrationProcessor
 @using OnlineMongoMigrationProcessor.Context
+@using OnlineMongoMigrationProcessor.Helpers
+@using OnlineMongoMigrationProcessor.Models
 @using System.Text.RegularExpressions;
 @using MongoMigrationWebApp.Helpers
 
@@ -11,6 +13,16 @@
                 <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button>
             </div>
             <div class="modal-body">
+                @if (IsServerLevel)
+                {
+                    <div class="alert alert-warning mb-0">
+                        <i class="bi bi-exclamation-triangle me-2"></i>
+                        <strong>Warning:</strong> This will reset the server-level change stream for <strong>all collections</strong> in this job.
+                        All change stream updates will be reprocessed from the beginning of the migration. This may significantly increase the migration workload.
+                    </div>
+                }
+                else
+                {
                 @* Filter section - only show if more than 25 collections *@
                 @if (_paginationHelper.ShowFilter())
                 {
@@ -162,9 +174,10 @@
                         <strong>@updatedMigrationUnits.Count collection(s) selected</strong> for change stream reset.
                     </div>
                 }
+                }
             </div>
 
-            @if (updatedMigrationUnits.Count > 0)
+            @if (!IsServerLevel && updatedMigrationUnits.Count > 0)
             {
                 <div class="alert alert-warning mx-3 mb-3"> 
                     <i class="bi bi-exclamation-triangle"></i>
@@ -183,10 +196,15 @@
 @code
 {
     [Parameter]
+    public MigrationJob? Job { get; set; }
+
+    [Parameter]
     public List<MigrationUnit>? MigrationUnits { get; set; }
 
     [Parameter]
     public EventCallback<List<MigrationUnit>> OnCollectionsUpdated { get; set; }
+
+    private bool IsServerLevel => Job?.ChangeStreamLevel == ChangeStreamLevel.Server;
 
     private List<MigrationUnit> updatedMigrationUnits = new List<MigrationUnit>();
     
@@ -276,10 +294,23 @@
 
     private void HandleSubmit()
     {
+        if (IsServerLevel)
+        {
+            ResetServerLevelChangeStream();
+        }
+
         if (OnCollectionsUpdated.HasDelegate)
         {
-            OnCollectionsUpdated.InvokeAsync(updatedMigrationUnits);
+            OnCollectionsUpdated.InvokeAsync(IsServerLevel ? new List<MigrationUnit>() : updatedMigrationUnits);
         }
+    }
+
+    private void ResetServerLevelChangeStream()
+    {
+        if (Job == null) return;
+
+        bool syncBack = Job.ProcessingSyncBack;
+        ChangeStreamTransitionHelper.ResetServerLevelChangeStream(null, Job, syncBack);
     }
 
     private void Cancel()
