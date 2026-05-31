@@ -8,10 +8,12 @@ using OnlineMongoMigrationProcessor.Context;
 using OnlineMongoMigrationProcessor.Helpers.JobManagement;
 using OnlineMongoMigrationProcessor.Models;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -1707,234 +1709,109 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         }
 
         /// <summary>
-        /// Deletes documents matching <paramref name="baseFilter"/> in pages of <paramref name="pageSize"/> to avoid
-        /// large single-operation timeouts on the target collection.
+        /// Inserts all documents from the temp collection into the target collection using parallel InsertMany.
+        /// Documents that already exist in the target (duplicate _id) are skipped, preserving the existing data.
         /// </summary>
-        public static async Task<long> DeleteInPagesByIdAsync(
+        public static async Task<(long totalInserted, long totalSkipped)> InsertTempToTargetInParallelAsync(
+            IMongoCollection<BsonDocument> tempCollection,
             IMongoCollection<BsonDocument> targetCollection,
-            FilterDefinition<BsonDocument> baseFilter,
-            int pageSize,
-            CancellationToken cancellationToken,
+            int parallelThreads,
+            int batchSize,
             string namespaceAndChunk,
-            Log? log)
-        {
-            long totalDeleted = 0;
-            int pageNumber = 0;
-
-            // Use RawBsonDocument so cleanup can handle malformed documents with duplicate fields
-            // without triggering BsonDocument duplicate-element materialization errors.
-            var rawCollection = targetCollection.Database.GetCollection<RawBsonDocument>(
-                targetCollection.CollectionNamespace.CollectionName);
-
-            var renderedBaseFilter = RenderFilterForRawCollection(baseFilter);
-            var rawBaseFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedBaseFilter);
-
-            while (true)
-            {
-                ThrowIfCleanupCancellationRequested(cancellationToken);
-
-                pageNumber++;
-                
-                List<RawBsonDocument> idDocs;
-                var fetchStopwatch = Stopwatch.StartNew();
-                try
-                {
-                    ThrowIfCleanupCancellationRequested(cancellationToken);
-                    idDocs = await rawCollection.Find(rawBaseFilter)
-                        .Sort(Builders<RawBsonDocument>.Sort.Ascending("_id"))
-                        .Project<RawBsonDocument>(Builders<RawBsonDocument>.Projection.Include("_id"))
-                        .Limit(pageSize)
-                        .ToListAsync(cancellationToken);
-                    fetchStopwatch.Stop();
-                }
-                catch (Exception ex)
-                {
-                    fetchStopwatch.Stop();
-                    ex.Data["CleanupPhase"] = "FetchIds";
-                    ex.Data["CleanupPage"] = pageNumber;
-                    ex.Data["CleanupElapsedMs"] = fetchStopwatch.ElapsedMilliseconds;
-                    log?.WriteLine(
-                        $"Paginated cleanup failed while fetching ids for {namespaceAndChunk}: page={pageNumber}, pageSize={pageSize}, elapsedMs={fetchStopwatch.ElapsedMilliseconds}, error={Helper.RedactPii(ex.Message)}",
-                        LogType.Debug);
-                    throw;
-                }
-
-                if (idDocs.Count == 0)
-                    break;
-                var deletedCount = 0;
-
-                var ids = idDocs
-                    .Where(doc => doc.Contains("_id"))
-                    .Select(doc => doc["_id"])
-                    .ToList();
-
-                if (ids.Count == 0)
-                {
-                    log?.WriteLine($"Paginated cleanup stopped for {namespaceAndChunk} because selected page has no _id values.", LogType.Debug);
-                    break;
-                }
-
-                var deleteStopwatch = Stopwatch.StartNew();
-                try
-                {
-                    ThrowIfCleanupCancellationRequested(cancellationToken);
-
-                    var filterBuilder = Builders<RawBsonDocument>.Filter;
-                    var models = new List<WriteModel<RawBsonDocument>>(ids.Count);
-
-                    foreach (var id in ids)
-                    {
-                        // Build filter using builder and batch deletes for better throughput.
-                        var filter = filterBuilder.Eq("_id", id);
-                        models.Add(new DeleteOneModel<RawBsonDocument>(filter));
-                    }
-
-                    var result = await rawCollection.BulkWriteAsync(
-                        models,
-                        new BulkWriteOptions { IsOrdered = false },
-                        cancellationToken);
-
-                    deletedCount = (int)result.DeletedCount;
-                    deleteStopwatch.Stop();
-                }
-
-                catch (Exception ex)
-                {
-                    //deleteStopwatch.Stop();
-                    ex.Data["CleanupPhase"] = "DeleteByIds";
-                    ex.Data["CleanupPage"] = pageNumber;
-                    ex.Data["CleanupIdsCount"] = ids.Count;
-                    ex.Data["CleanupElapsedMs"] = deleteStopwatch.ElapsedMilliseconds;
-                    log?.WriteLine(
-                        $"Paginated cleanup failed for page{pageNumber} while deleting ids for {namespaceAndChunk}: page={pageNumber}, idsCount={ids.Count}, elapsedMs={deleteStopwatch.ElapsedMilliseconds}, error={Helper.RedactPii(ex.Message)}",
-                        LogType.Debug);
-                    throw;
-                }
-
-                totalDeleted += deletedCount;// pageDeleteResult.DeletedCount;
-
-                log?.ShowInMonitor(
-                    $"[Cleanup to avoid duplicates] {namespaceAndChunk}: page {pageNumber}, ids={ids.Count}, deleted={deletedCount}, totalDeleted={totalDeleted}");
-
-            }
-
-            return totalDeleted;
-        }
-
-        private static void ThrowIfCleanupCancellationRequested(CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (MigrationJobContext.ControlledPauseRequested || MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true)
-            {
-                throw new OperationCanceledException("Cleanup canceled due to pause request.", cancellationToken);
-            }
-        }
-
-        private static BsonDocument RenderFilterForRawCollection(FilterDefinition<BsonDocument> filter)
-        {
-            var serializerRegistry = BsonSerializer.SerializerRegistry;
-            var documentSerializer = serializerRegistry.GetSerializer<BsonDocument>();
-#if LEGACY_MONGODB_DRIVER
-            return filter.Render(documentSerializer, serializerRegistry);
-#else
-            var renderArgs = new RenderArgs<BsonDocument>(documentSerializer, serializerRegistry);
-            return filter.Render(renderArgs);
-#endif
-        }
-
-        /// <summary>
-        /// Deletes documents in the target collection that fall within the chunk range (or user filter) of a
-        /// migration chunk, using paginated deletes to avoid timeout on large data sets.
-        /// Returns cleanup success and total documents deleted for the successful attempt.
-        /// </summary>
-        public static async Task<(bool Succeeded, long TotalDeleted)> DeletePotentialDuplicateDocsForRestoreRetryAsync(
-            MigrationUnit mu,
-            int chunkIndex,
-            IMongoCollection<BsonDocument> targetCollection,
-            string targetDbName,
-            string targetCollectionName,
-            int deletePageSize,
             Log? log,
             CancellationToken cancellationToken)
         {
-            MigrationJobContext.AddVerboseLog($"MongoHelper.DeletePotentialDuplicateDocsForRestoreRetryAsync: collection={mu.DatabaseName}.{mu.CollectionName}, chunkIndex={chunkIndex}");
+            long totalInserted = 0;
+            long totalSkipped = 0;
+            int batchNumber = 0;
 
-            FilterDefinition<BsonDocument> deleteFilter;
-            if (mu.MigrationChunks.Count <= 1)
+            int effectiveThreads = Math.Max(1, parallelThreads);
+            using var semaphore = new SemaphoreSlim(effectiveThreads);
+            var insertTasks = new ConcurrentBag<Task>();
+            var fatalErrors = new ConcurrentBag<Exception>();
+
+            long tempDocCount = await tempCollection.CountDocumentsAsync(FilterDefinition<BsonDocument>.Empty, cancellationToken: cancellationToken);
+            log?.WriteLine($"[Merge] Starting parallel insert for {namespaceAndChunk} with {effectiveThreads} threads, batchSize={batchSize}, tempDocCount={tempDocCount}", LogType.Info);
+
+            using var cursor = await tempCollection.FindAsync(
+                FilterDefinition<BsonDocument>.Empty,
+                new FindOptions<BsonDocument> { BatchSize = batchSize },
+                cancellationToken);
+
+            while (await cursor.MoveNextAsync(cancellationToken))
             {
-                var userFilterDoc = GetFilterDoc(mu.UserFilter);
-                deleteFilter = userFilterDoc.ElementCount > 0
-                    ? new BsonDocumentFilterDefinition<BsonDocument>(userFilterDoc)
-                    : FilterDefinition<BsonDocument>.Empty;
+                var batch = cursor.Current.ToList();
+                if (batch.Count == 0) continue;
+
+                var currentBatchNum = Interlocked.Increment(ref batchNumber);
+                var batchDocs = batch;
+
+                await semaphore.WaitAsync(cancellationToken);
+
+                var task = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await targetCollection.InsertManyAsync(
+                            batchDocs,
+                            new InsertManyOptions { IsOrdered = false },
+                            cancellationToken);
+                        Interlocked.Add(ref totalInserted, batchDocs.Count);
+                    }
+                    catch (MongoBulkWriteException<BsonDocument> bwe)
+                    {
+                        // Partial success: some docs inserted, duplicates skipped
+                        long dupCount = bwe.WriteErrors.Count(e => e.Category == ServerErrorCategory.DuplicateKey);
+                        long inserted = batchDocs.Count - bwe.WriteErrors.Count;
+                        Interlocked.Add(ref totalInserted, inserted);
+                        Interlocked.Add(ref totalSkipped, dupCount);
+
+                        // Non-duplicate errors are fatal
+                        if (bwe.WriteErrors.Any(e => e.Category != ServerErrorCategory.DuplicateKey))
+                        {
+                            fatalErrors.Add(bwe);
+                            log?.WriteLine(
+                                $"[Merge] {namespaceAndChunk}: batch {currentBatchNum} had non-duplicate errors: {Helper.RedactPii(bwe.Message)}",
+                                LogType.Warning);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        fatalErrors.Add(ex);
+                        log?.WriteLine(
+                            $"[Merge] {namespaceAndChunk}: batch {currentBatchNum} failed: {Helper.RedactPii(ex.Message)}",
+                            LogType.Error);
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }, cancellationToken);
+
+                insertTasks.Add(task);
+
+                log?.ShowInMonitor(
+                    $"[Merge] {namespaceAndChunk}: dispatched batch {currentBatchNum}, inserted={Interlocked.Read(ref totalInserted)}, skipped={Interlocked.Read(ref totalSkipped)}");
             }
-            else
+
+            await Task.WhenAll(insertTasks);
+
+            if (!fatalErrors.IsEmpty)
             {
-                var chunk = mu.MigrationChunks[chunkIndex];
-                // Parse Lt and Lte separately to maintain correct query semantics
-                var bounds = SamplePartitioner.GetChunkBounds(chunk.Gte!, chunk.Lt ?? "", chunk.Lte ?? "", chunk.DataType);
-                deleteFilter = GenerateQueryFilter(
-                    bounds.gte,
-                    bounds.lt,
-                    bounds.lte,
-                    chunk.DataType,
-                    GetFilterDoc(mu.UserFilter),
-                    mu.DataTypeFor_Id.HasValue);
+                throw new AggregateException(
+                    $"[Merge] {fatalErrors.Count} batch(es) failed for {namespaceAndChunk}",
+                    fatalErrors);
             }
 
-            const int maxCleanupAttempts = 3;
-            Exception? lastCleanupError = null;
-            string nsLog = Log.FormatNamespaceForLog(mu.DatabaseName, mu.CollectionName, targetDbName, targetCollectionName);
+            log?.WriteLine(
+                $"[Merge] Completed for {namespaceAndChunk}: inserted={Interlocked.Read(ref totalInserted)}, skipped={Interlocked.Read(ref totalSkipped)}",
+                LogType.Info);
 
-            for (int cleanupAttempt = 1; cleanupAttempt <= maxCleanupAttempts; cleanupAttempt++)
-            {
-                try
-                {
-                    ThrowIfCleanupCancellationRequested(cancellationToken);
-
-                    var deletedCount = await DeleteInPagesByIdAsync(
-                        targetCollection,
-                        deleteFilter,
-                        deletePageSize,
-                        cancellationToken,
-                        $"{nsLog}[{chunkIndex}]",
-                        log);
-
-                    log?.WriteLine($"Removed {deletedCount} document(s) from {nsLog}[{chunkIndex}] to avoid duplicates during retry.", LogType.Debug);
-                    return (true, deletedCount);
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    lastCleanupError = ex;
-
-                    string phase = ex.Data.Contains("CleanupPhase")
-                        ? ex.Data["CleanupPhase"]?.ToString() ?? "Unknown"
-                        : "Unknown";
-                    string page = ex.Data.Contains("CleanupPage")
-                        ? ex.Data["CleanupPage"]?.ToString() ?? "n/a"
-                        : "n/a";
-                    string elapsedMs = ex.Data.Contains("CleanupElapsedMs")
-                        ? ex.Data["CleanupElapsedMs"]?.ToString() ?? "n/a"
-                        : "n/a";
-                    string idsCount = ex.Data.Contains("CleanupIdsCount")
-                        ? ex.Data["CleanupIdsCount"]?.ToString() ?? "n/a"
-                        : "n/a";
-
-                    if (cleanupAttempt >= maxCleanupAttempts)
-                        break;
-
-                    int delayMs = Helper.GetRetryDelayMs(cleanupAttempt);
-                    log?.WriteLine($"Duplicate cleanup attempt {cleanupAttempt}/{maxCleanupAttempts} failed for {nsLog}[{chunkIndex}] at phase={phase}, page={page}, idsCount={idsCount}, elapsedMs={elapsedMs}. Retrying in {delayMs / 1000} seconds. Error: {Helper.RedactPii(ex.Message)}", LogType.Debug);
-                    await Task.Delay(delayMs, cancellationToken);
-                }
-            }
-
-            log?.WriteLine($"Duplicate cleanup failed after {maxCleanupAttempts} attempts for {nsLog}[{chunkIndex}]. Last error: {Helper.RedactPii(lastCleanupError?.ToString() ?? "Unknown error")}", LogType.Debug);
-            return (false, 0);
+            return (Interlocked.Read(ref totalInserted), Interlocked.Read(ref totalSkipped));
         }
 
         /// <summary>

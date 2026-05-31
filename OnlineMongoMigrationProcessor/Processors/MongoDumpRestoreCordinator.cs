@@ -2748,13 +2748,13 @@ namespace OnlineMongoMigrationProcessor
                             pausedMu.MigrationChunks[context.ChunkIndex].NeedsCleanup = true;
                             MigrationJobContext.SaveMigrationUnit(pausedMu, true);
                             _log?.WriteLine(
-                                $"Restore cancelled due to controlled pause for {pausedMu.DatabaseName}.{pausedMu.CollectionName}[{context.ChunkIndex}]. Marked for cleanup and retry.",
+                                $"Restore cancelled due to controlled pause for {pausedMu.DatabaseName}.{pausedMu.CollectionName}[{context.ChunkIndex}]. Marked for merge and retry.",
                                 LogType.Warning);
                         }
                     }
                     catch (Exception pauseEx)
                     {
-                        _log?.WriteLine($"Error persisting paused restore cleanup state: {Helper.RedactPii(pauseEx.ToString())}", LogType.Error);
+                        _log?.WriteLine($"Error persisting paused restore merge state: {Helper.RedactPii(pauseEx.ToString())}", LogType.Error);
                     }
                 }
 
@@ -2819,7 +2819,7 @@ namespace OnlineMongoMigrationProcessor
                             mu.MigrationChunks[context.ChunkIndex].NeedsCleanup = true;
                             MigrationJobContext.SaveMigrationUnit(mu, true);
                             _log.WriteLine(
-                                $"Restore will retry ({context.RetryCount}/{MaxRetries}): {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]. Cleanup queued.",
+                                $"Restore will retry ({context.RetryCount}/{MaxRetries}): {mu.DatabaseName}.{mu.CollectionName}[{context.ChunkIndex}]. Merge queued.",
                                 LogType.Warning);
                         }
                         else
@@ -2912,7 +2912,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 context.State = ProcessState.CleaningUp;
                 _cleanupQueue.Enqueue(context);
-                _log?.WriteLine($"[Cleanup to avoid duplicates] Queued: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
+                _log?.WriteLine($"[Merge] Queued: MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
             }
 
             if (Interlocked.CompareExchange(ref _cleanupLoopRunning, 1, 0) == 0)
@@ -2987,7 +2987,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 context.State = ProcessState.CleaningUp;
                 requeue = true;
-                _log?.WriteLine($"[Cleanup to avoid duplicates] Unexpected exception for MU:{context.MigrationUnitId}[{context.ChunkIndex}] (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Debug);
+                _log?.WriteLine($"[Merge] Unexpected exception for MU:{context.MigrationUnitId}[{context.ChunkIndex}] (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Debug);
             }
             finally
             {
@@ -3018,7 +3018,7 @@ namespace OnlineMongoMigrationProcessor
             if (mu == null)
             {
                 context.State = ProcessState.Failed;
-                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed: migration unit not found for MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
+                _log?.WriteLine($"[Merge] Failed: migration unit not found for MU:{context.MigrationUnitId}[{context.ChunkIndex}]", LogType.Debug);
                 return false;
             }
 
@@ -3026,15 +3026,20 @@ namespace OnlineMongoMigrationProcessor
             if (chunkIndex < 0 || chunkIndex >= mu.MigrationChunks.Count)
             {
                 context.State = ProcessState.Failed;
-                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed: invalid chunk index for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
+                _log?.WriteLine($"[Merge] Failed: invalid chunk index for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
                 return false;
             }
 
+            string sourceDbName = mu.DatabaseName;
+            string sourceColName = mu.CollectionName;
             string targetDbName = mu.GetEffectiveTargetDatabaseName();
-            string targetCollectionName = mu.GetEffectiveTargetCollectionName();
-            int deletePageSize = GetCleanupDeletePageSize();
+            string targetColName = mu.GetEffectiveTargetCollectionName();
+            string tempColName = $"{targetColName}.temp4merge_{chunkIndex}";
+            string nsLog = Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName);
+            string nsChunkLog = $"{nsLog}[{chunkIndex}]";
 
-            _log?.WriteLine($"[Cleanup to avoid duplicates] Starting: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Info);
+            _log?.ShowInMonitor($"[Merge] Starting: {nsChunkLog}");
+            _log?.WriteLine($"[Merge] Starting for {nsChunkLog}, tempCollection={targetDbName}.{tempColName}", LogType.Info);
 
             try
             {
@@ -3045,53 +3050,169 @@ namespace OnlineMongoMigrationProcessor
 
                 var targetClient = MongoClientFactory.Create(_log, context.TargetConnectionString);
                 var targetDb = targetClient.GetDatabase(targetDbName);
-                var targetCollection = targetDb.GetCollection<BsonDocument>(targetCollectionName);
+                var targetCollection = targetDb.GetCollection<BsonDocument>(targetColName);
+                var tempCollection = targetDb.GetCollection<BsonDocument>(tempColName);
 
-                var cleanupResult = await MongoHelper.DeletePotentialDuplicateDocsForRestoreRetryAsync(
-                    mu,
-                    chunkIndex,
-                    targetCollection,
-                    targetDbName,
-                    targetCollectionName,
-                    deletePageSize,
-                    _log,
-                    cancellationToken);
+                // Step 1: Drop temp collection if it exists (leftover from a previous failed attempt)
+                await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, cancellationToken);
 
-                bool cleanupSucceeded = cleanupResult.Succeeded;
+                // Step 2: Restore chunk to the temp collection via mongorestore
+                _log?.ShowInMonitor($"[Merge] Restoring to temp: {nsChunkLog}");
 
-                if (cleanupSucceeded)
+                // Check if dump file exists before attempting restore.
+                // If missing, clear NeedsCleanup so the normal dump dispatcher can re-download.
+                string dumpFilePathCheck = GetDumpFilePath(sourceDbName, sourceColName, chunkIndex);
+                if (!StorageStreamFactory.Exists(dumpFilePathCheck))
                 {
+                    _log?.WriteLine($"[Merge] Dump file missing for {nsChunkLog}. Clearing merge state for re-download.", LogType.Warning);
+                    mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
+                    mu.MigrationChunks[chunkIndex].IsDownloaded = false;
                     mu.MigrationChunks[chunkIndex].NeedsCleanup = false;
-                    mu.MigrationChunks[chunkIndex].Attempt = 0; // Reset attempt so that any future failure will trigger retries up to the max threshold again
+                    mu.MigrationChunks[chunkIndex].Attempt = 0;
+                    mu.DumpComplete = false;
                     MigrationJobContext.SaveMigrationUnit(mu, true);
                     context.State = ProcessState.Pending;
-                    _log?.WriteLine($"[Cleanup to avoid duplicates] Completed: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}], totalDeleted={cleanupResult.TotalDeleted}", LogType.Info);
-                    return false;
+                    _uploadManifest.TryRemove(context.Id, out _);
+                    await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, cancellationToken);
+
+                    // Re-add chunk to download pipeline so the dump dispatcher picks it up
+                    PrepareDownloadList(mu, context.SourceConnectionString, context.TargetConnectionString);
+
+                    return false; // don't requeue — let dump dispatcher re-download
                 }
-                else
+
+                bool restoreSuccess = await RestoreChunkToTempAsync(mu, chunkIndex, context, targetDbName, tempColName, cancellationToken);
+                if (!restoreSuccess)
                 {
-                    context.State = ProcessState.CleaningUp;
-                    _log?.WriteLine($"[Cleanup to avoid duplicates] Incomplete after internal retries. Re-queueing: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}]", LogType.Debug);
-                    return true;
+                    _log?.WriteLine($"[Merge] Restore to temp failed for {nsChunkLog}. Will re-queue.", LogType.Warning);
+                    await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, cancellationToken);
+                    return true; // requeue
                 }
+
+                // Step 3: Insert docs from temp to target in parallel (existing docs skipped, not overwritten)
+                _log?.ShowInMonitor($"[Merge] Inserting to target: {nsChunkLog}");
+                int pageSize = GetCleanupDeletePageSize();
+                int parallelThreads = GetInsertionWorkersCount();
+                var (totalInserted, totalSkipped) = await MongoHelper.InsertTempToTargetInParallelAsync(
+                    tempCollection, targetCollection, parallelThreads, pageSize, nsChunkLog, _log, cancellationToken);
+
+                _log?.WriteLine($"[Merge] Insert completed for {nsChunkLog}: inserted={totalInserted}, skipped={totalSkipped}", LogType.Info);
+
+                // Step 4: Drop temp collection
+                await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, cancellationToken);
+
+                // Step 5: Finalize - mark chunk as successfully restored
+                mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId); // re-read in case of concurrent updates
+                mu.MigrationChunks[chunkIndex].NeedsCleanup = false;
+                mu.MigrationChunks[chunkIndex].Attempt = 0;
+                mu.MigrationChunks[chunkIndex].RestoredSuccessDocCount = mu.MigrationChunks[chunkIndex].DumpQueryDocCount;
+                mu.MigrationChunks[chunkIndex].RestoredFailedDocCount = 0;
+                mu.MigrationChunks[chunkIndex].SkippedAsDuplicateCount = totalSkipped;
+                mu.MigrationChunks[chunkIndex].IsUploaded = true;
+                MigrationJobContext.SaveMigrationUnit(mu, true);
+
+                // Update tracker and remove from manifest (same as ProcessRestoreSuccess)
+                context.State = ProcessState.Completed;
+                context.CompletedAt = DateTime.UtcNow;
+                UpdateMigrationUnitTracker(mu.Id, restoreIncrement: 1);
+                _uploadManifest.TryRemove(context.Id, out _);
+
+                // Delete dump file now that data is in target
+                try
+                {
+                    string dumpFilePath = GetDumpFilePath(sourceDbName, sourceColName, chunkIndex);
+                    StorageStreamFactory.DeleteIfExists(dumpFilePath);
+                }
+                catch (Exception ex)
+                {
+                    _log?.WriteLine($"[Merge] Failed to delete dump file for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                }
+
+                _log?.ShowInMonitor($"[Merge] Completed: {nsChunkLog}, inserted={totalInserted}, skipped={totalSkipped}");
+                _log?.WriteLine($"[Merge] Completed: {nsChunkLog}, inserted={totalInserted}, skipped={totalSkipped}", LogType.Info);
+                return false; // success, don't requeue
             }
             catch (OperationCanceledException)
             {
                 context.State = ProcessState.CleaningUp;
-                if (cancellationToken.IsCancellationRequested || MigrationJobContext.ControlledPauseRequested || MigrationJobContext.CurrentlyActiveJob?.IsCancelled == true)
+                // Best-effort drop of temp collection on cancellation
+                try
                 {
-                    _log?.WriteLine($"[Cleanup to avoid duplicates] Canceled: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] due to pause/cancellation.", LogType.Debug);
-                    return false;
+                    var targetClient = MongoClientFactory.Create(_log, context.TargetConnectionString);
+                    var targetDb = targetClient.GetDatabase(targetDbName);
+                    await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, CancellationToken.None);
                 }
+                catch { /* best effort */ }
 
-                _log?.WriteLine($"[Cleanup to avoid duplicates] Canceled: {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] by cleanup token.", LogType.Debug);
+                _log?.WriteLine($"[Merge] Canceled for {nsChunkLog} due to pause/cancellation.", LogType.Debug);
                 return false;
             }
             catch (Exception ex)
             {
                 context.State = ProcessState.CleaningUp;
-                _log?.WriteLine($"[Cleanup to avoid duplicates] Exception for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Debug);
-                return true;
+                // Best-effort drop of temp collection on failure
+                try
+                {
+                    var targetClient = MongoClientFactory.Create(_log, context.TargetConnectionString);
+                    var targetDb = targetClient.GetDatabase(targetDbName);
+                    await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, CancellationToken.None);
+                }
+                catch { /* best effort */ }
+
+                _log?.WriteLine($"[Merge] Exception for {nsChunkLog} (will re-queue): {Helper.RedactPii(ex.ToString())}", LogType.Error);
+                return true; // requeue for retry
+            }
+        }
+
+        /// <summary>
+        /// Restores a chunk to a temporary collection using mongorestore.
+        /// </summary>
+        private async Task<bool> RestoreChunkToTempAsync(
+            MigrationUnit mu,
+            int chunkIndex,
+            DumpRestoreProcessContext context,
+            string targetDbName,
+            string tempColName,
+            CancellationToken cancellationToken)
+        {
+            string sourceDbName = mu.DatabaseName;
+            string sourceColName = mu.CollectionName;
+            string dumpFilePath = GetDumpFilePath(sourceDbName, sourceColName, chunkIndex);
+
+            if (!StorageStreamFactory.Exists(dumpFilePath))
+            {
+                _log?.WriteLine($"[Merge] Dump file missing at {dumpFilePath}. Marking chunk as not downloaded.", LogType.Warning);
+                mu.MigrationChunks[chunkIndex].IsDownloaded = false;
+                mu.DumpComplete = false;
+                MigrationJobContext.SaveMigrationUnit(mu, true);
+                return false;
+            }
+
+            // Build restore args targeting the temp collection
+            var restoreArgs = BuildRestoreArguments(
+                mu, chunkIndex, context.TargetConnectionString,
+                sourceDbName, sourceColName,
+                targetDbName, tempColName);
+
+            bool success = await ExecuteRestoreProcessAsync(
+                mu, chunkIndex, restoreArgs.args, restoreArgs.docCount, dumpFilePath);
+
+            return success;
+        }
+
+        /// <summary>
+        /// Drops a temporary collection, logging but not throwing on failure.
+        /// </summary>
+        private async Task DropTempCollectionSafeAsync(
+            IMongoDatabase targetDb, string tempColName, string nsChunkLog, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await targetDb.DropCollectionAsync(tempColName, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"[Merge] Failed to drop temp collection {tempColName} for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Debug);
             }
         }
 
@@ -3114,7 +3235,7 @@ namespace OnlineMongoMigrationProcessor
             }
             catch (Exception ex)
             {
-                _log?.WriteLine($"[Cleanup to avoid duplicates] Failed to load MongoCopyPageSize from settings. Using default 500. Details: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                _log?.WriteLine($"[Merge] Failed to load MongoCopyPageSize from settings. Using default 500. Details: {Helper.RedactPii(ex.Message)}", LogType.Debug);
             }
 
             return 500;
