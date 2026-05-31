@@ -28,10 +28,10 @@
     </h3>
     <div class="d-flex align-items-center mb-3">
 
-        @if (IsPauseCooldownActive())
+        @if (IsPauseCooldownActive() && !JobManager.IsControlledPauseRequested())
         {
-            <span class="badge bg-warning text-dark mx-2" title="Cooling down after pause. Resume will be available shortly.">
-                <i class="bi bi-hourglass-split"></i> Resume in @GetPauseCooldownSecondsRemaining()s
+            <span class="badge bg-warning text-dark mx-2" title="Cooling down after pause.">
+                <i class="bi bi-hourglass-split"></i> Cooling for @GetPauseCooldownSecondsRemaining()s
             </span>
         }
         else if (IsResumeEnabled() && !_isLoadingCollections)
@@ -125,7 +125,7 @@
                     @onclick="ToggleAutoRefresh" 
                     title="@((CurrentlyLoadedMigrationJob?.AutoRefreshEnabled ?? true) ? "Auto-refresh is ON - Click to pause UI updates" : "Auto-refresh is OFF - Click to resume UI updates")"
                     style="border: 1px solid;">
-                <i class="bi @((CurrentlyLoadedMigrationJob?.AutoRefreshEnabled ?? true) ? "bi-play-fill" : "bi-pause-fill")"></i>
+                <i class="bi @((CurrentlyLoadedMigrationJob?.AutoRefreshEnabled ?? true) ? "bi-pause-fill" : "bi-play-fill")"></i>
             </button>
         }
 
@@ -159,9 +159,9 @@
     <ManageCollections MigrationJob="@CurrentlyLoadedMigrationJob" MigrationUnits="@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob)" SourceConnectionString="@MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id]" OnCollectionsUpdated="@OnCollectionsUpdated" />
 }
 
-@if (_resetChangeStreamDialogOpen && CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.ChangeStreamLevel==OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Collection && CurrentlyLoadedMigrationJob.JobType!= OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
+@if (_resetChangeStreamDialogOpen && CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.JobType!= OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
 {
-    <ResetChangeStream MigrationUnits="@((@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob) ?? new List<MigrationUnit>()).Where(mu => Helper.IsMigrationUnitValid(mu)).ToList())" OnCollectionsUpdated="@OnCSReset" />
+    <ResetChangeStream Job="@CurrentlyLoadedMigrationJob" MigrationUnits="@((@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob) ?? new List<MigrationUnit>()).Where(mu => Helper.IsMigrationUnitValid(mu)).ToList())" OnCollectionsUpdated="@OnCSReset" />
 }
 @if (_collectionDetailsDialogOpen && _selectedMigrationUnit != null)
 {
@@ -420,7 +420,8 @@
         @if (CurrentlyLoadedMigrationJob != null && Helper.IsOnline(CurrentlyLoadedMigrationJob))
         {
             <button class="btn btn-warning mx-2" title="Reset the change stream checkpoint to start from the beginning. This may add extra load to the migration process and could delay other collections. Ensure the job is paused before continuing." @onclick="ResetChangeStream">
-                @(((@CurrentlyLoadedMigrationJob.MigrationUnitBasics ?? new List<MigrationUnitBasic>()).Any(MigrationUnit => MigrationUnit.ResetChangeStream)) ? "✓ Reset Change Stream" : "☐ Reset Change Stream")
+                @(((@CurrentlyLoadedMigrationJob.MigrationUnitBasics ?? new List<MigrationUnitBasic>()).Any(MigrationUnit => MigrationUnit.ResetChangeStream)
+                    || CurrentlyLoadedMigrationJob.GetServerLevelChangeStreamResetPending(CurrentlyLoadedMigrationJob.ProcessingSyncBack)) ? "✓ Reset Change Stream" : "☐ Reset Change Stream")
             </button>
 
             @if (CurrentlyLoadedMigrationJob?.JobType != OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
@@ -1426,9 +1427,6 @@ else if (@_showLogBackupFile)
         current.SkipIndexes = submitted.SkipIndexes;
         current.AppendMode = submitted.AppendMode;
         current.EnableParallelProcessing = submitted.EnableParallelProcessing;
-        current.MaxParallelDumpProcesses = submitted.MaxParallelDumpProcesses;
-        current.MaxParallelRestoreProcesses = submitted.MaxParallelRestoreProcesses;
-        current.MaxInsertionWorkersPerCollection = submitted.MaxInsertionWorkersPerCollection;
         current.CurrentDumpWorkers = submitted.CurrentDumpWorkers;
         current.CurrentRestoreWorkers = submitted.CurrentRestoreWorkers;
         current.CurrentInsertionWorkers = submitted.CurrentInsertionWorkers;
@@ -1587,6 +1585,10 @@ else if (@_showLogBackupFile)
     {
         _resetChangeStreamDialogOpen = false;
 
+        // Server-level reset is handled directly by the ResetChangeStream component
+        if (CurrentlyLoadedMigrationJob?.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Server)
+            return;
+
         if (migrationUnits != null && CurrentlyLoadedMigrationJob?.MigrationUnitBasics != null)
         {
             var migrationUnitsToReset = JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob);
@@ -1730,12 +1732,14 @@ else if (@_showLogBackupFile)
     private async Task PauseJobImmediate()
     {
         _errorMessage = string.Empty;
+        // Start cooldown immediately so the UI shows "Resume in Xs" right away
+        StartPauseCooldown();
+        await InvokeAsync(StateHasChanged);
         // Run StopMigration on a background thread so the Blazor circuit isn't blocked
         // by the 30-second worker await in StopCoordinatedProcessing.
         await Task.Run(() => JobManager.StopMigration());
         MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob);
         _refreshTimer = null;
-        StartPauseCooldown();
     }
 
     private void PauseJobControlled()
@@ -1749,60 +1753,60 @@ else if (@_showLogBackupFile)
 
     private async Task IncreaseDumpWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentDumpWorkers < 16)
+        if (CurrentlyLoadedMigrationJob != null && (CurrentlyLoadedMigrationJob.CurrentDumpWorkers ?? 0) < 16)
         {
-            int newCount = CurrentlyLoadedMigrationJob.CurrentDumpWorkers + 1;
-            JobManager.AdjustDumpWorkers(newCount);
+            int newCount = (CurrentlyLoadedMigrationJob.CurrentDumpWorkers ?? 0) + 1;
+            JobManager.AdjustDumpWorkers(newCount, CurrentlyLoadedMigrationJob);
             await InvokeAsync(StateHasChanged);
         }
     }
 
     private async Task DecreaseDumpWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentDumpWorkers > 0)
+        if (CurrentlyLoadedMigrationJob != null && (CurrentlyLoadedMigrationJob.CurrentDumpWorkers ?? 0) > 0)
         {
-            int newCount = CurrentlyLoadedMigrationJob.CurrentDumpWorkers - 1;
-            JobManager.AdjustDumpWorkers(newCount);
+            int newCount = (CurrentlyLoadedMigrationJob.CurrentDumpWorkers ?? 0) - 1;
+            JobManager.AdjustDumpWorkers(newCount, CurrentlyLoadedMigrationJob);
             await InvokeAsync(StateHasChanged);
         }
     }
 
     private async Task IncreaseRestoreWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentRestoreWorkers < 16)
+        if (CurrentlyLoadedMigrationJob != null && (CurrentlyLoadedMigrationJob.CurrentRestoreWorkers ?? 0) < 16)
         {
-            int newCount = CurrentlyLoadedMigrationJob.CurrentRestoreWorkers + 1;
-            JobManager.AdjustRestoreWorkers(newCount);
+            int newCount = (CurrentlyLoadedMigrationJob.CurrentRestoreWorkers ?? 0) + 1;
+            JobManager.AdjustRestoreWorkers(newCount, CurrentlyLoadedMigrationJob);
             await InvokeAsync(StateHasChanged);
         }
     }
 
     private async Task DecreaseRestoreWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentRestoreWorkers > 0)
+        if (CurrentlyLoadedMigrationJob != null && (CurrentlyLoadedMigrationJob.CurrentRestoreWorkers ?? 0) > 0)
         {
-            int newCount = CurrentlyLoadedMigrationJob.CurrentRestoreWorkers - 1;
-            JobManager.AdjustRestoreWorkers(newCount);
+            int newCount = (CurrentlyLoadedMigrationJob.CurrentRestoreWorkers ?? 0) - 1;
+            JobManager.AdjustRestoreWorkers(newCount, CurrentlyLoadedMigrationJob);
             await InvokeAsync(StateHasChanged);
         }
     }
 
     private async Task IncreaseInsertionWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentInsertionWorkers < 16)
+        if (CurrentlyLoadedMigrationJob != null && (CurrentlyLoadedMigrationJob.CurrentInsertionWorkers ?? 0) < 16)
         {
-            int newCount = CurrentlyLoadedMigrationJob.CurrentInsertionWorkers + 1;
-            JobManager.AdjustInsertionWorkers(newCount);
+            int newCount = (CurrentlyLoadedMigrationJob.CurrentInsertionWorkers ?? 0) + 1;
+            JobManager.AdjustInsertionWorkers(newCount, CurrentlyLoadedMigrationJob);
             await InvokeAsync(StateHasChanged);
         }
     }
 
     private async Task DecreaseInsertionWorkers()
     {
-        if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.CurrentInsertionWorkers > 1)
+        if (CurrentlyLoadedMigrationJob != null && (CurrentlyLoadedMigrationJob.CurrentInsertionWorkers ?? 0) > 1)
         {
-            int newCount = CurrentlyLoadedMigrationJob.CurrentInsertionWorkers - 1;
-            JobManager.AdjustInsertionWorkers(newCount);
+            int newCount = (CurrentlyLoadedMigrationJob.CurrentInsertionWorkers ?? 0) - 1;
+            JobManager.AdjustInsertionWorkers(newCount, CurrentlyLoadedMigrationJob);
             await InvokeAsync(StateHasChanged);
         }
     }

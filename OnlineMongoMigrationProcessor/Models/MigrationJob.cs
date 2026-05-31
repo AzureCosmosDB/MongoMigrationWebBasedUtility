@@ -66,41 +66,24 @@ namespace OnlineMongoMigrationProcessor
         
         // Parallel Processing Configuration
         /// <summary>
-        /// Maximum number of parallel mongodump processes. Null = auto-calculate based on CPU cores.
-        /// </summary>
-        public int? MaxParallelDumpProcesses { get; set; }
-        
-        /// <summary>
-        /// Maximum number of parallel mongorestore processes. Null = auto-calculate based on CPU cores.
-        /// </summary>
-        public int? MaxParallelRestoreProcesses { get; set; }
-        
-        /// <summary>
         /// Enable parallel processing feature. Default: true
         /// </summary>
         public bool EnableParallelProcessing { get; set; } = true;
-        
+
         /// <summary>
-        /// Current number of active dump workers. Used for runtime monitoring and adjustment.
+        /// Number of dump workers. Null = auto-calculate based on CPU cores. Persisted; updated by runtime adjustments.
         /// </summary>
-        [JsonIgnore]
-        public int CurrentDumpWorkers { get; set; }
-        
+        public int? CurrentDumpWorkers { get; set; }
+
         /// <summary>
-        /// Current number of active restore workers. Used for runtime monitoring and adjustment.
+        /// Number of restore workers. Null = auto-calculate based on CPU cores. Persisted; updated by runtime adjustments.
         /// </summary>
-        [JsonIgnore]
-        public int CurrentRestoreWorkers { get; set; }
-        
+        public int? CurrentRestoreWorkers { get; set; }
+
         /// <summary>
-        /// Maximum number of insertion workers per collection for mongorestore. Null = auto-calculate based on CPU cores and doc count.
+        /// Number of insertion workers per collection for mongorestore. Null = auto-calculate based on CPU cores and doc count. Persisted; updated by runtime adjustments.
         /// </summary>
-        public int? MaxInsertionWorkersPerCollection { get; set; }
-        
-        /// <summary>
-        /// Current number of insertion workers per collection. Used for runtime monitoring and adjustment.
-        /// </summary>
-        public int CurrentInsertionWorkers { get; set; }
+        public int? CurrentInsertionWorkers { get; set; }
         
         /// <summary>
         /// Number of parallel threads for MongoDB Driver document copy operations. 
@@ -120,6 +103,7 @@ namespace OnlineMongoMigrationProcessor
         public DateTime? ChangeStreamStartedOn { get; set; }
         public DateTime CursorUtcTimestamp { get; set; }
         public bool TransitionBootstrapPending { get; set; } = false;
+        public bool ServerLevelChangeStreamResetPending { get; set; } = false;
 
         // Global resume token properties for server-level change streams (Sync back)
         public string? SyncBackResumeToken { get; set; }
@@ -133,6 +117,7 @@ namespace OnlineMongoMigrationProcessor
         public DateTime? SyncBackChangeStreamStartedOn { get; set; }
         public DateTime SyncBackCursorUtcTimestamp { get; set; }
         public bool SyncBackTransitionBootstrapPending { get; set; } = false;
+        public bool SyncBackServerLevelChangeStreamResetPending { get; set; } = false;
 
         #region SyncBack-aware helpers
 
@@ -201,6 +186,15 @@ namespace OnlineMongoMigrationProcessor
         {
             if (syncBack) SyncBackTransitionBootstrapPending = value;
             else TransitionBootstrapPending = value;
+        }
+
+        public bool GetServerLevelChangeStreamResetPending(bool syncBack)
+            => syncBack ? SyncBackServerLevelChangeStreamResetPending : ServerLevelChangeStreamResetPending;
+
+        public void SetServerLevelChangeStreamResetPending(bool syncBack, bool value)
+        {
+            if (syncBack) SyncBackServerLevelChangeStreamResetPending = value;
+            else ServerLevelChangeStreamResetPending = value;
         }
 
         public void SetResumeTokenInfo(bool syncBack, string resumeToken, ChangeStreamOperationType operationType, string documentKey, string collectionKey)

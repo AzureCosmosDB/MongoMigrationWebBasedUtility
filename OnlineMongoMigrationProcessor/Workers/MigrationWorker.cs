@@ -835,8 +835,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             _ = Task.Run(() =>
             {
                 long count = MongoHelper.GetActualDocumentCount(coll, mu);
-                mu.ActualDocCount = count;
-                MigrationJobContext.SaveMigrationUnit(mu, false);
+                MigrationJobContext.MutateMigrationUnit(mu.Id, m => m.ActualDocCount = count, updateParent: false);
             }, _cts);
         }
 
@@ -1911,7 +1910,14 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"CalculatePartitioningStrategy: docCount={documentCount}, totalSizeBytes={totalCollectionSizeBytes}, db={databaseName}, coll={collectionName}");
 
+            // Small collections under 1M docs: skip partitioning, process as a single chunk
             long targetChunkSizeBytes = _config!.ChunkSizeInMb * 1024 * 1024;
+            if (documentCount < 1_000_000)
+            {
+                _log.WriteLine($"{databaseName}.{collectionName} has {documentCount} docs (< 1M). Skipping partitioning.", LogType.Debug);
+                return (1, documentCount, targetChunkSizeBytes);
+            }
+
             var totalChunksBySize = (int)Math.Ceiling((double)totalCollectionSizeBytes / targetChunkSizeBytes);
 
             int totalChunks;

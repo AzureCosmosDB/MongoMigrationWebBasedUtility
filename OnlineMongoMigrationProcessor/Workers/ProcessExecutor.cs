@@ -128,9 +128,12 @@ namespace OnlineMongoMigrationProcessor.Workers
                                 return;
                             }
 
-                            chunk.NeedsCleanup = true;
-                            chunk.Attempt++;
-                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            MigrationJobContext.MutateMigrationUnit(mu.Id, m =>
+                            {
+                                var c = m.MigrationChunks[chunkIndex];
+                                c.NeedsCleanup = true;
+                                c.Attempt++;
+                            }, updateParent: true);
 
                             _log.WriteLine(
                                 $"MongoRestore continuous duplicate-key threshold ({continuousDuplicateThreshold.TotalSeconds}s) reached for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] after {duplicateCount} total violations. Marked chunk for cleanup and terminating restore.",
@@ -343,13 +346,18 @@ namespace OnlineMongoMigrationProcessor.Workers
                 if (percent > 0 && targetCount > 0)
                 {
                     _log.ShowInMonitor($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {percent}%");
-                                        
+
+                    // High-frequency in-memory percent update on the cached MU (no persist) so the UI sees movement.
                     mu.DumpPercent = PercentageUpdater.CalculateOverallPercentFromAllChunks(mu, isRestore: false, log: _log);
                     if (mu.DumpPercent >= 99.99 && mu.MigrationChunks.All(c => c.IsDownloaded == true))
                     {
-                        mu.DumpComplete = true;
-                        MigrationJobContext.SaveMigrationUnit(mu, true);
-                    }                
+                        // Persist the completion flip atomically so concurrent workers don't lose it.
+                        MigrationJobContext.MutateMigrationUnit(mu.Id, m =>
+                        {
+                            m.DumpComplete = true;
+                            m.DumpPercent = 100;
+                        }, updateParent: true);
+                    }
                 }
 
                 return false;
@@ -362,13 +370,14 @@ namespace OnlineMongoMigrationProcessor.Workers
                 var (restoredCount, failedCount, restorePercent) = ExtractRestoreCounts(data);
                 if (restoredCount > 0 || failedCount > 0)
                 {
+                    // In-memory progress on cached MU. Authoritative IsUploaded flip happens in ProcessRestoreSuccess.
                     chunk.RestoredSuccessDocCount = restoredCount;
                     chunk.RestoredFailedDocCount = failedCount;
                 }
-                if (restoredCount == 0 && failedCount == 0 && restorePercent == 100)
-                {
-                    chunk.IsUploaded = true;
-                }               
+                // Note: do NOT set chunk.IsUploaded here. The cached-MU mutation would make the
+                // wasAlreadyUploaded guard in ProcessRestoreSuccess always fire and skip the tracker
+                // increment, leaving the job stuck on the in-memory counter. ProcessRestoreSuccess
+                // is the single source of truth for that flag.               
 
 
                 // Check if this is a restore progress line with byte size (e.g., "sampledb.MultiIdMixed30gb 1.22GB")

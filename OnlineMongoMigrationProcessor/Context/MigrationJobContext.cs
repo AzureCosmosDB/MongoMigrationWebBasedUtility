@@ -1,9 +1,10 @@
-﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using OnlineMongoMigrationProcessor.Helpers.JobManagement;
 using OnlineMongoMigrationProcessor.Persistence;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -17,6 +18,10 @@ namespace OnlineMongoMigrationProcessor.Context
         private static readonly object _writeMULock = new object();
         private static readonly object _writeJobLock = new object();
         private static readonly object _writeJobListLock = new object();
+
+        // Per-migration-unit locks so concurrent workers serialize read-modify-write on the same MU
+        // without blocking writes to other MUs. Bypasses cache to avoid stale-read overwrites.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _muMutateLocks = new();
 
         private static readonly Dictionary<string, string> _sourceConnectionStrings = new();
         private static readonly Dictionary<string, string> _targetConnectionStrings = new();
@@ -354,8 +359,8 @@ namespace OnlineMongoMigrationProcessor.Context
             try
             {
                 if (mu == null)
-                    return false;               
-  
+                    return false;
+
                 if (CurrentlyActiveJob != null)
                     mu.ParentJob = CurrentlyActiveJob;
 
@@ -385,6 +390,52 @@ namespace OnlineMongoMigrationProcessor.Context
             {
                 AddVerboseLog($"SaveMigrationUnit FAILED for {mu?.Id}: {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Atomically mutates a migration unit under a per-MU lock so concurrent workers cannot
+        /// overwrite each other's chunk-state changes. Operates on the cached MU instance (preserving
+        /// any unpersisted in-memory progress) and persists via <see cref="SaveMigrationUnit"/>.
+        /// Returns the mutated MU, or null if not found.
+        /// </summary>
+        public static MigrationUnit MutateMigrationUnit(string muId, Action<MigrationUnit> mutator, bool updateParent, string jobId = null)
+        {
+            if (string.IsNullOrEmpty(muId) || mutator == null)
+                return null;
+
+            if (string.IsNullOrEmpty(jobId))
+                jobId = CurrentlyActiveJob?.Id;
+
+            if (string.IsNullOrEmpty(jobId))
+                return null;
+
+            var perMuLock = _muMutateLocks.GetOrAdd($"{jobId}::{muId}", _ => new object());
+
+            lock (perMuLock)
+            {
+                // Use the cached MU instance so unpersisted in-memory state (e.g. per-line dump
+                // progress counters) is preserved. Falls back to storage on cache miss.
+                var mu = MigrationUnitsCache?.GetMigrationUnit(muId, jobId)
+                         ?? GetMigrationUnitFromStorage(jobId, muId);
+                if (mu == null)
+                {
+                    AddVerboseLog($"MutateMigrationUnit: MU {muId} not found for job {jobId}");
+                    return null;
+                }
+
+                try
+                {
+                    mutator(mu);
+                }
+                catch (Exception ex)
+                {
+                    AddVerboseLog($"MutateMigrationUnit: mutator threw for MU {muId}: {ex.Message}");
+                    throw;
+                }
+
+                SaveMigrationUnit(mu, updateParent);
+                return mu;
             }
         }
 

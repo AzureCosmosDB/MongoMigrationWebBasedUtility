@@ -1,4 +1,4 @@
-﻿using OnlineMongoMigrationProcessor.Context;
+using OnlineMongoMigrationProcessor.Context;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -147,14 +147,22 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 }
                 if (hasActiveChunks)
                 {
-                    // Recalculate overall restore percent
-                    mu.RestorePercent = CalculateOverallPercentFromAllChunks(mu, isRestore: true, log: _log);
-                    mu.UpdateParentJob();
-                    if (mu.RestorePercent >= 99.99 && allRestoreChunksUploaded)
+                    // Recalculate overall restore percent atomically on persisted MU so concurrent
+                    // worker saves don't wipe the in-memory percent update.
+                    bool reachedComplete = false;
+                    MigrationJobContext.MutateMigrationUnit(id, m =>
                     {
-                        mu.RestoreComplete = true;
+                        m.RestorePercent = CalculateOverallPercentFromAllChunks(m, isRestore: true, log: _log);
+                        bool allUploaded = m.MigrationChunks.All(c => c.IsUploaded == true);
+                        if (m.RestorePercent >= 99.99 && allUploaded)
+                        {
+                            m.RestoreComplete = true;
+                            reachedComplete = true;
+                        }
+                    }, updateParent: true);
+                    if (reachedComplete)
+                    {
                         RemovePercentageTracker(id, isRestore, _log);
-                        MigrationJobContext.SaveMigrationUnit(mu, true);
                     }
                 }
             }
@@ -174,14 +182,22 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 }
                 if (hasActiveChunks)
                 {
-                    // Recalculate overall dump percent
-                    mu.DumpPercent = CalculateOverallPercentFromAllChunks(mu, isRestore: false, log: _log);
-                    mu.UpdateParentJob();
-                    if (mu.DumpPercent >= 99.99 && allDumpChunksDownloaded)
+                    // Recalculate overall dump percent atomically on persisted MU so concurrent
+                    // worker saves don't wipe the in-memory percent update.
+                    bool reachedComplete = false;
+                    MigrationJobContext.MutateMigrationUnit(id, m =>
                     {
-                        mu.DumpComplete = true;
+                        m.DumpPercent = CalculateOverallPercentFromAllChunks(m, isRestore: false, log: _log);
+                        bool allDownloaded = m.MigrationChunks.All(c => c.IsDownloaded == true);
+                        if (m.DumpPercent >= 99.99 && allDownloaded)
+                        {
+                            m.DumpComplete = true;
+                            reachedComplete = true;
+                        }
+                    }, updateParent: true);
+                    if (reachedComplete)
+                    {
                         RemovePercentageTracker(id, isRestore, _log);
-                        MigrationJobContext.SaveMigrationUnit(mu, true);
                     }
                 }
             }
@@ -195,8 +211,26 @@ namespace OnlineMongoMigrationProcessor.Helpers
         {
             MigrationJobContext.AddVerboseLog($"PercentageUpdater.CalculateOverallPercentFromAllChunks: mu={mu.DatabaseName}.{mu.CollectionName}, isRestore={isRestore} isDumpComplete={mu.DumpComplete} isRestoreComplete={mu.RestoreComplete} dumpPercent={mu.DumpPercent} restorePercent={mu.RestorePercent}");
             double totalPercent = 0;
-            long chunksWithDocCount = mu.MigrationChunks?.Count(c => c.DumpQueryDocCount > 0) ?? 0;
-            long totalDocsFromChunks = mu.MigrationChunks?.Where(c => c.DumpQueryDocCount > 0).Sum(c => c.DumpQueryDocCount) ?? 0;
+
+            // Calculate effective doc count per chunk: use DumpQueryDocCount, falling back to
+            // RestoredSuccessDocCount or DumpResultDocCount for chunks that completed without
+            // a persisted DumpQueryDocCount (e.g. paused before save on a prior run).
+            long totalDocsFromChunks = 0;
+            long chunksWithDocCount = 0;
+            if (mu.MigrationChunks != null)
+            {
+                foreach (var c in mu.MigrationChunks)
+                {
+                    long eff = c.DumpQueryDocCount;
+                    if (eff == 0)
+                        eff = Math.Max(c.RestoredSuccessDocCount, c.DumpResultDocCount);
+                    if (eff > 0)
+                    {
+                        chunksWithDocCount++;
+                        totalDocsFromChunks += eff;
+                    }
+                }
+            }
             long totalDocsFromUnit = Helper.GetMigrationUnitDocCount(mu);
 
             // Use the collection-level doc count when not all chunks have DumpQueryDocCount set yet.
@@ -231,13 +265,24 @@ namespace OnlineMongoMigrationProcessor.Helpers
             {
                 var c = mu.MigrationChunks[i];
 
-                if (c.DumpQueryDocCount == 0)
+                // Determine effective doc count for this chunk.
+                // DumpQueryDocCount can be 0 if the chunk was dumped/restored by a prior run
+                // whose DumpQueryDocCount was never persisted (e.g. paused before save).
+                // Fall back to RestoredSuccessDocCount or DumpResultDocCount so completed
+                // chunks still contribute to the overall percentage.
+                long effectiveDocCount = c.DumpQueryDocCount;
+                if (effectiveDocCount == 0)
+                {
+                    effectiveDocCount = Math.Max(c.RestoredSuccessDocCount, c.DumpResultDocCount);
+                }
+
+                if (effectiveDocCount == 0)
                 {
                     strLog = $"{strLog}\n [{i}] Empty";
                     continue;
                 }
 
-                double chunkContrib = (double)c.DumpQueryDocCount / totalDocs;
+                double chunkContrib = (double)effectiveDocCount / totalDocs;
                 double chunkPercent = 0;
 
                 if (isRestore)
@@ -251,12 +296,13 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     else if (c.RestoredSuccessDocCount > 0)
                     {
                         // In-progress chunk: calculate from restored count
-                        chunkPercent = Math.Min(100, (double)c.RestoredSuccessDocCount / Math.Min(c.DumpQueryDocCount,c.DumpResultDocCount) * 100);
+                        long chunkTarget = Math.Min(effectiveDocCount, c.DumpResultDocCount > 0 ? c.DumpResultDocCount : effectiveDocCount);
+                        chunkPercent = Math.Min(100, (double)c.RestoredSuccessDocCount / chunkTarget * 100);
                         totalPercent += chunkPercent * chunkContrib;
                     }
                     // else: not started, contributes 0%
 
-                    strLog = $"{strLog}\n [{i}] {c.RestoredSuccessDocCount}/{Math.Min(c.DumpQueryDocCount, c.DumpResultDocCount)} - {chunkPercent:F2} - {chunkContrib:F4} - {totalPercent:F2}";
+                    strLog = $"{strLog}\n [{i}] {c.RestoredSuccessDocCount}/{effectiveDocCount} - {chunkPercent:F2} - {chunkContrib:F4} - {totalPercent:F2}";
                 }
                 else // Dump
                 {
@@ -269,18 +315,19 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     else if (c.DumpResultDocCount > 0)
                     {
                         // In-progress chunk: calculate from dumped count
-                        chunkPercent = Math.Min(100, (double)c.DumpResultDocCount / c.DumpQueryDocCount * 100);
+                        chunkPercent = Math.Min(100, (double)c.DumpResultDocCount / effectiveDocCount * 100);
                         totalPercent += chunkPercent * chunkContrib;
                     }
                     // else: not started, contributes 0%
 
-                    strLog = $"{strLog}\n [{i}] {c.DumpResultDocCount}/{c.DumpQueryDocCount} - {chunkPercent:F2} - {chunkContrib:F4} - {totalPercent:F2}";
+                    strLog = $"{strLog}\n [{i}] {c.DumpResultDocCount}/{effectiveDocCount} - {chunkPercent:F2} - {chunkContrib:F4} - {totalPercent:F2}";
                 }
             }
 
             string operationType = isRestore ? "Restore" : "Dump";
             // Uncomment the line below to enable detailed logging of percentage calculations for each chunk
             //MigrationJobContext.AddVerboseLog($"{mu.DatabaseName}.{mu.CollectionName} {operationType} Total: {totalPercent:F2}%\n{strLog}");
+
             return Math.Min(100, totalPercent);
         }
 

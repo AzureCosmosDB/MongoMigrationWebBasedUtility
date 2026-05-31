@@ -57,28 +57,34 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (percent > 0)
             {
                _log.ShowInMonitor($"Document copy for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] Progress: {successCount} documents copied, {skippedCount} documents skipped(duplicate), {failureCount} documents failed. Chunk completion percentage: {percent}");
-
-                mu.DumpPercent = basePercent + (percent * contribFactor);
-                mu.RestorePercent = mu.DumpPercent;
-
-                if (mu.MigrationChunks.All(chunk => chunk.IsDownloaded == true))
-                {
-                    mu.DumpComplete = mu.DumpPercent == 100;
-                    mu.RestoreComplete = mu.DumpComplete;
-                }
-
-                if(mu.DumpComplete && mu.RestoreComplete)
-                {
-                    mu.BulkCopyEndedOn = DateTime.UtcNow;
-                }
             }
 
-            migrationChunk.SkippedAsDuplicateCount = skippedCount;
-            migrationChunk.DumpResultDocCount = successCount + skippedCount;
-            migrationChunk.RestoredSuccessDocCount = successCount + skippedCount;
-            migrationChunk.RestoredFailedDocCount = failureCount;
+            // Atomic update of chunk progress + MU-level flags so concurrent segment workers don't lose each other's writes.
+            MigrationJobContext.MutateMigrationUnit(mu.Id, m =>
+            {
+                if (percent > 0)
+                {
+                    m.DumpPercent = basePercent + (percent * contribFactor);
+                    m.RestorePercent = m.DumpPercent;
 
-            MigrationJobContext.SaveMigrationUnit(mu,true);
+                    if (m.MigrationChunks.All(c => c.IsDownloaded == true))
+                    {
+                        m.DumpComplete = m.DumpPercent == 100;
+                        m.RestoreComplete = m.DumpComplete;
+                    }
+
+                    if (m.DumpComplete && m.RestoreComplete)
+                    {
+                        m.BulkCopyEndedOn = DateTime.UtcNow;
+                    }
+                }
+
+                var c2 = m.MigrationChunks[migrationChunkIndex];
+                c2.SkippedAsDuplicateCount = skippedCount;
+                c2.DumpResultDocCount = successCount + skippedCount;
+                c2.RestoredSuccessDocCount = successCount + skippedCount;
+                c2.RestoredFailedDocCount = failureCount;
+            }, updateParent: true);
 
         }
 
@@ -269,8 +275,12 @@ namespace OnlineMongoMigrationProcessor.Workers
                 {
                     _log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied.", LogType.Debug);
                 }
-                segment.IsProcessed = !failed;
-                MigrationJobContext.SaveMigrationUnit(mu, false);
+                bool processed = !failed;
+                MigrationJobContext.MutateMigrationUnit(mu.Id, m =>
+                {
+                    var seg = m.MigrationChunks[migrationChunkIndex].Segments.FirstOrDefault(s => s.Id == segmentId);
+                    if (seg != null) seg.IsProcessed = processed;
+                }, updateParent: false);
                 return failed ? TaskResult.Retry : TaskResult.Success;
             }
             catch (Exception ex) when (!(ex is OperationCanceledException))
