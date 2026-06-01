@@ -1304,21 +1304,26 @@ namespace OnlineMongoMigrationProcessor
                         try
                         {
                             var postBatchToken = cursor.GetResumeToken();
-                            if (postBatchToken != null)
+                            string? tokenJson = postBatchToken?.ToJson();
+                            var (_, currentResumeToken, _, _) = GetResumeParameters(mu);
+
+                            // Always stamp CursorUtcTimestamp = now on idle cycles so the
+                            // UI reflects that the watch is alive. On a truly idle cursor
+                            // postBatchResumeToken often equals the ResumeAfter token we
+                            // started with, so the token comparison alone would never
+                            // trigger a save and the timestamp would stay frozen at
+                            // ChangeStreamStartedOn for hours.
+                            if (!string.IsNullOrEmpty(tokenJson) && tokenJson != currentResumeToken)
                             {
-                                string tokenJson = postBatchToken.ToJson();
-                                var (currentTimestamp, currentResumeToken, _, _) = GetResumeParameters(mu);
-                                if (tokenJson != currentResumeToken)
-                                {
-                                    SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
-                                    // Idle batches: persist every time the cursor advances.
-                                    // Skipping this (5-min throttle) leaves CursorUtcTimestamp
-                                    // and ResumeToken frozen on disk for hours/days on quiet
-                                    // collections, which both confuses the UI and risks a
-                                    // resume from a very stale position after a crash.
-                                    MigrationJobContext.SaveMigrationUnit(mu, true);
-                                }
+                                SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
                             }
+                            else
+                            {
+                                mu.SetCursorUtcTimestamp(_syncBack, DateTime.UtcNow);
+                            }
+                            // Persist every idle cycle — payload is tiny (token + timestamp)
+                            // and skipping the write hides the cursor's progress for hours.
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
                         }
                         catch (Exception ex)
                         {
