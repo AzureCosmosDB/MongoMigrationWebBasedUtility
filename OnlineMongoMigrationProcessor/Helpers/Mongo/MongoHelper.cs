@@ -661,8 +661,20 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                         resumeToken = mu.GetResumeToken(false) ?? string.Empty;
                         originalResumeToken = mu.OriginalResumeToken ?? string.Empty;
-                        startedOnUtc = mu.GetChangeStreamStartedOn(false)?.ToUniversalTime() ?? DateTime.UtcNow;
-                        start = (mu.ChangeStreamStartedOn ?? DateTime.UtcNow).AddMinutes(-15).ToUniversalTime();
+                        // Prefer ChangeStreamStartedOn; if missing (older builds wiped it during
+                        // a Server→Collection transition), fall back to BulkCopyStartedOn − 2h
+                        // and heal the MU by persisting the recovered value so subsequent rounds,
+                        // UI, and other readers see a real timestamp instead of relying on the
+                        // fallback. Last resort: DateTime.UtcNow (skips history but won't crash).
+                        if (mu.ChangeStreamStartedOn == null)
+                        {
+                            var recovered = mu.BulkCopyStartedOn?.AddHours(-4) ?? DateTime.UtcNow;
+                            mu.ChangeStreamStartedOn = recovered;
+                            MigrationJobContext.SaveMigrationUnit(mu, false);
+                            log.WriteLine($"{syncBackPrefix}ChangeStreamStartedOn was missing for {mu.DatabaseName}.{mu.CollectionName}; recovered to {recovered:O} from BulkCopyStartedOn-2h.", LogType.Warning);
+                        }
+                        startedOnUtc = mu.ChangeStreamStartedOn!.Value.ToUniversalTime();
+                        start = mu.ChangeStreamStartedOn!.Value.AddMinutes(-15).ToUniversalTime();
                     }
                     if (syncBack)
                     {

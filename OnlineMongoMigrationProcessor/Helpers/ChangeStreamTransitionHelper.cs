@@ -106,9 +106,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             foreach (var unit in units)
             {
                 unit.SetResumeToken(syncBack, null);
-                unit.SetOriginalResumeToken(syncBack, null);
                 unit.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
-                unit.SetChangeStreamStartedOn(syncBack, null);
+                
                 unit.SetCSLastChange(syncBack, null, null);
                 unit.ClearResumeDocumentInfo(syncBack);
                 unit.ResetChangeStreamCounters(syncBack);
@@ -162,12 +161,16 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 job.CSLastChecked = DateTime.MinValue;
 
             // Reset change stream for each collection (equivalent to MongoHelper.ResetCS per unit).
+            // Do NOT clear unit.ChangeStreamStartedOn here: that timestamp marks when this MU
+            // first began change-stream tailing. Wiping it forces the bootstrap path to fall
+            // back to DateTime.UtcNow, which silently skips all changes between original
+            // start and the transition. Preserving it lets the collection-level resume from
+            // the MU's original start time (oplog retention permitting).
             foreach (var unit in units)
             {
                 unit.SetResumeToken(syncBack, null);
                 unit.SetOriginalResumeToken(syncBack, null);
                 unit.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
-                unit.SetChangeStreamStartedOn(syncBack, null);
                 unit.SetCSLastChange(syncBack, null, null);
                 unit.ClearResumeDocumentInfo(syncBack);
                 unit.ResetChangeStreamCounters(syncBack);
