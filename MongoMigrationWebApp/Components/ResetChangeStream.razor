@@ -231,9 +231,14 @@
             return new List<MigrationUnit>();
 
         var processingSyncBack = MigrationJobContext.CurrentlyActiveJob?.ProcessingSyncBack ?? false;
-        
+
+        // A unit is CS-eligible (and thus resettable) if it already has a resume token
+        // OR if bulk copy has started for it — covers the post Server->Collection
+        // transition case where per-unit resume tokens were cleared but the collections
+        // are still in CS scope.
         return MigrationUnits
-            .Where(mu => !string.IsNullOrEmpty(mu.GetResumeToken(processingSyncBack)))
+            .Where(mu => !string.IsNullOrEmpty(mu.GetResumeToken(processingSyncBack))
+                         || (mu.BulkCopyStartedOn.HasValue && mu.BulkCopyStartedOn.Value != DateTime.MinValue))
             .ToList();
     }
 
