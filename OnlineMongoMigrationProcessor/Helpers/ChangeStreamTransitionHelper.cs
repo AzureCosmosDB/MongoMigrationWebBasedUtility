@@ -161,16 +161,21 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 job.CSLastChecked = DateTime.MinValue;
 
             // Reset change stream for each collection (equivalent to MongoHelper.ResetCS per unit).
-            // Do NOT clear unit.ChangeStreamStartedOn here: that timestamp marks when this MU
-            // first began change-stream tailing. Wiping it forces the bootstrap path to fall
-            // back to DateTime.UtcNow, which silently skips all changes between original
-            // start and the transition. Preserving it lets the collection-level resume from
-            // the MU's original start time (oplog retention permitting).
+            // Pin each unit's ChangeStreamStartedOn to its own BulkCopyStartedOn - 4h so the
+            // collection-level bootstrap opens the change stream just before this collection's
+            // bulk copy began. If left null (the typical state under server-level), the
+            // bootstrap falls back to DateTime.UtcNow, stamps CursorUtcTimestamp to "now",
+            // and later real changes (older than now) trigger the
+            // "Timestamp mismatch: Old is newer than New" guard.
             foreach (var unit in units)
             {
                 unit.SetResumeToken(syncBack, null);
                 unit.SetOriginalResumeToken(syncBack, null);
                 unit.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
+                if (unit.BulkCopyStartedOn.HasValue && unit.BulkCopyStartedOn.Value != DateTime.MinValue)
+                {
+                    unit.SetChangeStreamStartedOn(syncBack, unit.BulkCopyStartedOn.Value.ToUniversalTime().AddHours(-4));
+                }
                 unit.SetCSLastChange(syncBack, null, null);
                 unit.ClearResumeDocumentInfo(syncBack);
                 unit.ResetChangeStreamCounters(syncBack);
@@ -188,7 +193,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 log.WriteLine(
                     $"{syncBackPrefix}Change stream scope transition detected (Server -> Collection). " +
                     $"Cleared server-level change stream state and reset change stream for {units.Count} collection(s). " +
-                    $"Collection-level change streams will resume from job StartedOn at {transitionStartedOn:O}.",
+                    $"Each collection-level change stream will resume from its own BulkCopyStartedOn - 4h.",
                     LogType.Warning);
             }
 

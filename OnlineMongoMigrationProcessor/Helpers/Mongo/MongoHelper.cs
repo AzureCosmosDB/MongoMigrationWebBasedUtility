@@ -610,6 +610,20 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 mu.OriginalResumeToken = null;
             mu.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
 
+            // Pin the change stream start so the bootstrap opens the cursor at a known
+            // historical time, not "now". Without this, units that never had
+            // ChangeStreamStartedOn populated (e.g. after a Server -> Collection
+            // transition) fall back to DateTime.UtcNow in the bootstrap path, which stamps
+            // CursorUtcTimestamp to "now" and then rejects real historical changes with
+            // a "Timestamp mismatch: Old is newer than New" exception. Anchor on this
+            // collection's BulkCopyStartedOn - 4h so the cursor never starts before the
+            // collection's own bulk copy began.
+            if (mu.BulkCopyStartedOn.HasValue && mu.BulkCopyStartedOn.Value != DateTime.MinValue)
+            {
+                mu.SetChangeStreamStartedOn(syncBack, mu.BulkCopyStartedOn.Value.ToUniversalTime().AddHours(-4));
+            }
+            mu.CSLastChecked = DateTime.MinValue;
+
             mu.SetCSLastChange(syncBack, null, null);
             ResetCounters(mu, syncBack);
         }
