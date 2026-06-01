@@ -1354,15 +1354,22 @@ else if (@_showLogBackupFile)
             return false;
         }
 
-        if (CurrentlyLoadedMigrationJob.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Server &&
-            job.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Collection)
-        {
-            _errorMessage = "Change Stream Scope can only transition from Collection to Server for an existing job.";
-            await InvokeAsync(StateHasChanged);
-            return false;
-        }
+        bool isServerToCollectionTransition =
+            CurrentlyLoadedMigrationJob.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Server &&
+            job.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Collection;
 
         ApplySubmittedJobSettings(CurrentlyLoadedMigrationJob, job);
+
+        if (isServerToCollectionTransition)
+        {
+            // Reset change stream for every collection (equivalent to ResetCS per unit)
+            // and clear server-level state so collection-level processing restarts cleanly.
+            OnlineMongoMigrationProcessor.Helpers.ChangeStreamTransitionHelper
+                .TransitionServerToCollectionResumeCheckpoints(
+                    null,
+                    CurrentlyLoadedMigrationJob,
+                    CurrentlyLoadedMigrationJob.ProcessingSyncBack);
+        }
 
         if (!string.IsNullOrEmpty(sourceConnectionString))
             MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id] = sourceConnectionString;

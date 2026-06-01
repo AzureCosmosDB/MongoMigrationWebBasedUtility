@@ -154,7 +154,7 @@
                             Change Stream Scope
                         </label>                
                         <select id="change-stream-scope" value="@SelectedChangeStreamScope" class="form-select" @onchange="OnChangeStreamScopeChanged" disabled="@(cdcMode == CDCMode.Offline || jobType == JobType.RUOptimizedCopy)">
-                            <option value="Collection" disabled="@(!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server)" title="Monitor changes at the collection level. Use when collect count is less than 200">Collection</option>
+                            <option value="Collection" title="Monitor changes at the collection level. Use when collect count is less than 200">Collection</option>
                             <option value="Server" title="Monitor changes at the server level across all databases. Recommended when migration hundreds of collections.">Server</option>
                         </select>
                     </div>
@@ -162,6 +162,12 @@
                     {
                         <div class="alert alert-warning mt-2">
                             <strong>Warning:</strong> Switching Change Stream Scope from Collection to Server for an existing job cannot be reversed, and change processing will be pushed back to the earliest change since the job was created. Before submitting, verify the oplog has not rotated past that start point.
+                        </div>
+                    }
+                    @if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server && changeStreamLevel == ChangeStreamLevel.Collection)
+                    {
+                        <div class="alert alert-warning mt-2">
+                            <strong>Warning:</strong> Switching Change Stream Scope from Server to Collection will reset the change stream for every collection in this job (equivalent to running Reset Change Stream on each). Processing will restart from when each collection was added to the job. Before submitting, verify the oplog has not rotated past those start points.
                         </div>
                     }
                     <div class="mb-3">
@@ -430,15 +436,6 @@
     private void OnChangeStreamScopeChanged(ChangeEventArgs e)
     {
         var val = e?.Value?.ToString() ?? "Collection";
-
-        // Existing jobs support one-way transition only: Collection -> Server.
-        if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server && val == "Collection")
-        {
-            errorMessage = "Existing jobs can only change Change Stream Scope from Collection to Server.";
-            SelectedChangeStreamScope = "Server";
-            changeStreamLevel = ChangeStreamLevel.Server;
-            return;
-        }
 
         SelectedChangeStreamScope = val;
         changeStreamLevel = val == "Server" ? ChangeStreamLevel.Server : ChangeStreamLevel.Collection;

@@ -30,6 +30,28 @@ namespace OnlineMongoMigrationProcessor
         private MongoClient _changeStreamMongoClient;
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _flushLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
 
+        // Bounds crash-recovery staleness for per-MU disk writes. Mid-flush saves are
+        // promoted to a real persist at most every PerMuPersistInterval; final flush
+        // (and explicit force callers) always persist.
+        private readonly ConcurrentDictionary<string, DateTime> _lastPerMuPersistUtc = new ConcurrentDictionary<string, DateTime>();
+        private static readonly TimeSpan PerMuPersistInterval = TimeSpan.FromMinutes(5);
+
+        private bool ShouldPersistMu(string muId, bool force)
+        {
+            if (force)
+            {
+                _lastPerMuPersistUtc[muId] = DateTime.UtcNow;
+                return true;
+            }
+            var last = _lastPerMuPersistUtc.GetOrAdd(muId, _ => DateTime.UtcNow);
+            if ((DateTime.UtcNow - last) >= PerMuPersistInterval)
+            {
+                _lastPerMuPersistUtc[muId] = DateTime.UtcNow;
+                return true;
+            }
+            return false;
+        }
+
         public CollectionLevelChangeStreamProcessor(Log log, MongoClient sourceClient, MongoClient targetClient, ActiveMigrationUnitsCache muCache, MigrationSettings config, bool syncBack = false, MigrationWorker? migrationWorker = null)
             : base(log, sourceClient, targetClient, muCache, config, syncBack, migrationWorker)
         {
@@ -740,7 +762,8 @@ namespace OnlineMongoMigrationProcessor
                         {
                             SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
                             mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
-                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            if (ShouldPersistMu(mu.Id, isFinalFlush))
+                                MigrationJobContext.SaveMigrationUnit(mu, true);
                         }
                         else
                         {
@@ -1279,7 +1302,8 @@ namespace OnlineMongoMigrationProcessor
                                 if (tokenJson != currentResumeToken)
                                 {
                                     SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
-                                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                                    if (ShouldPersistMu(mu.Id, force: false))
+                                        MigrationJobContext.SaveMigrationUnit(mu, true);
                                 }
                             }
                         }
@@ -1352,6 +1376,7 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 MigrationJobContext.SaveMigrationUnit(mu,true);
+                _lastPerMuPersistUtc[mu.Id] = DateTime.UtcNow;
                 
                 // Update the dictionary with the latest CSNormalizedUpdatesInLastBatch for accurate sorting
                 if (_migrationUnitsToProcess.ContainsKey(mu.Id))

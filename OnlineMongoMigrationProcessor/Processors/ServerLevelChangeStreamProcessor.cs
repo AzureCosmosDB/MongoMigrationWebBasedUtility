@@ -71,7 +71,14 @@ namespace OnlineMongoMigrationProcessor
             public long RoundTotalReadMs { get; set; }
             public long RoundTotalWriteMs { get; set; }
             public long RoundFlushedEventCount { get; set; }
+
+            // Promote a mid-round flush to a full per-MU persist at most every PerMuPersistInterval.
+            public DateTime LastPerMuPersistUtc { get; set; } = DateTime.UtcNow;
         }
+
+        // How often a mid-round flush is upgraded to a per-MU save (in addition to the
+        // unconditional save at end-of-round). Bounds crash-recovery staleness.
+        private static readonly TimeSpan PerMuPersistInterval = TimeSpan.FromMinutes(5);
 
         private sealed class MuBatchStats
         {
@@ -691,8 +698,11 @@ namespace OnlineMongoMigrationProcessor
             if ((state.Counter - state.FlushedCount) <= _config.ChangeStreamMaxDocsInBatch)
                 return;
 
-            await FlushAndCheckpointAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound, false);
+            bool persistPerMu = (DateTime.UtcNow - state.LastPerMuPersistUtc) >= PerMuPersistInterval;
+            await FlushAndCheckpointAsync(state, batchCountersInitializedInRound, touchedMuIdsInRound, persistPerMu);
             state.FlushedCount = state.Counter;
+            if (persistPerMu)
+                state.LastPerMuPersistUtc = DateTime.UtcNow;
         }
 
         private async Task FlushAndCheckpointAsync(
@@ -705,7 +715,9 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist, state);
-                SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey);
+                // Reuse the same throttle gate as per-MU persistence: forcePersist=true is set by the
+                // mid-round throttle (or by end-of-round callers), so it also signals "persist job doc".
+                SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey, persistToStore: forcePersist);
                 flushStopwatch.Stop();
                 if (flushStopwatch.ElapsedMilliseconds > 0)
                 {
@@ -800,7 +812,7 @@ namespace OnlineMongoMigrationProcessor
             return true;
         }
 
-        private void SetJobResumeToken(string latestResumeToken, DateTime latestTimestamp, ChangeStreamOperationType latestOperationType, string latestDocumentKey, string latestCollectionKey)
+        private void SetJobResumeToken(string latestResumeToken, DateTime latestTimestamp, ChangeStreamOperationType latestOperationType, string latestDocumentKey, string latestCollectionKey, bool persistToStore = true)
         {
             if (string.IsNullOrEmpty(latestResumeToken))
                 return;
@@ -809,7 +821,8 @@ namespace OnlineMongoMigrationProcessor
 
             MigrationJobContext.CurrentlyActiveJob.SetCursorUtcTimestamp(_syncBack, latestTimestamp);
 
-            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+            if (persistToStore)
+                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
         private void SetTouchedCollectionsCSLastChecked(HashSet<string> touchedMuIds)

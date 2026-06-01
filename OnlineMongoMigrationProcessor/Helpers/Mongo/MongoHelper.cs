@@ -1559,18 +1559,19 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             if (!needsEscaping)
                 return value;
 
+            // Emit backslash and double-quote as JSON \uXXXX escapes rather than \\ and \"
+            // so the resulting string contains no literal backslashes or quotes. This avoids
+            // ambiguity with Win32/Go argv parsing of the outer --query="..." shell quoting,
+            // where a trailing run of backslashes before the closing quote can be mis-parsed
+            // as escaping the quote (producing "end of input in JSON string" or
+            // "provide only one MongoDB connection string" errors from mongodump).
             var sb = new StringBuilder(value.Length + 16);
             foreach (char c in value)
             {
                 switch (c)
                 {
-                    case '\\': sb.Append("\\\\"); break;
+                    case '\\': sb.Append("\\u005C"); break;
                     case '"': sb.Append("\\u0022"); break;
-                    case '\n': sb.Append("\\n"); break;
-                    case '\r': sb.Append("\\r"); break;
-                    case '\t': sb.Append("\\t"); break;
-                    case '\b': sb.Append("\\b"); break;
-                    case '\f': sb.Append("\\f"); break;
                     default:
                         if (c < ' ')
                             sb.Append($"\\u{(int)c:x4}");
