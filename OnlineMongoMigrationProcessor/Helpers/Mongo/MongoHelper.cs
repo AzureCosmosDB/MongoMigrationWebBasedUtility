@@ -959,10 +959,18 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                             var currentToken = mu.GetResumeToken(syncBack);
                             if (string.IsNullOrEmpty(currentToken))
                             {
-                                SetResumeParameters(mu, DateTime.UtcNow, postBatchTokenJson, syncBack);
+                                // postBatchResumeToken from an idle cursor reflects the cursor's
+                                // StartAtOperationTime, not "now". Stamping CursorUtcTimestamp =
+                                // DateTime.UtcNow here creates a desync where the token points to
+                                // the past but the timestamp says "now", which later trips the
+                                // "don't go backwards" guard in the collection-level processor.
+                                var tokenTs = options?.StartAtOperationTime != null
+                                    ? BsonTimestampToUtcDateTime(options.StartAtOperationTime)
+                                    : DateTime.UtcNow;
+                                SetResumeParameters(mu, tokenTs, postBatchTokenJson, syncBack);
                                 mu.SetInitialDocumenReplayed(syncBack, true); // No change to replay
                                 MigrationJobContext.SaveMigrationUnit(mu, true);
-                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected, syncBack={syncBack})");
+                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected, syncBack={syncBack}, ts={tokenTs:O})");
                             }
                         }
                     }
