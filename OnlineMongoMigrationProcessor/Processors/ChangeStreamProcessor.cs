@@ -142,6 +142,44 @@ namespace OnlineMongoMigrationProcessor
             "$unset",
             new BsonArray { "fullDocument", "updateDescription" });
 
+        // Mongo 6.0.9 / 7.0+ pipeline stage that splits a >16 MB change event into
+        // multiple smaller fragments at the shard, each carrying its own resume
+        // token plus a splitEvent: { fragment, of } marker. Required to survive
+        // updates whose updateDescription/oplog entry alone exceeds the 16 MB
+        // getMore cap (where $unset can't help because it runs after sizing).
+        protected static readonly BsonDocument ChangeStreamSplitLargeEventStage =
+            new BsonDocument("$changeStreamSplitLargeEvent", new BsonDocument());
+
+        // Server major version >= 6 supports $changeStreamSplitLargeEvent.
+        // (Strictly it landed in 6.0.9; we gate on major to keep the parse simple —
+        // older 6.0.x just fails pipeline creation and the caller's existing
+        // fallback path handles it.)
+        protected bool IsSplitLargeEventSupported
+        {
+            get
+            {
+                var v = MigrationJobContext.CurrentlyActiveJob?.SourceServerVersion;
+                if (string.IsNullOrEmpty(v)) return false;
+                var dot = v.IndexOf('.');
+                var head = dot > 0 ? v.Substring(0, dot) : v;
+                return int.TryParse(head, out var major) && major >= 6;
+            }
+        }
+
+        // A split event is "final" when it's not a fragment, or when fragment == of.
+        // Non-final fragments must be skipped (their resume tokens are tracked so
+        // the cursor advances, but we don't count them as real events).
+        protected static bool IsFinalFragment(ChangeStreamDocument<BsonDocument> change)
+        {
+            var backing = GetBackingDocument(change);
+            if (backing == null || !backing.TryGetValue("splitEvent", out var splitVal) || !splitVal.IsBsonDocument)
+                return true;
+            var split = splitVal.AsBsonDocument;
+            if (!split.TryGetValue("fragment", out var fragVal) || !split.TryGetValue("of", out var ofVal))
+                return true;
+            return fragVal.ToInt32() >= ofVal.ToInt32();
+        }
+
         // Cached reflection accessor for BsonDocumentBackedClass.BackingDocument so we
         // can inject a freshly-fetched fullDocument into an existing event without
         // reconstructing the whole ChangeStreamDocument.

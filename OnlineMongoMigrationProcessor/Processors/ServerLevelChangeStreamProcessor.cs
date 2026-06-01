@@ -228,6 +228,15 @@ namespace OnlineMongoMigrationProcessor
                 {
                     pipeline.Add(OptimizeForLargeDocsProjectStage);
                     _log.WriteLine($"{_syncBackPrefix}[OFLD] WatchServerLevelChangeStream: appended $unset[fullDocument,updateDescription], stages={pipeline.Count}", LogType.Debug);
+
+                    // Append $changeStreamSplitLargeEvent (Mongo 6.0.9+/7.0+) so a single
+                    // oversized oplog entry is split into <16 MB fragments at the shard,
+                    // avoiding "BSONObj size ... is invalid" getMore failures.
+                    if (IsSplitLargeEventSupported)
+                    {
+                        pipeline.Add(ChangeStreamSplitLargeEventStage);
+                        _log.WriteLine($"{_syncBackPrefix}[OFLD] WatchServerLevelChangeStream: appended $changeStreamSplitLargeEvent, stages={pipeline.Count}", LogType.Debug);
+                    }
                 }
                 else
                 {
@@ -652,6 +661,15 @@ namespace OnlineMongoMigrationProcessor
             state.LatestOperationType = change.OperationType;
             state.LatestDocumentKey = change.DocumentKey?.ToJson() ?? string.Empty;
             state.LatestCollectionKey = state.CollectionKey;
+
+            // When $changeStreamSplitLargeEvent fired on the shard, only the final
+            // fragment carries the complete event. Earlier fragments share the same
+            // documentKey/operationType but have partial bodies; we just advance the
+            // resume token past them (already done above) and skip counting/processing.
+            if (!IsFinalFragment(change))
+            {
+                return !ExecutionCancelled;
+            }
 
             switch (change.OperationType)
             {

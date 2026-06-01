@@ -988,6 +988,15 @@ namespace OnlineMongoMigrationProcessor
                 // The flush path re-fetches the document body from source before bulk writing.
                 pipeline.Add(OptimizeForLargeDocsProjectStage);
                 _log.WriteLine($"{_syncBackPrefix}[OFLD] CreateChangeStreamPipeline (collection): appended $unset[fullDocument,updateDescription], stages={pipeline.Count}", LogType.Debug);
+
+                // Append $changeStreamSplitLargeEvent (Mongo 6.0.9+/7.0+) so a single
+                // oversized oplog entry is split into <16 MB fragments at the shard,
+                // avoiding "BSONObj size ... is invalid" getMore failures.
+                if (IsSplitLargeEventSupported)
+                {
+                    pipeline.Add(ChangeStreamSplitLargeEventStage);
+                    _log.WriteLine($"{_syncBackPrefix}[OFLD] CreateChangeStreamPipeline (collection): appended $changeStreamSplitLargeEvent, stages={pipeline.Count}", LogType.Debug);
+                }
             }
             else
             {
@@ -1489,6 +1498,16 @@ namespace OnlineMongoMigrationProcessor
            
             try
             {
+                // When $changeStreamSplitLargeEvent fired on the shard, only the final
+                // fragment carries the complete event. Earlier fragments share the same
+                // documentKey/operationType but have partial bodies; skip them. The
+                // cursor advances naturally; if the process crashes mid-batch, restart
+                // from the last persisted token will simply re-emit and re-skip them.
+                if (!IsFinalFragment(change))
+                {
+                    return true;
+                }
+
                 //check if user filter condition is met
                 if (change.OperationType != ChangeStreamOperationType.Delete)
                 {
