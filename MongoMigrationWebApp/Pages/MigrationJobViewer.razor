@@ -161,7 +161,7 @@
 
 @if (_resetChangeStreamDialogOpen && CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.JobType!= OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
 {
-    <ResetChangeStream Job="@CurrentlyLoadedMigrationJob" MigrationUnits="@((@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob) ?? new List<MigrationUnit>()).Where(mu => Helper.IsMigrationUnitValid(mu)).ToList())" OnCollectionsUpdated="@OnCSReset" />
+    <ResetChangeStream Job="@CurrentlyLoadedMigrationJob" MigrationUnits="@((@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob) ?? new List<MigrationUnit>()).Where(mu => mu.SourceStatus != CollectionStatus.NotFound && mu.SourceStatus != CollectionStatus.IsView).ToList())" OnCollectionsUpdated="@OnCSReset" />
 }
 @if (_collectionDetailsDialogOpen && _selectedMigrationUnit != null)
 {
