@@ -135,6 +135,12 @@
                             Enable change stream watch logging
                         </label>
                     </div>
+                    <div class="mb-3">
+                        <label for="optimize-for-large-docs">
+                            <input type="checkbox" id="optimize-for-large-docs" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).OptimizeForLargeDocs" />
+                            Optimize for large docs
+                        </label>
+                    </div>
                 </div>
 
                 <!-- Hash Comparison Tab Content -->

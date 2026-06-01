@@ -47,6 +47,9 @@ namespace OnlineMongoMigrationProcessor
 
             /// <summary>Accumulated per-MU batch stats, applied to MU objects only on the final flush.</summary>
             public Dictionary<string, MuBatchStats> BatchStats { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+            /// <summary>Per-namespace raw event capture for the optional [cswatch] diagnostic log.</summary>
+            public Dictionary<string, TempRawWatchSummary> RawReceivedByNamespace { get; } = new(StringComparer.OrdinalIgnoreCase);
         }
 
         private sealed class MuBatchStats
@@ -193,11 +196,21 @@ namespace OnlineMongoMigrationProcessor
                 List<BsonDocument> pipeline = new List<BsonDocument>();
                 _namespaceFilterApplied = BuildServerLevelNamespaceFilterPipeline(pipeline);
 
+                if (IsOptimizeForLargeDocsEnabled)
+                {
+                    pipeline.Add(OptimizeForLargeDocsProjectStage);
+                    _log.WriteLine($"{_syncBackPrefix}[OFLD] WatchServerLevelChangeStream: appended $unset[fullDocument,updateDescription], stages={pipeline.Count}", LogType.Debug);
+                }
+                else
+                {
+                    _log.WriteLine($"{_syncBackPrefix}[OFLD] WatchServerLevelChangeStream: OptimizeForLargeDocs OFF, stages={pipeline.Count}", LogType.Debug);
+                }
+
                 // Set up options - use global resume token from MigrationJob
                 var options = new ChangeStreamOptions
                 {
                     BatchSize = 500,
-                    FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
+                    FullDocument = GetFullDocumentOption(),
                     MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
                 };
 
@@ -227,7 +240,7 @@ namespace OnlineMongoMigrationProcessor
 
                 var resumeToken = BsonSerializer.Deserialize<BsonDocument>(tokenJson);
 
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter =resumeToken, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), ResumeAfter =resumeToken, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
 
                 pipelineArray = pipeline.ToArray();
 
@@ -353,7 +366,7 @@ namespace OnlineMongoMigrationProcessor
                     var retryOptions = new ChangeStreamOptions
                     {
                         BatchSize = 500,
-                        FullDocument = ChangeStreamFullDocumentOption.UpdateLookup,
+                        FullDocument = GetFullDocumentOption(),
                         StartAtOperationTime = bsonTimestamp,
                         MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
                     };
@@ -468,6 +481,11 @@ namespace OnlineMongoMigrationProcessor
                     ApplyRemainingBatchStats(state, touchedMuIdsInRound);
                     SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey);
 
+                    foreach (var kvp in state.RawReceivedByNamespace)
+                    {
+                        LogTempRawWatchSummary("server-watch", kvp.Key, kvp.Value);
+                    }
+
                 }
                 catch (Exception ex)
                 {
@@ -567,6 +585,13 @@ namespace OnlineMongoMigrationProcessor
             state.LatestOperationType = change.OperationType;
             state.LatestDocumentKey = change.DocumentKey?.ToJson() ?? string.Empty;
             state.LatestCollectionKey = state.CollectionKey;
+
+            if (!state.RawReceivedByNamespace.TryGetValue(state.CollectionKey, out var rawSummary))
+            {
+                rawSummary = CreateTempRawWatchSummary();
+                state.RawReceivedByNamespace[state.CollectionKey] = rawSummary;
+            }
+            AddTempRawReceivedEvent(rawSummary, change);
 
             if (readDurationShareMs > 0 && TryResolveQueuedMigrationUnit(state.CollectionKey, out var latencyMu) && latencyMu != null)
             {
@@ -903,6 +928,21 @@ namespace OnlineMongoMigrationProcessor
             if (entriesToProcess.Count == 0)
             {
                 return;
+            }
+
+            if (IsOptimizeForLargeDocsEnabled)
+            {
+                // Re-fetch document bodies from source per namespace before bulk
+                // writing. Each MU maps to a distinct source collection in
+                // server-level mode, so we hydrate one MU at a time.
+                var hydrationClient = _syncBack ? _targetClient : _sourceClient;
+                foreach (var entry in entriesToProcess)
+                {
+                    var dbName = _syncBack ? entry.mu.GetEffectiveTargetDatabaseName() : entry.mu.DatabaseName;
+                    var collName = _syncBack ? entry.mu.GetEffectiveTargetCollectionName() : entry.mu.CollectionName;
+                    var hydrationCollection = hydrationClient.GetDatabase(dbName).GetCollection<BsonDocument>(collName);
+                    await HydrateFullDocumentsAsync(hydrationCollection, entry.docs);
+                }
             }
 
             var tasks = CreateBulkWriteTasks(entriesToProcess);
@@ -1251,17 +1291,22 @@ namespace OnlineMongoMigrationProcessor
                 {
                     case ChangeStreamOperationType.Insert:
                         IncrementEventCounter(mu, change.OperationType);
-                        // Accumulate inserts even in simulation mode so counters get updated
-                        if (change.FullDocument != null && !change.FullDocument.IsBsonNull)
+                        // With OFLD, fullDocument is stripped by the $unset pipeline stage and will be re-fetched
+                        // by HydrateFullDocumentsAsync at flush time. Without OFLD, a missing fullDocument on an
+                        // insert is unexpected, so we skip it as before.
+                        if (IsOptimizeForLargeDocsEnabled || (change.FullDocument != null && !change.FullDocument.IsBsonNull))
                             accumulatedChangesInColl.AddInsert(change);
                         break;
                     case ChangeStreamOperationType.Update:
                     case ChangeStreamOperationType.Replace:
                         IncrementEventCounter(mu, change.OperationType);
                         var filter = Builders<BsonDocument>.Filter.Eq("_id", idValue);
-                        if (change.FullDocument == null || change.FullDocument.IsBsonNull)
+                        if (!IsOptimizeForLargeDocsEnabled && (change.FullDocument == null || change.FullDocument.IsBsonNull))
                         {
-                            // Skip actual delete operation in simulation mode
+                            // Without OFLD we use FullDocument:UpdateLookup, so a null body means the doc was
+                            // already deleted on source by the time the lookup ran. Mirror that delete on target.
+                            // With OFLD the pipeline strips fullDocument unconditionally, so this branch must NOT
+                            // run; hydration will fetch the current source body at flush time instead.
                             if (!isWriteSimulated)
                             {
                                 _log.WriteLine($"{_syncBackPrefix}Processing {change.OperationType} operation for {collNameSpace} with _id {idValue}. No document found on source, deleting it from target.");

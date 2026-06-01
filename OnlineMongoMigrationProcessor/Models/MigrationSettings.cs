@@ -29,7 +29,8 @@ namespace OnlineMongoMigrationProcessor
         public bool IgnoreDuplicatesAndContinueRestore { get; set; }
         public int ContinuousDuplicateThresholdInSeconds { get; set; }
         public bool EnableCSWatchLog { get; set; }
-        
+        public bool OptimizeForLargeDocs { get; set; }
+
         private string _filePath = string.Empty;
 
         public MigrationSettings()
@@ -85,7 +86,8 @@ namespace OnlineMongoMigrationProcessor
                     IgnoreDuplicatesAndContinueRestore = loadedObject.IgnoreDuplicatesAndContinueRestore;
                     ContinuousDuplicateThresholdInSeconds = loadedObject.ContinuousDuplicateThresholdInSeconds <= 0 ? 300 : loadedObject.ContinuousDuplicateThresholdInSeconds;
                     EnableCSWatchLog = loadedObject.EnableCSWatchLog;
-                    
+                    OptimizeForLargeDocs = loadedObject.OptimizeForLargeDocs;
+
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
                         ChangeStreamMaxDocsInBatch = 10000;
@@ -119,6 +121,7 @@ namespace OnlineMongoMigrationProcessor
                 IgnoreDuplicatesAndContinueRestore = false;
                 ContinuousDuplicateThresholdInSeconds = 300;
                 EnableCSWatchLog = false;
+                OptimizeForLargeDocs = false;
             }
         }
 
