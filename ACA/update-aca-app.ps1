@@ -45,7 +45,7 @@ try {
         --name $AcrName `
         --repository $AcrRepository `
         --output json `
-        2>&1 | Where-Object { $_ -notmatch 'WARNING' -and $_ -notmatch 'not found' }
+        2>$null
     
     if ($LASTEXITCODE -eq 0 -and $tags) {
         $tagsList = $tags | ConvertFrom-Json
@@ -96,7 +96,7 @@ az containerapp update `
     --max-replicas 1 `
     --set template.scale.rules=[] `
     --image $imageName `
-    2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' }
+    2>$null
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nError: Failed to update Container App" -ForegroundColor Red
@@ -113,12 +113,12 @@ Write-Host ""
 Write-Host "Cleaning up old revisions..." -ForegroundColor Yellow
 $ErrorActionPreference = 'Continue'
 
-$latestRevision = az containerapp show `
+$latestRevision = (az containerapp show `
     --name $ContainerAppName `
     --resource-group $ResourceGroupName `
     --query "properties.latestRevisionName" `
     --output tsv `
-    2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' }
+    2>$null).Trim()
 
 if ($latestRevision) {
     Write-Host "Latest revision: $latestRevision" -ForegroundColor Cyan
@@ -129,10 +129,10 @@ if ($latestRevision) {
         --resource-group $ResourceGroupName `
         --query "[?properties.active==``true``].name" `
         --output tsv `
-        2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' }
+        2>$null
     
     if ($allRevisions) {
-        $revisionList = $allRevisions -split "`n" | Where-Object { $_ -and $_ -ne $latestRevision }
+        $revisionList = $allRevisions -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne $latestRevision }
         
         foreach ($oldRevision in $revisionList) {
             if ($oldRevision.Trim()) {
@@ -160,7 +160,7 @@ $scaleConfig = az containerapp show `
     --resource-group $ResourceGroupName `
     --query "properties.template.scale" `
     --output json `
-    2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' } | ConvertFrom-Json
+    2>$null | ConvertFrom-Json
 
 $expectedReplicaCount = 1
 if ($scaleConfig.minReplicas) {
@@ -180,12 +180,12 @@ while ($attemptCount -lt $maxAttempts -and -not $isReady) {
     Write-Host "Checking deployment status (attempt $attemptCount/$maxAttempts)..." -ForegroundColor Gray
     
     # Get the active revision
-    $activeRevision = az containerapp revision list `
+    $activeRevision = (az containerapp revision list `
         --name $ContainerAppName `
         --resource-group $ResourceGroupName `
         --query "[?properties.active==``true``].name" `
         --output tsv `
-        2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' }
+        2>$null) | Select-Object -First 1
     
     if ($activeRevision -and $LASTEXITCODE -eq 0) {
         # Get comprehensive revision details
@@ -194,7 +194,7 @@ while ($attemptCount -lt $maxAttempts -and -not $isReady) {
             --resource-group $ResourceGroupName `
             --revision $activeRevision `
             --output json `
-            2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' -and $_ -notmatch 'ERROR' }
+            2>$null
         
         if ($LASTEXITCODE -eq 0 -and $revisionOutput) {
             try {
@@ -269,12 +269,12 @@ Write-Host ""
 # Retrieve and display the application URL
 Write-Host "Retrieving application URL..." -ForegroundColor Yellow
 $ErrorActionPreference = 'Continue'
-$appUrl = az containerapp show `
+$appUrl = (az containerapp show `
     --name $ContainerAppName `
     --resource-group $ResourceGroupName `
     --query "properties.configuration.ingress.fqdn" `
     --output tsv `
-    2>&1 | Where-Object { $_ -notmatch 'cryptography' -and $_ -notmatch 'UserWarning' -and $_ -notmatch 'WARNING:' }
+    2>$null).Trim()
 $ErrorActionPreference = 'Stop'
 
 if ($appUrl) {
