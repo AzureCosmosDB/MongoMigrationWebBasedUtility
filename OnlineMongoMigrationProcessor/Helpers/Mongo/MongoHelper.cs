@@ -662,7 +662,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                         resumeToken = mu.GetResumeToken(false) ?? string.Empty;
                         originalResumeToken = mu.OriginalResumeToken ?? string.Empty;
                         // Prefer ChangeStreamStartedOn; if missing (older builds wiped it during
-                        // a Server→Collection transition), fall back to BulkCopyStartedOn − 2h
+                        // a Server→Collection transition), fall back to BulkCopyStartedOn − 4h
                         // and heal the MU by persisting the recovered value so subsequent rounds,
                         // UI, and other readers see a real timestamp instead of relying on the
                         // fallback. Last resort: DateTime.UtcNow (skips history but won't crash).
@@ -671,7 +671,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                             var recovered = mu.BulkCopyStartedOn?.AddHours(-4) ?? DateTime.UtcNow;
                             mu.ChangeStreamStartedOn = recovered;
                             MigrationJobContext.SaveMigrationUnit(mu, false);
-                            log.WriteLine($"{syncBackPrefix}ChangeStreamStartedOn was missing for {mu.DatabaseName}.{mu.CollectionName}; recovered to {recovered:O} from BulkCopyStartedOn-2h.", LogType.Warning);
+                            log.WriteLine($"{syncBackPrefix}ChangeStreamStartedOn was missing for {mu.DatabaseName}.{mu.CollectionName}; recovered to {recovered:O} from BulkCopyStartedOn-4h.", LogType.Warning);
                         }
                         startedOnUtc = mu.ChangeStreamStartedOn!.Value.ToUniversalTime();
                         start = mu.ChangeStreamStartedOn!.Value.AddMinutes(-15).ToUniversalTime();
@@ -729,28 +729,25 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     }
                        
 
-                    DateTime csLastChecked = useServerLevel ? (job.CSLastChecked ?? DateTime.MinValue) : (mu.CSLastChecked ?? DateTime.MinValue);
-
-                    if (csLastChecked == DateTime.MinValue)
+                    // Bootstrap path: we only reach here when there is no existing resume token
+                    // (or a forced bootstrap was requested). Always honor startedOnUtc as the
+                    // start of replay — do NOT fall back to CSLastChecked. CSLastChecked may
+                    // have been stamped to "near now" by previous (broken) bootstrap attempts
+                    // or by WatchChangeStreamUntilChangeAsync itself, which would silently
+                    // skip all history between startedOnUtc and now. Reset CSLastChecked to
+                    // startedOnUtc so subsequent rounds don't reintroduce the same drift.
+                    if (useServerLevel)
                     {
-                        if(useServerLevel)
-                        {
-                            job.CSLastChecked = startedOnUtc;
-                            log.WriteLine($"{syncBackPrefix}Server-level CSLastChecked set to {job.CSLastChecked}", LogType.Debug);
-
-                        }
-                        else
-                        {
-                            mu.CSLastChecked = startedOnUtc;
-                            log.WriteLine($"{syncBackPrefix}Collection-level CSLastChecked for {mu.DatabaseName}.{mu.CollectionName} set to {mu.CSLastChecked}", LogType.Debug);
-                        }
-                        csLastChecked = startedOnUtc;
-
+                        job.CSLastChecked = startedOnUtc;
+                        log.WriteLine($"{syncBackPrefix}Server-level CSLastChecked reset to {job.CSLastChecked:O} for bootstrap", LogType.Debug);
+                    }
+                    else
+                    {
+                        mu.CSLastChecked = startedOnUtc;
+                        log.WriteLine($"{syncBackPrefix}Collection-level CSLastChecked for {mu.DatabaseName}.{mu.CollectionName} reset to {mu.CSLastChecked:O} for bootstrap", LogType.Debug);
                     }
 
-                    //effective start time is startedOnUtc if its less than 10 minutes from now,else use CSLastChecked
-                    var effctiveStartTime = (DateTime.UtcNow - startedOnUtc).TotalMinutes <= 10 ? startedOnUtc : csLastChecked;
-                                                                                           
+                    var effctiveStartTime = startedOnUtc;
                     var bsonTimestamp = ConvertToBsonTimestamp(effctiveStartTime.ToUniversalTime());
                     options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };
                         
