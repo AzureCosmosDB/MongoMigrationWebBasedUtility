@@ -1311,8 +1311,12 @@ namespace OnlineMongoMigrationProcessor
                                 if (tokenJson != currentResumeToken)
                                 {
                                     SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
-                                    if (ShouldPersistMu(mu.Id, force: false))
-                                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                                    // Idle batches: persist every time the cursor advances.
+                                    // Skipping this (5-min throttle) leaves CursorUtcTimestamp
+                                    // and ResumeToken frozen on disk for hours/days on quiet
+                                    // collections, which both confuses the UI and risks a
+                                    // resume from a very stale position after a crash.
+                                    MigrationJobContext.SaveMigrationUnit(mu, true);
                                 }
                             }
                         }
