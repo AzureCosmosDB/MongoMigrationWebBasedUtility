@@ -119,6 +119,10 @@ namespace OnlineMongoMigrationProcessor
 
         protected bool IsOptimizeForLargeDocsEnabled => _config?.OptimizeForLargeDocs == true;
 
+        // OFLD strips fullDocument/updateDescription so each event is small (~hundreds of bytes).
+        // Without OFLD, FullDocument=UpdateLookup means each event can be up to 16MB; keep batch modest.
+        protected int GetChangeStreamBatchSize() => IsOptimizeForLargeDocsEnabled ? 5000 : 500;
+
         protected ChangeStreamFullDocumentOption GetFullDocumentOption()
         {
             var opt = IsOptimizeForLargeDocsEnabled

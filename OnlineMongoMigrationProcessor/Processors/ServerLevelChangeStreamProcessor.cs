@@ -29,8 +29,6 @@ namespace OnlineMongoMigrationProcessor
         protected OrderedUniqueList<string> _uniqueCollectionKeys;
         private readonly ConcurrentDictionary<string, BsonDocument> _userFilterCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, IMongoCollection<BsonDocument>> _targetCollectionCache = new(StringComparer.OrdinalIgnoreCase);
-        private HashSet<string> _touchedMuIdsInPreviousRound = new(StringComparer.OrdinalIgnoreCase);
-        private bool _hasTouchedBaseline = false;
         private bool _namespaceFilterApplied = false;
 
         private sealed class ServerWatchState
@@ -50,6 +48,29 @@ namespace OnlineMongoMigrationProcessor
 
             /// <summary>Per-namespace raw event capture for the optional [cswatch] diagnostic log.</summary>
             public Dictionary<string, TempRawWatchSummary> RawReceivedByNamespace { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+            // Cursor MoveNextAsync timing: BusyMs = calls that returned events; IdleMs = calls that returned no batch.
+            public long CursorBusyMs { get; set; }
+            public long CursorIdleMs { get; set; }
+            public long CursorBusyCalls { get; set; }
+            public long CursorIdleCalls { get; set; }
+            public long CursorEventsRead { get; set; }
+
+            // Per-round op-type counts (from raw change stream).
+            public long Inserts { get; set; }
+            public long Updates { get; set; }
+            public long Deletes { get; set; }
+            public long Replaces { get; set; }
+            public long Others { get; set; }
+
+            // Wall-clock time spent inside BulkProcessAllChangesAsync this round (all flushes summed).
+            public long FlushMs { get; set; }
+            public long FlushCalls { get; set; }
+
+            // Round-cumulative latency totals (BatchStats are cleared per-MU during flush, so we mirror here).
+            public long RoundTotalReadMs { get; set; }
+            public long RoundTotalWriteMs { get; set; }
+            public long RoundFlushedEventCount { get; set; }
         }
 
         private sealed class MuBatchStats
@@ -209,7 +230,7 @@ namespace OnlineMongoMigrationProcessor
                 // Set up options - use global resume token from MigrationJob
                 var options = new ChangeStreamOptions
                 {
-                    BatchSize = 500,
+                    BatchSize = GetChangeStreamBatchSize(),
                     FullDocument = GetFullDocumentOption(),
                     MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
                 };
@@ -240,7 +261,7 @@ namespace OnlineMongoMigrationProcessor
 
                 var resumeToken = BsonSerializer.Deserialize<BsonDocument>(tokenJson);
 
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), ResumeAfter =resumeToken, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), ResumeAfter =resumeToken, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
 
                 pipelineArray = pipeline.ToArray();
 
@@ -365,7 +386,7 @@ namespace OnlineMongoMigrationProcessor
 
                     var retryOptions = new ChangeStreamOptions
                     {
-                        BatchSize = 500,
+                        BatchSize = GetChangeStreamBatchSize(),
                         FullDocument = GetFullDocumentOption(),
                         StartAtOperationTime = bsonTimestamp,
                         MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds)
@@ -486,6 +507,32 @@ namespace OnlineMongoMigrationProcessor
                         LogTempRawWatchSummary("server-watch", kvp.Key, kvp.Value);
                     }
 
+                    long totalCursorMs = state.CursorBusyMs + state.CursorIdleMs;
+                    double busyPct = totalCursorMs > 0 ? state.CursorBusyMs * 100.0 / totalCursorMs : 0;
+                    double idlePct = totalCursorMs > 0 ? state.CursorIdleMs * 100.0 / totalCursorMs : 0;
+                    double eventsPerSec = state.CursorBusyMs > 0 ? state.CursorEventsRead * 1000.0 / state.CursorBusyMs : 0;
+                    double flushPerEventMs = state.CursorEventsRead > 0 ? (double)state.FlushMs / state.CursorEventsRead : 0;
+
+                    double avgReadMs = state.RoundFlushedEventCount > 0 ? (double)state.RoundTotalReadMs / state.RoundFlushedEventCount : 0;
+                    double avgWriteMs = state.RoundFlushedEventCount > 0 ? (double)state.RoundTotalWriteMs / state.RoundFlushedEventCount : 0;
+
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[cursor] events={state.CursorEventsRead} (i={state.Inserts} u={state.Updates} d={state.Deletes} r={state.Replaces} o={state.Others}) " +
+                        $"busy={state.CursorBusyMs}ms ({busyPct:F0}%, {state.CursorBusyCalls} calls, {eventsPerSec:F0} ev/s) " +
+                        $"idle={state.CursorIdleMs}ms ({idlePct:F0}%, {state.CursorIdleCalls} calls) " +
+                        $"flush={state.FlushMs}ms ({state.FlushCalls} calls, {flushPerEventMs:F2}ms/ev) " +
+                        $"avgRead={avgReadMs:F2}ms/ev avgWrite={avgWriteMs:F2}ms/ev",
+                        LogType.Info);
+
+                    if (state.CursorEventsRead == 0)
+                    {
+                        _log.ShowInMonitor($"{_syncBackPrefix}Server-level watch cycle completed: 0 events in batch.");
+                    }
+                    else
+                    {
+                        _log.ShowInMonitor($"{_syncBackPrefix}Server-level watch cycle completed: {state.CursorEventsRead} events in batch ({eventsPerSec:F0} ev/s while busy).");
+                    }
+
                 }
                 catch (Exception ex)
                 {
@@ -539,11 +586,24 @@ namespace OnlineMongoMigrationProcessor
                 if (!hasBatch)
                 {
                     readStopwatch.Stop();
+                    state.CursorIdleMs += readStopwatch.ElapsedMilliseconds;
+                    state.CursorIdleCalls++;
                     break;
                 }
 
                 readStopwatch.Stop();
                 int currentBatchCount = cursor.Current?.Count() ?? 0;
+                if (currentBatchCount > 0)
+                {
+                    state.CursorBusyMs += readStopwatch.ElapsedMilliseconds;
+                    state.CursorBusyCalls++;
+                    state.CursorEventsRead += currentBatchCount;
+                }
+                else
+                {
+                    state.CursorIdleMs += readStopwatch.ElapsedMilliseconds;
+                    state.CursorIdleCalls++;
+                }
                 double readDurationShareMs = currentBatchCount > 0
                     ? (double)readStopwatch.ElapsedMilliseconds / currentBatchCount
                     : 0;
@@ -585,6 +645,15 @@ namespace OnlineMongoMigrationProcessor
             state.LatestOperationType = change.OperationType;
             state.LatestDocumentKey = change.DocumentKey?.ToJson() ?? string.Empty;
             state.LatestCollectionKey = state.CollectionKey;
+
+            switch (change.OperationType)
+            {
+                case ChangeStreamOperationType.Insert: state.Inserts++; break;
+                case ChangeStreamOperationType.Update: state.Updates++; break;
+                case ChangeStreamOperationType.Delete: state.Deletes++; break;
+                case ChangeStreamOperationType.Replace: state.Replaces++; break;
+                default: state.Others++; break;
+            }
 
             if (!state.RawReceivedByNamespace.TryGetValue(state.CollectionKey, out var rawSummary))
             {
@@ -632,10 +701,17 @@ namespace OnlineMongoMigrationProcessor
             HashSet<string> touchedMuIdsInRound,
             bool forcePersist)
         {
+            var flushStopwatch = Stopwatch.StartNew();
             try
             {
                 await BulkProcessAllChangesAsync(_accumulatedChangesPerCollection, batchCountersInitializedInRound, touchedMuIdsInRound, forcePersist, state);
                 SetJobResumeToken(state.LatestResumeToken, state.LatestTimestamp, state.LatestOperationType, state.LatestDocumentKey, state.LatestCollectionKey);
+                flushStopwatch.Stop();
+                if (flushStopwatch.ElapsedMilliseconds > 0)
+                {
+                    state.FlushMs += flushStopwatch.ElapsedMilliseconds;
+                    state.FlushCalls++;
+                }
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
             {
@@ -738,13 +814,14 @@ namespace OnlineMongoMigrationProcessor
 
         private void SetTouchedCollectionsCSLastChecked(HashSet<string> touchedMuIds)
         {
-            if (touchedMuIds == null || touchedMuIds.Count == 0)
-                return;
-
+            // Stamp CSLastChecked on every queued MU at end of round, regardless of
+            // whether events arrived. Idle rounds still represent "we checked and
+            // there was nothing new" and the UI relies on this timestamp to show
+            // the change stream is alive.
             var now = DateTime.UtcNow;
             bool anyUpdated = false;
 
-            foreach (var muId in touchedMuIds)
+            foreach (var muId in _migrationUnitsToProcess.Keys)
             {
                 var mu = MigrationJobContext.GetMigrationUnit(muId);
                 if (mu == null)
@@ -767,23 +844,14 @@ namespace OnlineMongoMigrationProcessor
         {
             touchedMuIdsInCurrentRound ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            List<string> candidatesToReset;
-
-            if (!_hasTouchedBaseline)
-            {
-                // First round bootstrap: previous touched set is empty, so build candidates from all MUs.
-                candidatesToReset = MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics
-                    .Where(mub => !touchedMuIdsInCurrentRound.Contains(mub.Id))
-                    .Select(mub => mub.Id)
-                    .ToList();
-            }
-            else
-            {
-                // Steady state: only consider collections active in previous round but not current round.
-                candidatesToReset = _touchedMuIdsInPreviousRound
-                    .Where(muId => !touchedMuIdsInCurrentRound.Contains(muId))
-                    .ToList();
-            }
+            // Scan all MUs every round: anything with a non-zero last-batch counter
+            // that wasn't touched this round must be cleared. Relying on the previous
+            // round's touched set alone leaves stale counters whenever tracking is
+            // broken (process restart, mid-round crash, etc.).
+            var candidatesToReset = MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics
+                .Where(mub => !touchedMuIdsInCurrentRound.Contains(mub.Id))
+                .Select(mub => mub.Id)
+                .ToList();
 
             bool anyUpdated = false;
 
@@ -805,9 +873,6 @@ namespace OnlineMongoMigrationProcessor
 
             if (anyUpdated)
                 MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
-
-            _touchedMuIdsInPreviousRound = new HashSet<string>(touchedMuIdsInCurrentRound, StringComparer.OrdinalIgnoreCase);
-            _hasTouchedBaseline = true;
 
             await Task.CompletedTask;
         }
@@ -1005,6 +1070,7 @@ namespace OnlineMongoMigrationProcessor
                     await semaphore.WaitAsync();
                     try
                     {
+                        var perTaskSw = Stopwatch.StartNew();
                         await BulkProcessChangesAsync(
                             mu,
                             targetCollection,
@@ -1013,6 +1079,10 @@ namespace OnlineMongoMigrationProcessor
                             deleteEvents: docs.DocsToBeDeleted.Values.ToList(),
                             accumulatedChangesInColl: docs,
                             batchSize: 500);
+                        perTaskSw.Stop();
+                        // Capture wall-clock write latency at the boundary so it's accurate
+                        // regardless of inner accounting in ParallelWriteHelper.
+                        docs.CSTotaWriteDurationInMS = perTaskSw.ElapsedMilliseconds;
                         return (collectionKey, mu, docs, success: true);
                     }
                     catch (InvalidOperationException ex) when (ex.Message.Contains("CRITICAL"))
@@ -1070,6 +1140,11 @@ namespace OnlineMongoMigrationProcessor
                         stats.TotalWriteDurationMs += docs.CSTotaWriteDurationInMS;
                         stats.LatestOperationType = docs.LatestOperationType;
                         stats.LatestDocumentKey = docs.LatestDocumentKey;
+
+                        // Round-cumulative mirror; survives per-MU clearing of BatchStats during flush.
+                        watchState.RoundTotalReadMs += docs.CSTotalReadDurationInMS;
+                        watchState.RoundTotalWriteMs += docs.CSTotaWriteDurationInMS;
+                        watchState.RoundFlushedEventCount += flushedEventCount;
                     }
 
                     if (forcePersist)
@@ -1148,13 +1223,16 @@ namespace OnlineMongoMigrationProcessor
 
             if (string.IsNullOrEmpty(documentKey))
             {
-                _log.WriteLine($"Auto replay is empty for server-level change stream.");
+                _log.WriteLine($"Auto replay is empty for server-level change stream.", LogType.Debug);
                 return true; // Skip if no document ID is provided
             }
 
             if (string.IsNullOrEmpty(collectionKey))
             {
-                _log.WriteLine($"Auto replay collection key is empty for server-level change stream. Cannot determine target collection.");
+                // Benign: resume info was persisted before ResumeCollectionKey was tracked
+                // (or after a server-level CS reset). Cursor will resume from the token; we just
+                // can't pre-replay this one event. Skip silently.
+                _log.WriteLine($"Auto replay collection key is empty for server-level change stream. Skipping pre-replay; cursor will resume from token.", LogType.Debug);
                 return true; // Skip if no collection key is provided
             }
 

@@ -554,7 +554,7 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.ConfigureChangeStreamOptionsAsync: collectionKey={collectionKey}, seconds={seconds}");
             int maxAwaitSeconds = Math.Max(5, (int)(seconds * 0.8));
-            ChangeStreamOptions options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+            ChangeStreamOptions options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
 
             var (timeStamp, resumeToken, version, startedOn) = GetResumeParameters(mu);
 
@@ -652,30 +652,30 @@ namespace OnlineMongoMigrationProcessor
                 !(MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy && !MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack))
             {
                 var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(timeStamp.ToLocalTime());
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: StartAtOperationTime - Timestamp: {timeStamp} for {collectionKey}", LogType.Debug);
             }
             else if (!string.IsNullOrEmpty(resumeToken) && !mu.ResetChangeStream)
             {
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), ResumeAfter = BsonDocument.Parse(resumeToken), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), ResumeAfter = BsonDocument.Parse(resumeToken), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: ResumeAfter token for {collectionKey}", LogType.Debug);
             }
             else if (string.IsNullOrEmpty(resumeToken) && version.StartsWith("3"))
             {
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: No resume (MongoDB 3.x) for {collectionKey}", LogType.Debug);
             }
             else if (startedOn > DateTime.MinValue && !version.StartsWith("3") && 
                      !(MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy && !MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack))
             {
                 var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(startedOn);
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: StartAtOperationTime from ChangeStreamStartedOn - StartedOn: {startedOn} for {collectionKey}", LogType.Debug);
                 
             }
             else
             {
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
             }
 
             return options;
@@ -1365,6 +1365,10 @@ namespace OnlineMongoMigrationProcessor
                 if (eventCounter > 0)
                 {
                     _log.ShowInMonitor($"{_syncBackPrefix}Watch cycle completed for {changeStreamCollection.CollectionNamespace}: {eventCounter} events processed in batch. Avg Read Latency: {mu.CSAvgReadLatencyInMS} ms | Avg Write Latency: {mu.CSAvgWriteLatencyInMS} ms");
+                }
+                else
+                {
+                    _log.ShowInMonitor($"{_syncBackPrefix}Watch cycle completed for {changeStreamCollection.CollectionNamespace}: 0 events in batch.");
                 }
             }
             catch (Exception ex)
