@@ -882,7 +882,11 @@ namespace OnlineMongoMigrationProcessor
 
                     if (change.OperationType != ChangeStreamOperationType.Delete)
                     {
+                        // Under OFLD, fullDocument is stripped by the $unset pipeline stage and will be hydrated
+                        // before bulk-write. Skip the filter check here when the body is absent; if a user filter
+                        // is configured, it will need to be re-applied post-hydration.
                         if (userFilterDoc.Elements.Count() > 0
+                            && change.FullDocument != null && !change.FullDocument.IsBsonNull
                             && !MongoHelper.CheckForUserFilterMatch(change.FullDocument, userFilterDoc))
                             return (true, counter); // Skip if doesn't match user filter
                     }
