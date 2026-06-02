@@ -106,9 +106,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             foreach (var unit in units)
             {
                 unit.SetResumeToken(syncBack, null);
-                unit.SetOriginalResumeToken(syncBack, null);
                 unit.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
-                unit.SetChangeStreamStartedOn(syncBack, null);
+                
                 unit.SetCSLastChange(syncBack, null, null);
                 unit.ClearResumeDocumentInfo(syncBack);
                 unit.ResetChangeStreamCounters(syncBack);
@@ -126,6 +125,75 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 log.WriteLine(
                     $"{syncBackPrefix}Server-level change stream reset requested. " +
                     $"Server-level change stream start time set to job StartedOn at {resetStartedOn:O}.",
+                    LogType.Warning);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Handles the Server -> Collection change stream scope transition for an existing
+        /// job. Clears any server-level resume state on the job and performs a per-collection
+        /// change stream reset (equivalent to calling <see cref="Helpers.Mongo.MongoHelper.ResetCS"/>
+        /// for each migration unit) so that collection-level processing restarts cleanly
+        /// from the job's StartedOn time.
+        /// </summary>
+        public static bool TransitionServerToCollectionResumeCheckpoints(Log log, MigrationJob job, bool syncBack)
+        {
+            if (job == null || job.ChangeStreamLevel != ChangeStreamLevel.Collection)
+                return false;
+
+            var units = Helper.GetMigrationUnitsToMigrate(job)
+                .Where(Helper.IsMigrationUnitValid)
+                .ToList();
+
+            var transitionStartedOn = job.StartedOn?.ToUniversalTime() ?? DateTime.UtcNow;
+
+            // Clear job-level (server-level) change stream state - it no longer applies.
+            job.SetResumeToken(syncBack, null);
+            job.SetOriginalResumeToken(syncBack, null);
+            job.SetInitialDocumenReplayed(syncBack, false);
+            job.SetChangeStreamStartedOn(syncBack, null);
+            job.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
+            job.SetTransitionBootstrapPending(syncBack, false);
+            job.SetServerLevelChangeStreamResetPending(syncBack, false);
+            if (!syncBack)
+                job.CSLastChecked = DateTime.MinValue;
+
+            // Reset change stream for each collection (equivalent to MongoHelper.ResetCS per unit).
+            // Pin each unit's ChangeStreamStartedOn to its own BulkCopyStartedOn - 4h so the
+            // collection-level bootstrap opens the change stream just before this collection's
+            // bulk copy began. If left null (the typical state under server-level), the
+            // bootstrap falls back to DateTime.UtcNow, stamps CursorUtcTimestamp to "now",
+            // and later real changes (older than now) trigger the
+            // "Timestamp mismatch: Old is newer than New" guard.
+            foreach (var unit in units)
+            {
+                unit.SetResumeToken(syncBack, null);
+                unit.SetOriginalResumeToken(syncBack, null);
+                unit.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
+                if (unit.BulkCopyStartedOn.HasValue && unit.BulkCopyStartedOn.Value != DateTime.MinValue)
+                {
+                    unit.SetChangeStreamStartedOn(syncBack, unit.BulkCopyStartedOn.Value.ToUniversalTime().AddHours(-4));
+                }
+                unit.SetCSLastChange(syncBack, null, null);
+                unit.ClearResumeDocumentInfo(syncBack);
+                unit.ResetChangeStreamCounters(syncBack);
+                unit.CSLastChecked = DateTime.MinValue;
+                unit.ResetChangeStream = true;
+
+                MigrationJobContext.SaveMigrationUnit(unit, false);
+            }
+
+            MigrationJobContext.SaveMigrationJob(job);
+
+            if (log != null)
+            {
+                var syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
+                log.WriteLine(
+                    $"{syncBackPrefix}Change stream scope transition detected (Server -> Collection). " +
+                    $"Cleared server-level change stream state and reset change stream for {units.Count} collection(s). " +
+                    $"Each collection-level change stream will resume from its own BulkCopyStartedOn - 4h.",
                     LogType.Warning);
             }
 

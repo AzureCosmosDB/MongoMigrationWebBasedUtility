@@ -230,11 +230,12 @@
         if (MigrationUnits == null)
             return new List<MigrationUnit>();
 
-        var processingSyncBack = MigrationJobContext.CurrentlyActiveJob?.ProcessingSyncBack ?? false;
-        
-        return MigrationUnits
-            .Where(mu => !string.IsNullOrEmpty(mu.GetResumeToken(processingSyncBack)))
-            .ToList();
+        // Show every valid unit in the job. Per-unit resume tokens may be empty under
+        // server-level CS (job-level token only) or right after a Server->Collection
+        // transition (tokens cleared), and BulkCopyStartedOn may be unset for units
+        // still queued behind the worker pool — none of which should hide them from
+        // the Reset CS picker.
+        return MigrationUnits.ToList();
     }
 
     private void RefreshPaginationHelper()

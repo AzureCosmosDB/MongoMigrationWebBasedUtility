@@ -30,6 +30,28 @@ namespace OnlineMongoMigrationProcessor
         private MongoClient _changeStreamMongoClient;
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _flushLocks = new ConcurrentDictionary<string, SemaphoreSlim>();
 
+        // Bounds crash-recovery staleness for per-MU disk writes. Mid-flush saves are
+        // promoted to a real persist at most every PerMuPersistInterval; final flush
+        // (and explicit force callers) always persist.
+        private readonly ConcurrentDictionary<string, DateTime> _lastPerMuPersistUtc = new ConcurrentDictionary<string, DateTime>();
+        private static readonly TimeSpan PerMuPersistInterval = TimeSpan.FromMinutes(5);
+
+        private bool ShouldPersistMu(string muId, bool force)
+        {
+            if (force)
+            {
+                _lastPerMuPersistUtc[muId] = DateTime.UtcNow;
+                return true;
+            }
+            var last = _lastPerMuPersistUtc.GetOrAdd(muId, _ => DateTime.UtcNow);
+            if ((DateTime.UtcNow - last) >= PerMuPersistInterval)
+            {
+                _lastPerMuPersistUtc[muId] = DateTime.UtcNow;
+                return true;
+            }
+            return false;
+        }
+
         public CollectionLevelChangeStreamProcessor(Log log, MongoClient sourceClient, MongoClient targetClient, ActiveMigrationUnitsCache muCache, MigrationSettings config, bool syncBack = false, MigrationWorker? migrationWorker = null)
             : base(log, sourceClient, targetClient, muCache, config, syncBack, migrationWorker)
         {
@@ -554,7 +576,7 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.ConfigureChangeStreamOptionsAsync: collectionKey={collectionKey}, seconds={seconds}");
             int maxAwaitSeconds = Math.Max(5, (int)(seconds * 0.8));
-            ChangeStreamOptions options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+            ChangeStreamOptions options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
 
             var (timeStamp, resumeToken, version, startedOn) = GetResumeParameters(mu);
 
@@ -652,30 +674,30 @@ namespace OnlineMongoMigrationProcessor
                 !(MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy && !MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack))
             {
                 var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(timeStamp.ToLocalTime());
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: StartAtOperationTime - Timestamp: {timeStamp} for {collectionKey}", LogType.Debug);
             }
             else if (!string.IsNullOrEmpty(resumeToken) && !mu.ResetChangeStream)
             {
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, ResumeAfter = BsonDocument.Parse(resumeToken), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), ResumeAfter = BsonDocument.Parse(resumeToken), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: ResumeAfter token for {collectionKey}", LogType.Debug);
             }
             else if (string.IsNullOrEmpty(resumeToken) && version.StartsWith("3"))
             {
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: No resume (MongoDB 3.x) for {collectionKey}", LogType.Debug);
             }
             else if (startedOn > DateTime.MinValue && !version.StartsWith("3") && 
                      !(MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy && !MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack))
             {
                 var bsonTimestamp = MongoHelper.ConvertToBsonTimestamp(startedOn);
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), StartAtOperationTime = bsonTimestamp, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
                 _log.WriteLine($"{_syncBackPrefix}Resume strategy: StartAtOperationTime from ChangeStreamStartedOn - StartedOn: {startedOn} for {collectionKey}", LogType.Debug);
                 
             }
             else
             {
-                options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
+                options = new ChangeStreamOptions { BatchSize = GetChangeStreamBatchSize(), FullDocument = GetFullDocumentOption(), MaxAwaitTime = TimeSpan.FromSeconds(maxAwaitSeconds) };
             }
 
             return options;
@@ -692,6 +714,18 @@ namespace OnlineMongoMigrationProcessor
             await flushLock.WaitAsync();
             try
             {
+                if (IsOptimizeForLargeDocsEnabled)
+                {
+                    // Re-fetch document bodies from source (the side we tail) by _id
+                    // before bulk writing, since the projected change-stream events
+                    // don't carry fullDocument.
+                    var hydrationSourceClient = _syncBack ? _targetClient : _sourceClient;
+                    var hydrationDbName = _syncBack ? mu.GetEffectiveTargetDatabaseName() : mu.DatabaseName;
+                    var hydrationCollName = _syncBack ? mu.GetEffectiveTargetCollectionName() : mu.CollectionName;
+                    var hydrationCollection = hydrationSourceClient.GetDatabase(hydrationDbName).GetCollection<BsonDocument>(hydrationCollName);
+                    await HydrateFullDocumentsAsync(hydrationCollection, accumulatedChangesInColl);
+                }
+
                 // Flush accumulated changes - convert Dictionary.Values to List for BulkProcessChangesAsync
                 int failureCount = await BulkProcessChangesAsync(
                     mu,
@@ -728,7 +762,8 @@ namespace OnlineMongoMigrationProcessor
                         {
                             SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
                             mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
-                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            if (ShouldPersistMu(mu.Id, isFinalFlush))
+                                MigrationJobContext.SaveMigrationUnit(mu, true);
                         }
                         else
                         {
@@ -944,6 +979,30 @@ namespace OnlineMongoMigrationProcessor
                 pipeline = new List<BsonDocument>();
             }
 
+            if (IsOptimizeForLargeDocsEnabled)
+            {
+                // Append a minimal $unset that drops only the two heavyweight fields
+                // (fullDocument, updateDescription). All other event fields — including
+                // resume token (_id), wallTime, lsid, txnNumber etc. — are left intact
+                // so the C# driver can still deserialize the event correctly.
+                // The flush path re-fetches the document body from source before bulk writing.
+                pipeline.Add(OptimizeForLargeDocsProjectStage);
+                _log.WriteLine($"{_syncBackPrefix}[OFLD] CreateChangeStreamPipeline (collection): appended $unset[fullDocument,updateDescription], stages={pipeline.Count}", LogType.Debug);
+
+                // Append $changeStreamSplitLargeEvent (Mongo 6.0.9+/7.0+) so a single
+                // oversized oplog entry is split into <16 MB fragments at the shard,
+                // avoiding "BSONObj size ... is invalid" getMore failures.
+                if (IsSplitLargeEventSupported)
+                {
+                    pipeline.Add(ChangeStreamSplitLargeEventStage);
+                    _log.WriteLine($"{_syncBackPrefix}[OFLD] CreateChangeStreamPipeline (collection): appended $changeStreamSplitLargeEvent, stages={pipeline.Count}", LogType.Debug);
+                }
+            }
+            else
+            {
+                _log.WriteLine($"{_syncBackPrefix}[OFLD] CreateChangeStreamPipeline (collection): OptimizeForLargeDocs OFF, stages={pipeline.Count}", LogType.Debug);
+            }
+
             return pipeline.ToArray();
         }
 
@@ -1117,6 +1176,8 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.ProcessMongoDB4xChangeStreamAsync: collectionKey={collectionKey}, seconds={seconds}");
 
+            var rawWatchSummary = CreateTempRawWatchSummary();
+
             using (cursor)
             {
                 try
@@ -1141,6 +1202,9 @@ namespace OnlineMongoMigrationProcessor
 
                         foreach (var change in cursor.Current)
                         {
+                            // Capture every raw event as soon as it is read from the cursor.
+                            AddTempRawReceivedEvent(rawWatchSummary, change);
+
                             if (cancellationToken.IsCancellationRequested || ExecutionCancelled)
                             {
                                 MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Change stream processing cancelled for {changeStreamCollection!.CollectionNamespace}");
@@ -1207,6 +1271,8 @@ namespace OnlineMongoMigrationProcessor
                 {
                     readStopwatch.Stop();
 
+                    LogTempRawWatchSummary("collection-watch", collectionKey, rawWatchSummary);
+
                     // Flush pending changes FIRST, while mu still carries the timestamp
                     // from actual change events.  The postBatchResumeToken advancement
                     // below uses DateTime.UtcNow, which would be newer than the change-
@@ -1238,16 +1304,26 @@ namespace OnlineMongoMigrationProcessor
                         try
                         {
                             var postBatchToken = cursor.GetResumeToken();
-                            if (postBatchToken != null)
+                            string? tokenJson = postBatchToken?.ToJson();
+                            var (_, currentResumeToken, _, _) = GetResumeParameters(mu);
+
+                            // Always stamp CursorUtcTimestamp = now on idle cycles so the
+                            // UI reflects that the watch is alive. On a truly idle cursor
+                            // postBatchResumeToken often equals the ResumeAfter token we
+                            // started with, so the token comparison alone would never
+                            // trigger a save and the timestamp would stay frozen at
+                            // ChangeStreamStartedOn for hours.
+                            if (!string.IsNullOrEmpty(tokenJson) && tokenJson != currentResumeToken)
                             {
-                                string tokenJson = postBatchToken.ToJson();
-                                var (currentTimestamp, currentResumeToken, _, _) = GetResumeParameters(mu);
-                                if (tokenJson != currentResumeToken)
-                                {
-                                    SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
-                                    MigrationJobContext.SaveMigrationUnit(mu, true);
-                                }
+                                SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
                             }
+                            else
+                            {
+                                mu.SetCursorUtcTimestamp(_syncBack, DateTime.UtcNow);
+                            }
+                            // Persist every idle cycle — payload is tiny (token + timestamp)
+                            // and skipping the write hides the cursor's progress for hours.
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
                         }
                         catch (Exception ex)
                         {
@@ -1318,6 +1394,7 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 MigrationJobContext.SaveMigrationUnit(mu,true);
+                _lastPerMuPersistUtc[mu.Id] = DateTime.UtcNow;
                 
                 // Update the dictionary with the latest CSNormalizedUpdatesInLastBatch for accurate sorting
                 if (_migrationUnitsToProcess.ContainsKey(mu.Id))
@@ -1331,6 +1408,10 @@ namespace OnlineMongoMigrationProcessor
                 if (eventCounter > 0)
                 {
                     _log.ShowInMonitor($"{_syncBackPrefix}Watch cycle completed for {changeStreamCollection.CollectionNamespace}: {eventCounter} events processed in batch. Avg Read Latency: {mu.CSAvgReadLatencyInMS} ms | Avg Write Latency: {mu.CSAvgWriteLatencyInMS} ms");
+                }
+                else
+                {
+                    _log.ShowInMonitor($"{_syncBackPrefix}Watch cycle completed for {changeStreamCollection.CollectionNamespace}: 0 events in batch.");
                 }
             }
             catch (Exception ex)
@@ -1426,10 +1507,24 @@ namespace OnlineMongoMigrationProcessor
            
             try
             {
+                // When $changeStreamSplitLargeEvent fired on the shard, only the final
+                // fragment carries the complete event. Earlier fragments share the same
+                // documentKey/operationType but have partial bodies; skip them. The
+                // cursor advances naturally; if the process crashes mid-batch, restart
+                // from the last persisted token will simply re-emit and re-skip them.
+                if (!IsFinalFragment(change))
+                {
+                    return true;
+                }
+
                 //check if user filter condition is met
                 if (change.OperationType != ChangeStreamOperationType.Delete)
                 {
+                    // Under OFLD, fullDocument is stripped by the $unset pipeline stage and will be hydrated
+                    // before bulk-write. Skip the filter check here when the body is absent; if a user filter
+                    // is configured, it will need to be re-applied post-hydration.
                     if (userFilterDoc.Elements.Count() > 0
+                        && change.FullDocument != null && !change.FullDocument.IsBsonNull
                         && !MongoHelper.CheckForUserFilterMatch(change.FullDocument, userFilterDoc))
                         return true;
                 }
@@ -1477,17 +1572,22 @@ namespace OnlineMongoMigrationProcessor
                 {
                     case ChangeStreamOperationType.Insert:
                         IncrementEventCounter(mu, change.OperationType);
-                        // Accumulate inserts even in simulation mode so counters get updated
-                        if (change.FullDocument != null && !change.FullDocument.IsBsonNull)
+                        // With OFLD, fullDocument is stripped by the $unset pipeline stage and will be re-fetched
+                        // by HydrateFullDocumentsAsync at flush time. Without OFLD, a missing fullDocument on an
+                        // insert is unexpected, so we skip it as before.
+                        if (IsOptimizeForLargeDocsEnabled || (change.FullDocument != null && !change.FullDocument.IsBsonNull))
                             accumulatedChangesInColl.AddInsert(change);
                         break;
                     case ChangeStreamOperationType.Update:
                     case ChangeStreamOperationType.Replace:
                         IncrementEventCounter(mu, change.OperationType);
                         var filter = Builders<BsonDocument>.Filter.Eq("_id", idValue);
-                        if (change.FullDocument == null || change.FullDocument.IsBsonNull)
+                        if (!IsOptimizeForLargeDocsEnabled && (change.FullDocument == null || change.FullDocument.IsBsonNull))
                         {
-                            // Skip actual delete operation in simulation mode
+                            // Without OFLD we use FullDocument:UpdateLookup, so a null body means the doc was
+                            // already deleted on source by the time the lookup ran. With OFLD the pipeline strips
+                            // fullDocument unconditionally, so we must NOT treat that as a source delete; hydration
+                            // will fetch the current source body at flush time instead.
                             if (!isWriteSimulated)
                             {
                                 _log.WriteLine($"{_syncBackPrefix}Processing {change.OperationType} operation for {collNameSpace} with _id {idValue}. No document found on source.", LogType.Info);

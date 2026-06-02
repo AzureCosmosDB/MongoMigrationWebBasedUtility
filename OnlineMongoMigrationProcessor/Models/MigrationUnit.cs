@@ -56,7 +56,9 @@ namespace OnlineMongoMigrationProcessor
 
         public CollectionStatus SourceStatus { get; set; }
         public bool ResetChangeStream { get; set; }
-        public DataType? DataTypeFor_Id { get; set; } = null;
+        // Set to true when partitioning detected exactly one _id BSON type (or the user-pinned one),
+        // letting downstream readers omit the $type predicate.
+        public bool SkipDataTypeFilterForId { get; set; }
         public DateTime? CSLastChangeUTCTime { get; set; }
         public DateTime? SyncBackCSLastChangeUTCTime { get; set; }
 
@@ -375,7 +377,7 @@ namespace OnlineMongoMigrationProcessor
             mub.RestoreComplete = this.RestoreComplete;
             mub.SourceStatus = this.SourceStatus;
             mub.ResetChangeStream = this.ResetChangeStream;
-            mub.DataTypeFor_Id = this.DataTypeFor_Id;
+            mub.SkipDataTypeFilterForId = this.SkipDataTypeFilterForId;
             mub.SkippedDueToMaxRetries = this.SkippedDueToMaxRetries;
             mub.FailedOperation = this.FailedOperation;
             mub.CSLastChangeUTCTime = this.CSLastChangeUTCTime;

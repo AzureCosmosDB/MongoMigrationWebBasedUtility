@@ -44,9 +44,9 @@ namespace OnlineMongoMigrationProcessor
         /// <param name="idField">The field used as the partition key.</param>
         /// <param name="partitionCount">The number of desired partitions.</param>
         /// <returns>A list of partition boundaries.</returns>
-        public static ChunkBoundaries? CreatePartitions(Log log, bool optimizeForMongoDump, IMongoCollection<BsonDocument> collection, int chunkCount, DataType dataType, long minDocsPerChunk, CancellationToken cts, MigrationUnit migrationUnit, bool optimizeForObjectId, MigrationSettings config, out long docCountByType)
+        public static ChunkBoundaries? CreatePartitions(Log log, bool optimizeForMongoDump, IMongoCollection<BsonDocument> collection, int chunkCount, DataType dataType, long minDocsPerChunk, CancellationToken cts, MigrationUnit migrationUnit, bool optimizeForObjectId, MigrationSettings config, bool forceSkipDataTypeFilter, out long docCountByType)
         {
-            MigrationJobContext.AddVerboseLog($"SamplePartitioner.CreatePartitions: collection={collection.CollectionNamespace}, chunkCount={chunkCount}, dataType={dataType}, optimizeForObjectId={optimizeForObjectId}");
+            MigrationJobContext.AddVerboseLog($"SamplePartitioner.CreatePartitions: collection={collection.CollectionNamespace}, chunkCount={chunkCount}, dataType={dataType}, optimizeForObjectId={optimizeForObjectId}, forceSkipDataTypeFilter={forceSkipDataTypeFilter}");
 
             int segmentCount = 1;
             int minDocsPerSegment = 10000;
@@ -63,13 +63,13 @@ namespace OnlineMongoMigrationProcessor
                 adjustedMaxSamples = GetMaxSamples() * 1000;
             }
 
-            // Determine if we should skip DataType filtering
-            bool skipDataTypeFilter = migrationUnit?.DataTypeFor_Id.HasValue == true;
+            // When only one data type exists in the collection, the caller asks us to skip the $type filter.
+            bool skipDataTypeFilter = forceSkipDataTypeFilter;
             ChunkBoundaries? resultBoundaries = null;
 
             if (skipDataTypeFilter)
             {
-                log.ShowInMonitor($"Skipping DataType filtering for {collection.CollectionNamespace} as DataTypeFor_Id is specified: {migrationUnit!.DataTypeFor_Id!.Value}");
+                log.WriteLine($"Skipping DataType filtering for {collection.CollectionNamespace} as only one _id type is present: {dataType}", LogType.Info);
             }
             else
             {

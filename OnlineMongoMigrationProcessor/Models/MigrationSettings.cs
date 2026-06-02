@@ -13,7 +13,6 @@ namespace OnlineMongoMigrationProcessor
         public string? MongoToolsDownloadUrl { get; set; }
         public string? MongoDumpToolPath { get; set; }
         public string? MongoRestoreToolPath { get; set; }
-        public bool ReadBinary { get; set; }
         public int LogPageSize { get; set; }
         public long ChunkSizeInMb { get; set; }
         public int ChangeStreamMaxDocsInBatch { get; set; }
@@ -29,7 +28,8 @@ namespace OnlineMongoMigrationProcessor
         public bool IgnoreDuplicatesAndContinueRestore { get; set; }
         public int ContinuousDuplicateThresholdInSeconds { get; set; }
         public bool EnableCSWatchLog { get; set; }
-        
+        public bool OptimizeForLargeDocs { get; set; }
+
         private string _filePath = string.Empty;
 
         public MigrationSettings()
@@ -65,7 +65,6 @@ namespace OnlineMongoMigrationProcessor
                         // Preserve existing behavior when this field is missing or document is malformed.
                     }
 
-                    ReadBinary = loadedObject.ReadBinary;
                     MongoToolsDownloadUrl = loadedObject.MongoToolsDownloadUrl;
                     MongoDumpToolPath = loadedObject.MongoDumpToolPath;
                     MongoRestoreToolPath = loadedObject.MongoRestoreToolPath;
@@ -85,7 +84,8 @@ namespace OnlineMongoMigrationProcessor
                     IgnoreDuplicatesAndContinueRestore = loadedObject.IgnoreDuplicatesAndContinueRestore;
                     ContinuousDuplicateThresholdInSeconds = loadedObject.ContinuousDuplicateThresholdInSeconds <= 0 ? 300 : loadedObject.ContinuousDuplicateThresholdInSeconds;
                     EnableCSWatchLog = loadedObject.EnableCSWatchLog;
-                    
+                    OptimizeForLargeDocs = loadedObject.OptimizeForLargeDocs;
+
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
                         ChangeStreamMaxDocsInBatch = 10000;
@@ -99,7 +99,6 @@ namespace OnlineMongoMigrationProcessor
             }
             if (!initialized)
             {
-                ReadBinary = false;
                 MongoToolsDownloadUrl = "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.10.0.zip";
                 MongoDumpToolPath = string.Empty;
                 MongoRestoreToolPath = string.Empty;
@@ -119,6 +118,7 @@ namespace OnlineMongoMigrationProcessor
                 IgnoreDuplicatesAndContinueRestore = false;
                 ContinuousDuplicateThresholdInSeconds = 300;
                 EnableCSWatchLog = false;
+                OptimizeForLargeDocs = false;
             }
         }
 

@@ -19,9 +19,7 @@ namespace OnlineMongoMigrationProcessor
 
         public string? SourceServerVersion { get; set; }
         public string? NameSpaces { get; set; }
-        
-        public bool AllCollectionsUseObjectId { get; set; }
-        
+
         public DateTime? StartedOn { get; set; }
         public bool IsCompleted { get; set; }
 

@@ -113,14 +113,6 @@
                             }
                         }
                     </div>
-                    <div class="mb-3 checkbox-container">
-                        <div class="checkbox-group">
-                            <label title="Check this if all collections in your migration use MongoDB ObjectId for the _id field. This optimizes partitioning and improves migration performance.">
-                                <input type="checkbox" id="allCollectionsUseObjectId" disabled="@(!NewMode || jobType == JobType.RUOptimizedCopy)" @bind="allCollectionsUseObjectId" />
-                                All collections use ObjectId for the _id field
-                            </label>
-                        </div>
-                    </div>
                     <div class="mb-3">
                         <label for="migration-mode" class="form-label" title="Online migration allows live data replication during the process.">
                             Migration Mode
@@ -154,7 +146,7 @@
                             Change Stream Scope
                         </label>                
                         <select id="change-stream-scope" value="@SelectedChangeStreamScope" class="form-select" @onchange="OnChangeStreamScopeChanged" disabled="@(cdcMode == CDCMode.Offline || jobType == JobType.RUOptimizedCopy)">
-                            <option value="Collection" disabled="@(!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server)" title="Monitor changes at the collection level. Use when collect count is less than 200">Collection</option>
+                            <option value="Collection" title="Monitor changes at the collection level. Use when collect count is less than 200">Collection</option>
                             <option value="Server" title="Monitor changes at the server level across all databases. Recommended when migration hundreds of collections.">Server</option>
                         </select>
                     </div>
@@ -162,6 +154,12 @@
                     {
                         <div class="alert alert-warning mt-2">
                             <strong>Warning:</strong> Switching Change Stream Scope from Collection to Server for an existing job cannot be reversed, and change processing will be pushed back to the earliest change since the job was created. Before submitting, verify the oplog has not rotated past that start point.
+                        </div>
+                    }
+                    @if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server && changeStreamLevel == ChangeStreamLevel.Collection)
+                    {
+                        <div class="alert alert-warning mt-2">
+                            <strong>Warning:</strong> Switching Change Stream Scope from Server to Collection will reset the change stream for every collection in this job (equivalent to running Reset Change Stream on each). Processing will restart from when each collection was added to the job. Before submitting, verify the oplog has not rotated past those start points.
                         </div>
                     }
                     <div class="mb-3">
@@ -277,7 +275,6 @@
     private bool isSimulatedRun = false; // Variable to track the dummy run option
     private ChangeStreamMode changeStreamMode = ChangeStreamMode.Delayed; // Change stream processing mode
     private bool enableSyncBack = false;// if the migration is online, reverse sync can be enabled
-    private bool allCollectionsUseObjectId = false; // if all collections use ObjectId for the _id field
     private bool skipIndexes = false;// create indexes on Target
     private bool appendMode = true;// if the target collection exists, it will be deleted
     private bool enableParallelProcessing = true; // Enable parallel processing for dump and restore operations
@@ -430,15 +427,6 @@
     private void OnChangeStreamScopeChanged(ChangeEventArgs e)
     {
         var val = e?.Value?.ToString() ?? "Collection";
-
-        // Existing jobs support one-way transition only: Collection -> Server.
-        if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server && val == "Collection")
-        {
-            errorMessage = "Existing jobs can only change Change Stream Scope from Collection to Server.";
-            SelectedChangeStreamScope = "Server";
-            changeStreamLevel = ChangeStreamLevel.Server;
-            return;
-        }
 
         SelectedChangeStreamScope = val;
         changeStreamLevel = val == "Server" ? ChangeStreamLevel.Server : ChangeStreamLevel.Collection;
@@ -687,7 +675,6 @@
             SyncBackEnabled = (enableSyncBack && cdcMode != CDCMode.Offline && !isSimulatedRun) ? true : false,
             ChangeStreamMode = changeStreamMode,
             ChangeStreamLevel = changeStreamLevel,
-            AllCollectionsUseObjectId = allCollectionsUseObjectId,
             LogLevel = logLevel,
             MigrationUnitBasics = new List<MigrationUnitBasic>()
         };

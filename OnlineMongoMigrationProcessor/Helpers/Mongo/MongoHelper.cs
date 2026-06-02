@@ -610,6 +610,20 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 mu.OriginalResumeToken = null;
             mu.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
 
+            // Pin the change stream start so the bootstrap opens the cursor at a known
+            // historical time, not "now". Without this, units that never had
+            // ChangeStreamStartedOn populated (e.g. after a Server -> Collection
+            // transition) fall back to DateTime.UtcNow in the bootstrap path, which stamps
+            // CursorUtcTimestamp to "now" and then rejects real historical changes with
+            // a "Timestamp mismatch: Old is newer than New" exception. Anchor on this
+            // collection's BulkCopyStartedOn - 4h so the cursor never starts before the
+            // collection's own bulk copy began.
+            if (mu.BulkCopyStartedOn.HasValue && mu.BulkCopyStartedOn.Value != DateTime.MinValue)
+            {
+                mu.SetChangeStreamStartedOn(syncBack, mu.BulkCopyStartedOn.Value.ToUniversalTime().AddHours(-4));
+            }
+            mu.CSLastChecked = DateTime.MinValue;
+
             mu.SetCSLastChange(syncBack, null, null);
             ResetCounters(mu, syncBack);
         }
@@ -661,8 +675,20 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                         resumeToken = mu.GetResumeToken(false) ?? string.Empty;
                         originalResumeToken = mu.OriginalResumeToken ?? string.Empty;
-                        startedOnUtc = mu.GetChangeStreamStartedOn(false)?.ToUniversalTime() ?? DateTime.UtcNow;
-                        start = (mu.ChangeStreamStartedOn ?? DateTime.UtcNow).AddMinutes(-15).ToUniversalTime();
+                        // Prefer ChangeStreamStartedOn; if missing (older builds wiped it during
+                        // a Server→Collection transition), fall back to BulkCopyStartedOn − 4h
+                        // and heal the MU by persisting the recovered value so subsequent rounds,
+                        // UI, and other readers see a real timestamp instead of relying on the
+                        // fallback. Last resort: DateTime.UtcNow (skips history but won't crash).
+                        if (mu.ChangeStreamStartedOn == null)
+                        {
+                            var recovered = mu.BulkCopyStartedOn?.AddHours(-4) ?? DateTime.UtcNow;
+                            mu.ChangeStreamStartedOn = recovered;
+                            MigrationJobContext.SaveMigrationUnit(mu, false);
+                            log.WriteLine($"{syncBackPrefix}ChangeStreamStartedOn was missing for {mu.DatabaseName}.{mu.CollectionName}; recovered to {recovered:O} from BulkCopyStartedOn-4h.", LogType.Warning);
+                        }
+                        startedOnUtc = mu.ChangeStreamStartedOn!.Value.ToUniversalTime();
+                        start = mu.ChangeStreamStartedOn!.Value.AddMinutes(-15).ToUniversalTime();
                     }
                     if (syncBack)
                     {
@@ -717,28 +743,25 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     }
                        
 
-                    DateTime csLastChecked = useServerLevel ? (job.CSLastChecked ?? DateTime.MinValue) : (mu.CSLastChecked ?? DateTime.MinValue);
-
-                    if (csLastChecked == DateTime.MinValue)
+                    // Bootstrap path: we only reach here when there is no existing resume token
+                    // (or a forced bootstrap was requested). Always honor startedOnUtc as the
+                    // start of replay — do NOT fall back to CSLastChecked. CSLastChecked may
+                    // have been stamped to "near now" by previous (broken) bootstrap attempts
+                    // or by WatchChangeStreamUntilChangeAsync itself, which would silently
+                    // skip all history between startedOnUtc and now. Reset CSLastChecked to
+                    // startedOnUtc so subsequent rounds don't reintroduce the same drift.
+                    if (useServerLevel)
                     {
-                        if(useServerLevel)
-                        {
-                            job.CSLastChecked = startedOnUtc;
-                            log.WriteLine($"{syncBackPrefix}Server-level CSLastChecked set to {job.CSLastChecked}", LogType.Debug);
-
-                        }
-                        else
-                        {
-                            mu.CSLastChecked = startedOnUtc;
-                            log.WriteLine($"{syncBackPrefix}Collection-level CSLastChecked for {mu.DatabaseName}.{mu.CollectionName} set to {mu.CSLastChecked}", LogType.Debug);
-                        }
-                        csLastChecked = startedOnUtc;
-
+                        job.CSLastChecked = startedOnUtc;
+                        log.WriteLine($"{syncBackPrefix}Server-level CSLastChecked reset to {job.CSLastChecked:O} for bootstrap", LogType.Debug);
+                    }
+                    else
+                    {
+                        mu.CSLastChecked = startedOnUtc;
+                        log.WriteLine($"{syncBackPrefix}Collection-level CSLastChecked for {mu.DatabaseName}.{mu.CollectionName} reset to {mu.CSLastChecked:O} for bootstrap", LogType.Debug);
                     }
 
-                    //effective start time is startedOnUtc if its less than 10 minutes from now,else use CSLastChecked
-                    var effctiveStartTime = (DateTime.UtcNow - startedOnUtc).TotalMinutes <= 10 ? startedOnUtc : csLastChecked;
-                                                                                           
+                    var effctiveStartTime = startedOnUtc;
                     var bsonTimestamp = ConvertToBsonTimestamp(effctiveStartTime.ToUniversalTime());
                     options = new ChangeStreamOptions { BatchSize = 500, FullDocument = ChangeStreamFullDocumentOption.UpdateLookup, StartAtOperationTime = bsonTimestamp };
                         
@@ -950,10 +973,18 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                             var currentToken = mu.GetResumeToken(syncBack);
                             if (string.IsNullOrEmpty(currentToken))
                             {
-                                SetResumeParameters(mu, DateTime.UtcNow, postBatchTokenJson, syncBack);
+                                // postBatchResumeToken from an idle cursor reflects the cursor's
+                                // StartAtOperationTime, not "now". Stamping CursorUtcTimestamp =
+                                // DateTime.UtcNow here creates a desync where the token points to
+                                // the past but the timestamp says "now", which later trips the
+                                // "don't go backwards" guard in the collection-level processor.
+                                var tokenTs = options?.StartAtOperationTime != null
+                                    ? BsonTimestampToUtcDateTime(options.StartAtOperationTime)
+                                    : DateTime.UtcNow;
+                                SetResumeParameters(mu, tokenTs, postBatchTokenJson, syncBack);
                                 mu.SetInitialDocumenReplayed(syncBack, true); // No change to replay
                                 MigrationJobContext.SaveMigrationUnit(mu, true);
-                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected, syncBack={syncBack})");
+                                MigrationJobContext.AddVerboseLog($"Collection-level postBatchResumeToken captured for {mu.DatabaseName}.{mu.CollectionName} (no changes detected, syncBack={syncBack}, ts={tokenTs:O})");
                             }
                         }
                     }
@@ -1369,8 +1400,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
         public static string GenerateQueryString(BsonValue? gte, BsonValue? lt, BsonValue? lte, DataType dataType, BsonDocument? userFilterDoc, MigrationUnit? migrationUnit = null)
         {
-            // Check if we should skip DataType filter when DataTypeFor_Id is specified
-            bool skipDataTypeFilter = migrationUnit?.DataTypeFor_Id.HasValue == true;
+            // Skip the $type predicate when the migration unit's _id has only one BSON type.
+            bool skipDataTypeFilter = migrationUnit?.SkipDataTypeFilterForId == true;
 
             // Build the _id sub-object
             var idConditions = new List<string>();
@@ -1559,18 +1590,19 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             if (!needsEscaping)
                 return value;
 
+            // Emit backslash and double-quote as JSON \uXXXX escapes rather than \\ and \"
+            // so the resulting string contains no literal backslashes or quotes. This avoids
+            // ambiguity with Win32/Go argv parsing of the outer --query="..." shell quoting,
+            // where a trailing run of backslashes before the closing quote can be mis-parsed
+            // as escaping the quote (producing "end of input in JSON string" or
+            // "provide only one MongoDB connection string" errors from mongodump).
             var sb = new StringBuilder(value.Length + 16);
             foreach (char c in value)
             {
                 switch (c)
                 {
-                    case '\\': sb.Append("\\\\"); break;
+                    case '\\': sb.Append("\\u005C"); break;
                     case '"': sb.Append("\\u0022"); break;
-                    case '\n': sb.Append("\\n"); break;
-                    case '\r': sb.Append("\\r"); break;
-                    case '\t': sb.Append("\\t"); break;
-                    case '\b': sb.Append("\\b"); break;
-                    case '\f': sb.Append("\\f"); break;
                     default:
                         if (c < ' ')
                             sb.Append($"\\u{(int)c:x4}");
@@ -1914,6 +1946,75 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 LogType.Info);
 
             return (Interlocked.Read(ref totalInserted), Interlocked.Read(ref totalSkipped));
+        }
+
+        /// <summary>
+        /// Probes the source collection with a $type findOne per candidate DataType (combined with the user filter)
+        /// and returns only the types that actually have at least one document. Types whose probe throws are kept
+        /// (fail-open) so a transient error doesn't shrink the partition plan.
+        /// </summary>
+        public static List<DataType> PruneAbsentIdDataTypes(
+            Log log,
+            IMongoCollection<BsonDocument> collection,
+            List<DataType> candidateTypes,
+            BsonDocument? userFilter,
+            CancellationToken cancellationToken)
+        {
+            if (candidateTypes == null || candidateTypes.Count <= 1)
+                return candidateTypes ?? new List<DataType>();
+
+            var present = new List<DataType>(candidateTypes.Count);
+            var rawCollection = collection.Database.GetCollection<RawBsonDocument>(collection.CollectionNamespace.CollectionName);
+
+            foreach (var dataType in candidateTypes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    BsonDocument matchCondition = SamplePartitioner.BuildDataTypeCondition(dataType, userFilter, skipDataTypeFilter: false);
+                    FilterDefinition<RawBsonDocument> filter = (matchCondition != null && matchCondition.ElementCount > 0)
+                        ? new BsonDocumentFilterDefinition<RawBsonDocument>(matchCondition)
+                        : FilterDefinition<RawBsonDocument>.Empty;
+
+                    var doc = rawCollection
+                        .Find(filter)
+                        .Project<RawBsonDocument>(Builders<RawBsonDocument>.Projection.Include("_id"))
+                        .Limit(1)
+                        .FirstOrDefault(cancellationToken);
+
+                    if (doc != null)
+                    {
+                        present.Add(dataType);
+                        log.WriteLine($"Probe for {collection.CollectionNamespace} _id type {dataType}: present", LogType.Info);
+                    }
+                    else
+                    {
+                        log.WriteLine($"Probe for {collection.CollectionNamespace} _id type {dataType}: absent (skipping)", LogType.Info);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // Fail-open: keep the type so we don't accidentally drop data on transient errors.
+                    present.Add(dataType);
+                    log.WriteLine($"Probe for {collection.CollectionNamespace} _id type {dataType} failed; keeping it. Details: {ex.Message}", LogType.Warning);
+                }
+            }
+
+            if (present.Count == 0)
+            {
+                // Nothing matched: caller will treat as empty collection. Return empty list.
+                log.WriteLine($"No _id data types matched any document in {collection.CollectionNamespace}", LogType.Debug);
+            }
+            else
+            {
+                log.WriteLine($"Detected _id data types in {collection.CollectionNamespace}: [{string.Join(", ", present)}]", LogType.Info);
+            }
+
+            return present;
         }
 
         /// <summary>

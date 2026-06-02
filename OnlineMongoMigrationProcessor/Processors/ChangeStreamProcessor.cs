@@ -44,6 +44,11 @@ namespace OnlineMongoMigrationProcessor
         protected ConcurrentDictionary<string, string> _resumeTokenCache = new ConcurrentDictionary<string, string>();
         protected ConcurrentDictionary<string, long> _migrationUnitsToProcess = new ConcurrentDictionary<string, long>();
 
+        // Keep temp forensic log lines bounded; emit multiple lines when IDs are large.
+        private const int TempLogMaxIdsPerLine = 25;
+
+        protected bool IsCSWatchLogEnabled => _config?.EnableCSWatchLog == true;
+
         // Reverse lookup: "targetDb.targetCollection" -> MigrationUnit ID, for O(1) resolution in change stream hot path
         protected ConcurrentDictionary<string, string> _targetNamespaceToUnitId = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // Negative cache for namespaces not part of current migration units to avoid repeated fallback scans
@@ -110,6 +115,291 @@ namespace OnlineMongoMigrationProcessor
                     _accumulatedChangesPerCollection[collectionKey] = new AccumulatedChangesTracker(collectionKey);
                 }
             }
+        }
+
+        protected bool IsOptimizeForLargeDocsEnabled => _config?.OptimizeForLargeDocs == true;
+
+        // OFLD strips fullDocument/updateDescription so each event is small (~hundreds of bytes).
+        // Without OFLD, FullDocument=UpdateLookup means each event can be up to 16MB; keep batch modest.
+        protected int GetChangeStreamBatchSize() => IsOptimizeForLargeDocsEnabled ? 5000 : 500;
+
+        protected ChangeStreamFullDocumentOption GetFullDocumentOption()
+        {
+            var opt = IsOptimizeForLargeDocsEnabled
+                ? ChangeStreamFullDocumentOption.Default
+                : ChangeStreamFullDocumentOption.UpdateLookup;
+            _log.WriteLine($"{_syncBackPrefix}[OFLD] GetFullDocumentOption: OptimizeForLargeDocs={IsOptimizeForLargeDocsEnabled}, FullDocument={opt}", LogType.Debug);
+            return opt;
+        }
+
+        // Pipeline stage used when OptimizeForLargeDocs is enabled. Strips the two
+        // fields that blow up the change-stream event size (fullDocument and
+        // updateDescription) so the event stays well under the 16 MB getMore cap,
+        // while leaving every other field — including driver-internal ones like
+        // wallTime, lsid, txnNumber, and the resume-token _id — untouched.
+        // The flush path re-fetches the document body from source before bulk writing.
+        protected static readonly BsonDocument OptimizeForLargeDocsProjectStage = new BsonDocument(
+            "$unset",
+            new BsonArray { "fullDocument", "updateDescription" });
+
+        // Mongo 6.0.9 / 7.0+ pipeline stage that splits a >16 MB change event into
+        // multiple smaller fragments at the shard, each carrying its own resume
+        // token plus a splitEvent: { fragment, of } marker. Required to survive
+        // updates whose updateDescription/oplog entry alone exceeds the 16 MB
+        // getMore cap (where $unset can't help because it runs after sizing).
+        protected static readonly BsonDocument ChangeStreamSplitLargeEventStage =
+            new BsonDocument("$changeStreamSplitLargeEvent", new BsonDocument());
+
+        // Server major version >= 6 supports $changeStreamSplitLargeEvent.
+        // (Strictly it landed in 6.0.9; we gate on major to keep the parse simple —
+        // older 6.0.x just fails pipeline creation and the caller's existing
+        // fallback path handles it.)
+        protected bool IsSplitLargeEventSupported
+        {
+            get
+            {
+                var v = MigrationJobContext.CurrentlyActiveJob?.SourceServerVersion;
+                if (string.IsNullOrEmpty(v)) return false;
+                var dot = v.IndexOf('.');
+                var head = dot > 0 ? v.Substring(0, dot) : v;
+                return int.TryParse(head, out var major) && major >= 6;
+            }
+        }
+
+        // A split event is "final" when it's not a fragment, or when fragment == of.
+        // Non-final fragments must be skipped (their resume tokens are tracked so
+        // the cursor advances, but we don't count them as real events).
+        protected static bool IsFinalFragment(ChangeStreamDocument<BsonDocument> change)
+        {
+            var backing = GetBackingDocument(change);
+            if (backing == null || !backing.TryGetValue("splitEvent", out var splitVal) || !splitVal.IsBsonDocument)
+                return true;
+            var split = splitVal.AsBsonDocument;
+            if (!split.TryGetValue("fragment", out var fragVal) || !split.TryGetValue("of", out var ofVal))
+                return true;
+            return fragVal.ToInt32() >= ofVal.ToInt32();
+        }
+
+        // Cached reflection accessor for BsonDocumentBackedClass.BackingDocument so we
+        // can inject a freshly-fetched fullDocument into an existing event without
+        // reconstructing the whole ChangeStreamDocument.
+        private static readonly System.Reflection.PropertyInfo? _backingDocumentProperty =
+            typeof(MongoDB.Bson.Serialization.BsonDocumentBackedClass)
+                .GetProperty(
+                    "BackingDocument",
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic);
+
+        protected static BsonDocument? GetBackingDocument(ChangeStreamDocument<BsonDocument> change)
+        {
+            return _backingDocumentProperty?.GetValue(change) as BsonDocument;
+        }
+
+        /// <summary>
+        /// When OptimizeForLargeDocs is enabled, the change-stream events arrive with
+        /// no fullDocument (we stripped it via $project to dodge the 16 MB getMore
+        /// limit). Re-fetch the current source documents by _id and patch them back
+        /// into each insert/update event's backing BSON so the downstream bulk-write
+        /// path can keep using <c>change.FullDocument</c> unchanged.
+        /// Events whose document no longer exists on the source are dropped — a
+        /// subsequent delete event will reconcile the target.
+        /// </summary>
+        protected async Task HydrateFullDocumentsAsync(
+            IMongoCollection<BsonDocument> sourceCollection,
+            AccumulatedChangesTracker tracker)
+        {
+            if (!IsOptimizeForLargeDocsEnabled || sourceCollection == null)
+                return;
+
+            int insertCount = tracker.DocsToBeInserted.Count;
+            int updateCount = tracker.DocsToBeUpdated.Count;
+            int deleteCount = tracker.DocsToBeDeleted.Count;
+            _log.WriteLine($"{_syncBackPrefix}[OFLD] HydrateFullDocumentsAsync entry ns={sourceCollection.CollectionNamespace}, inserts={insertCount}, updates={updateCount}, deletes={deleteCount}", LogType.Debug);
+
+            await HydrateBucketAsync(sourceCollection, tracker.DocsToBeInserted, "insert");
+            await HydrateBucketAsync(sourceCollection, tracker.DocsToBeUpdated, "update");
+        }
+
+        private async Task HydrateBucketAsync(
+            IMongoCollection<BsonDocument> sourceCollection,
+            Dictionary<string, ChangeStreamDocument<BsonDocument>> bucket,
+            string bucketName)
+        {
+            if (bucket.Count == 0)
+                return;
+
+            int initialCount = bucket.Count;
+            int eventsMissingDocKey = 0;
+            int eventsAlreadyHaveFullDoc = 0;
+
+            // Diagnostic: count how many of the events still have a non-null FullDocument
+            // (they shouldn't when projection is active; if they do, the projection isn't taking effect).
+            foreach (var kvp in bucket)
+            {
+                if (kvp.Value?.FullDocument != null && !kvp.Value.FullDocument.IsBsonNull)
+                    eventsAlreadyHaveFullDoc++;
+            }
+
+            // Group by full DocumentKey so we can issue a single $or query per batch.
+            // DocumentKey includes the shard key for sharded collections — using only _id
+            // is wrong because the same _id can exist on different shards.
+            var distinctDocKeys = new Dictionary<string, BsonDocument>(bucket.Count);
+            var keysByDocKeyJson = new Dictionary<string, List<string>>(bucket.Count);
+            string[]? docKeyFieldNames = null;
+            foreach (var kvp in bucket)
+            {
+                var dk = kvp.Value?.DocumentKey;
+                if (dk == null || dk.ElementCount == 0)
+                {
+                    eventsMissingDocKey++;
+                    continue;
+                }
+
+                if (docKeyFieldNames == null)
+                {
+                    docKeyFieldNames = dk.Names.ToArray();
+                }
+
+                var dkJson = dk.ToJson();
+                if (!keysByDocKeyJson.TryGetValue(dkJson, out var list))
+                {
+                    list = new List<string>();
+                    keysByDocKeyJson[dkJson] = list;
+                    distinctDocKeys[dkJson] = dk;
+                }
+                list.Add(kvp.Key);
+            }
+
+            if (distinctDocKeys.Count == 0)
+            {
+                _log.WriteLine($"{_syncBackPrefix}[OFLD] HydrateBucket bucket={bucketName} ns={sourceCollection.CollectionNamespace}: no DocumentKeys to fetch (bucket={initialCount}, missingDocKey={eventsMissingDocKey})", LogType.Debug);
+                return;
+            }
+
+            bool isSharded = docKeyFieldNames != null && docKeyFieldNames.Length > 1;
+
+            Dictionary<string, BsonDocument> fetched;
+            var fetchSw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                FilterDefinition<BsonDocument> filter;
+                if (distinctDocKeys.Count == 1)
+                {
+                    var dk = distinctDocKeys.Values.First();
+                    filter = BuildDocKeyFilter(dk);
+                }
+                else
+                {
+                    var subFilters = distinctDocKeys.Values.Select(BuildDocKeyFilter).ToList();
+                    filter = Builders<BsonDocument>.Filter.Or(subFilters);
+                }
+
+                var cursor = await sourceCollection.FindAsync(filter);
+                var docs = await cursor.ToListAsync();
+                fetched = new Dictionary<string, BsonDocument>(docs.Count);
+                foreach (var doc in docs)
+                {
+                    // Project the fetched document down to the DocumentKey shape so
+                    // we can match it back to the originating change event(s).
+                    var dkShape = ExtractDocKeyShape(doc, docKeyFieldNames!);
+                    if (dkShape != null)
+                    {
+                        fetched[dkShape.ToJson()] = doc;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"{_syncBackPrefix}[OFLD] HydrateBucket FAILED bucket={bucketName} ns={sourceCollection.CollectionNamespace}, docKeysRequested={distinctDocKeys.Count}, sharded={isSharded}. Details: {ex}", LogType.Error);
+                return;
+            }
+            finally
+            {
+                fetchSw.Stop();
+            }
+
+            int patchedCount = 0;
+            int reflectionFailedCount = 0;
+            var keysToDrop = new List<string>();
+            foreach (var pair in keysByDocKeyJson)
+            {
+                fetched.TryGetValue(pair.Key, out var doc);
+                foreach (var trackerKey in pair.Value)
+                {
+                    if (!bucket.TryGetValue(trackerKey, out var change) || change == null)
+                        continue;
+
+                    if (doc == null)
+                    {
+                        // Document gone on source — a delete event will reconcile.
+                        keysToDrop.Add(trackerKey);
+                        continue;
+                    }
+
+                    var backing = GetBackingDocument(change);
+                    if (backing == null)
+                    {
+                        // Reflection failed (driver shape changed). Drop the event so
+                        // we don't push a write with a null FullDocument.
+                        reflectionFailedCount++;
+                        keysToDrop.Add(trackerKey);
+                        continue;
+                    }
+                    backing["fullDocument"] = doc;
+                    patchedCount++;
+                }
+            }
+
+            foreach (var k in keysToDrop)
+                bucket.Remove(k);
+
+            int droppedMissing = keysToDrop.Count - reflectionFailedCount;
+            _log.WriteLine(
+                $"{_syncBackPrefix}[OFLD] HydrateBucket done bucket={bucketName} ns={sourceCollection.CollectionNamespace}, bucket={initialCount}, docKeysRequested={distinctDocKeys.Count}, sharded={isSharded}, docKeyFields=[{string.Join(",", docKeyFieldNames ?? Array.Empty<string>())}], fetched={fetched.Count}, patched={patchedCount}, droppedMissingOnSource={droppedMissing}, reflectionFailed={reflectionFailedCount}, alreadyHadFullDoc={eventsAlreadyHaveFullDoc}, missingDocKey={eventsMissingDocKey}, fetchMs={fetchSw.ElapsedMilliseconds}",
+                LogType.Debug);
+
+            if (reflectionFailedCount > 0)
+            {
+                _log.WriteLine($"{_syncBackPrefix}[OFLD] WARNING: BackingDocument reflection returned null for {reflectionFailedCount} event(s) — OptimizeForLargeDocs will drop these; check MongoDB.Driver version compatibility.", LogType.Warning);
+            }
+            if (eventsAlreadyHaveFullDoc > 0)
+            {
+                _log.WriteLine($"{_syncBackPrefix}[OFLD] NOTE: {eventsAlreadyHaveFullDoc} event(s) already carried a fullDocument before hydration — the $project stage may not be applied on this stream.", LogType.Warning);
+            }
+        }
+
+        /// <summary>
+        /// Builds a Mongo filter that matches a single document by its full change-stream
+        /// DocumentKey. For sharded collections DocumentKey contains <c>{_id, &lt;shardKey...&gt;}</c>
+        /// so this filter is shard-aware; for unsharded collections it reduces to <c>{_id: ...}</c>.
+        /// </summary>
+        private static FilterDefinition<BsonDocument> BuildDocKeyFilter(BsonDocument docKey)
+        {
+            var fb = Builders<BsonDocument>.Filter;
+            var parts = new List<FilterDefinition<BsonDocument>>(docKey.ElementCount);
+            foreach (var el in docKey.Elements)
+            {
+                parts.Add(fb.Eq(el.Name, el.Value));
+            }
+            return parts.Count == 1 ? parts[0] : fb.And(parts);
+        }
+
+        /// <summary>
+        /// Extracts a projection of <paramref name="doc"/> containing only the fields that
+        /// appear in the change-stream DocumentKey (preserving order), so it can be matched
+        /// back to the originating change event via canonical JSON.
+        /// </summary>
+        private static BsonDocument? ExtractDocKeyShape(BsonDocument doc, string[] docKeyFieldNames)
+        {
+            var shape = new BsonDocument();
+            foreach (var name in docKeyFieldNames)
+            {
+                if (!doc.TryGetValue(name, out var v))
+                    return null;
+                shape.Add(name, v);
+            }
+            return shape;
         }
 
         /// <summary>
@@ -463,6 +753,127 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
+        protected string GetChangeDocumentId(ChangeStreamDocument<BsonDocument> change)
+        {
+            if (change?.DocumentKey != null && change.DocumentKey.TryGetValue("_id", out var documentId))
+            {
+                return documentId.ToString();
+            }
+
+            return "<missing _id>";
+        }
+
+        protected sealed class TempRawWatchSummary
+        {
+            public long Total { get; set; }
+            public long Inserts { get; set; }
+            public long Updates { get; set; }
+            public long Deletes { get; set; }
+            public List<string> InsertIds { get; } = new List<string>();
+            public List<string> UpdateIds { get; } = new List<string>();
+            public List<string> DeleteIds { get; } = new List<string>();
+        }
+
+        protected TempRawWatchSummary CreateTempRawWatchSummary()
+        {
+            return new TempRawWatchSummary();
+        }
+
+        protected void AddTempRawReceivedEvent(TempRawWatchSummary summary, ChangeStreamDocument<BsonDocument> change)
+        {
+            if (!IsCSWatchLogEnabled || summary == null || change == null)
+            {
+                return;
+            }
+
+            summary.Total++;
+            string docId = GetChangeDocumentId(change);
+
+            if (change.OperationType == ChangeStreamOperationType.Insert)
+            {
+                summary.Inserts++;
+                summary.InsertIds.Add(docId);
+            }
+            else if (change.OperationType == ChangeStreamOperationType.Update || change.OperationType == ChangeStreamOperationType.Replace)
+            {
+                summary.Updates++;
+                summary.UpdateIds.Add(docId);
+            }
+            else if (change.OperationType == ChangeStreamOperationType.Delete)
+            {
+                summary.Deletes++;
+                summary.DeleteIds.Add(docId);
+            }
+        }
+
+        private void LogTempIdsInChunks(string prefix, string opName, List<string> ids)
+        {
+            if (ids == null || ids.Count == 0)
+            {
+                _log.WriteLine($"{prefix}, {opName}Ids=[]", LogType.Debug);
+                return;
+            }
+
+            int part = 0;
+            int totalParts = (ids.Count + TempLogMaxIdsPerLine - 1) / TempLogMaxIdsPerLine;
+            for (int i = 0; i < ids.Count; i += TempLogMaxIdsPerLine)
+            {
+                part++;
+                var chunk = ids.Skip(i).Take(TempLogMaxIdsPerLine);
+                _log.WriteLine(
+                    $"{prefix}, {opName}Ids part={part}/{totalParts}, count={chunk.Count()}, ids=[{string.Join(", ", chunk)}]",
+                    LogType.Debug);
+            }
+        }
+
+        protected void LogTempRawWatchSummary(string watchScope, string collectionKey, TempRawWatchSummary summary)
+        {
+            if (!IsCSWatchLogEnabled || summary == null || summary.Total == 0)
+            {
+                return;
+            }
+
+            string prefix = $"{_syncBackPrefix}[cswatch] received raw watch scope={watchScope}, ns={collectionKey}, total={summary.Total}, inserts={summary.Inserts}, updates={summary.Updates}, deletes={summary.Deletes}";
+            _log.WriteLine(prefix, LogType.Debug);
+            LogTempIdsInChunks(prefix, "insert", summary.InsertIds);
+            LogTempIdsInChunks(prefix, "update", summary.UpdateIds);
+            LogTempIdsInChunks(prefix, "delete", summary.DeleteIds);
+        }
+
+        private void LogTempBatchSummary(
+            string stage,
+            string collectionKey,
+            List<ChangeStreamDocument<BsonDocument>> insertEvents,
+            List<ChangeStreamDocument<BsonDocument>> updateEvents,
+            List<ChangeStreamDocument<BsonDocument>> deleteEvents,
+            string? status = null)
+        {
+            if (!IsCSWatchLogEnabled)
+            {
+                return;
+            }
+
+            int total = insertEvents.Count + updateEvents.Count + deleteEvents.Count;
+            if (total == 0)
+            {
+                return;
+            }
+
+            var statusText = string.IsNullOrWhiteSpace(status) ? string.Empty : $", status={status}";
+            string prefix = $"{_syncBackPrefix}[cswatch] {stage} batch ns={collectionKey}, total={total}, inserts={insertEvents.Count}, updates={updateEvents.Count}, deletes={deleteEvents.Count}{statusText}";
+            _log.WriteLine(prefix, LogType.Debug);
+
+            var insertIds = insertEvents.Select(GetChangeDocumentId).Where(id => !string.IsNullOrEmpty(id)).ToList();
+            var updateIds = updateEvents.Select(GetChangeDocumentId).Where(id => !string.IsNullOrEmpty(id)).ToList();
+            var deleteIds = deleteEvents.Select(GetChangeDocumentId).Where(id => !string.IsNullOrEmpty(id)).ToList();
+
+            LogTempIdsInChunks(prefix, "insert", insertIds);
+            LogTempIdsInChunks(prefix, "update", updateIds);
+            LogTempIdsInChunks(prefix, "delete", deleteIds);
+        }
+
+        
+
         protected async Task<int> BulkProcessChangesAsync(
             MigrationUnit mu,
             IMongoCollection<BsonDocument> collection,
@@ -474,6 +885,8 @@ namespace OnlineMongoMigrationProcessor
         {
             
             string collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
+
+            LogTempBatchSummary("received", collectionKey, insertEvents, updateEvents, deleteEvents);
 
             if ((insertEvents.Count + updateEvents.Count + deleteEvents.Count) > 0)
                 _log.ShowInMonitor($"{_syncBackPrefix}Flushing Changes for Collection: {collectionKey}, Events: {accumulatedChangesInColl.TotalEventCount}, Inserts: {insertEvents.Count}, Updates: {updateEvents.Count}, Deletes: {deleteEvents.Count}, BatchSize: {batchSize}");
@@ -537,6 +950,7 @@ namespace OnlineMongoMigrationProcessor
                 }
                 else if (result.Failures > 0)
                 {
+                    LogTempBatchSummary("flushed", collectionKey, insertEvents, updateEvents, deleteEvents, $"non-critical-failures={result.Failures}");
                     IncrementFailureCounter(mu, result.Failures);
                     _log.WriteLine($"{_syncBackPrefix}Bulk processing had {result.Failures} non-critical failures for {collectionKey}. Failed DocumentKeys: [{string.Join(", ", result.FailedDocumentKeys.Take(50))}]{(result.FailedDocumentKeys.Count > 50 ? $"... (+{result.FailedDocumentKeys.Count - 50} more)" : "")}", LogType.Error);
                 }
