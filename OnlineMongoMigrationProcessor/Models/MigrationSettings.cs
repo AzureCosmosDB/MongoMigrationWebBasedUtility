@@ -13,7 +13,6 @@ namespace OnlineMongoMigrationProcessor
         public string? MongoToolsDownloadUrl { get; set; }
         public string? MongoDumpToolPath { get; set; }
         public string? MongoRestoreToolPath { get; set; }
-        public bool ReadBinary { get; set; }
         public int LogPageSize { get; set; }
         public long ChunkSizeInMb { get; set; }
         public int ChangeStreamMaxDocsInBatch { get; set; }
@@ -66,7 +65,6 @@ namespace OnlineMongoMigrationProcessor
                         // Preserve existing behavior when this field is missing or document is malformed.
                     }
 
-                    ReadBinary = loadedObject.ReadBinary;
                     MongoToolsDownloadUrl = loadedObject.MongoToolsDownloadUrl;
                     MongoDumpToolPath = loadedObject.MongoDumpToolPath;
                     MongoRestoreToolPath = loadedObject.MongoRestoreToolPath;
@@ -101,7 +99,6 @@ namespace OnlineMongoMigrationProcessor
             }
             if (!initialized)
             {
-                ReadBinary = false;
                 MongoToolsDownloadUrl = "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.10.0.zip";
                 MongoDumpToolPath = string.Empty;
                 MongoRestoreToolPath = string.Empty;

@@ -1566,8 +1566,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             var unitsToAdd = await Helper.PopulateJobCollectionsAsync(
                 MigrationJobContext.CurrentlyActiveJob, 
                 namespacesToMigrate, 
-                sourceConnectionString, 
-                MigrationJobContext.CurrentlyActiveJob.AllCollectionsUseObjectId);
+                sourceConnectionString);
 
             Helper.AddMigrationUnits(unitsToAdd, MigrationJobContext.CurrentlyActiveJob, _log);
         }
@@ -1974,9 +1973,23 @@ namespace OnlineMongoMigrationProcessor.Workers
             _log.WriteLine($"CreateMultipleChunks started for {databaseName}.{collectionName} - totalChunks: {totalChunks}, minDocsInChunk: {minDocsInChunk}", LogType.Debug);
 
             _log.WriteLine($"Determining data types for {databaseName}.{collectionName}", LogType.Debug);
-            var (dataTypes, optimizeForObjectId) = DetermineDataTypes(migrationUnit);
-            _log.WriteLine($"Data types determined - count: {dataTypes.Count}, optimizeForObjectId: {optimizeForObjectId}", LogType.Debug);
-            
+            var dataTypes = DetermineDataTypes();
+            _log.WriteLine($"Data types determined - count: {dataTypes.Count}", LogType.Debug);
+
+            // Probe the source so we only spend partitioning effort on _id types that actually exist.
+            _log.ShowInMonitor($"Detecting _id data type(s) in use for {databaseName}.{collectionName}");
+            dataTypes = MongoHelper.PruneAbsentIdDataTypes(_log, collection, dataTypes, MongoHelper.GetFilterDoc(migrationUnit.UserFilter), cts);
+
+            // If exactly one _id type survives, downstream queries can skip the $type predicate entirely,
+            // and an ObjectId-only collection also unlocks ObjectId-specific partitioning optimizations.
+            bool forceSkipDataTypeFilter = dataTypes.Count == 1;
+            bool optimizeForObjectId = forceSkipDataTypeFilter && dataTypes[0] == DataType.ObjectId;
+            migrationUnit.SkipDataTypeFilterForId = forceSkipDataTypeFilter;
+            if (optimizeForObjectId)
+            {
+                _log.WriteLine("ObjectId optimization enabled", LogType.Debug);
+            }
+
             var migrationChunks = new List<MigrationChunk>();
 
             int dataTypeIndex = 0;
@@ -1993,8 +2006,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 try
                 {
-                    ProcessDataTypePartitions(collection, totalChunks, minDocsInChunk, dataType, 
-                        optimizeForObjectId, migrationUnit, cts, migrationChunks);
+                    ProcessDataTypePartitions(collection, totalChunks, minDocsInChunk, dataType,
+                        optimizeForObjectId, migrationUnit, cts, migrationChunks, forceSkipDataTypeFilter);
                     _log.WriteLine($"Completed processing data type {dataType} for {databaseName}.{collectionName} - current chunk count: {migrationChunks.Count}", LogType.Debug);
                 }
                 catch (Exception ex)
@@ -2008,38 +2021,17 @@ namespace OnlineMongoMigrationProcessor.Workers
             return migrationChunks;
         }
 
-        private (List<DataType> dataTypes, bool optimizeForObjectId) DetermineDataTypes(MigrationUnit migrationUnit)
+        private List<DataType> DetermineDataTypes()
         {
-            bool optimizeForObjectId = false;
-            List<DataType> dataTypes;
-
-            if (migrationUnit?.DataTypeFor_Id.HasValue == true)
+            // Always probe every supported _id BSON type. PruneAbsentIdDataTypes will trim the
+            // list to what's actually present, so there's no cost to keeping BinData in here.
+            var dataTypes = new List<DataType>
             {
-                dataTypes = new List<DataType> { migrationUnit.DataTypeFor_Id.Value };
-                _log.WriteLine($"Using specified DataType for _id: {migrationUnit.DataTypeFor_Id.Value}", LogType.Debug);
-
-                if (migrationUnit.DataTypeFor_Id.Value == DataType.ObjectId)
-                {
-                    optimizeForObjectId = true;
-                    _log.WriteLine("ObjectId optimization enabled", LogType.Debug);
-                }
-            }
-            else
-            {
-                dataTypes = new List<DataType> 
-                { 
-                    DataType.Int, DataType.Int64, DataType.String, DataType.Object, 
-                    DataType.Decimal128, DataType.Date, DataType.ObjectId 
-                };
-                _log.WriteLine($"Using all DataTypes for partitioning ({dataTypes.Count} types)", LogType.Debug);
-
-                if (_config!.ReadBinary)
-                {
-                    dataTypes.Add(DataType.BinData);
-                }
-            }
-
-            return (dataTypes, optimizeForObjectId);
+                DataType.Int, DataType.Int64, DataType.String, DataType.Object,
+                DataType.Decimal128, DataType.Date, DataType.ObjectId, DataType.BinData
+            };
+            _log.WriteLine($"Using all DataTypes for partitioning ({dataTypes.Count} types)", LogType.Debug);
+            return dataTypes;
         }
 
         private void ProcessDataTypePartitions(
@@ -2050,7 +2042,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             bool optimizeForObjectId,
             MigrationUnit migrationUnit,
             CancellationToken cts,
-            List<MigrationChunk> migrationChunks)
+            List<MigrationChunk> migrationChunks,
+            bool forceSkipDataTypeFilter)
         {
            _log.WriteLine($"Calling SamplePartitioner.CreatePartitions for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} DataType: {dataType}, totalChunks: {totalChunks}", LogType.Debug);
             
@@ -2070,6 +2063,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     migrationUnit!, 
                     optimizeForObjectId, 
                     _config!, 
+                    forceSkipDataTypeFilter,
                     out docCountByType);
                 
                 _log.WriteLine($"SamplePartitioner.CreatePartitions completed for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} DataType: {dataType} - docCountByType: {docCountByType}, chunkBoundaries: {(chunkBoundaries == null ? "null" : "not null")}", LogType.Debug);
@@ -2107,7 +2101,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 migrationChunks,
                 dataType,
                 MongoHelper.GetFilterDoc(migrationUnit?.UserFilter),
-                migrationUnit?.DataTypeFor_Id.HasValue == true);
+                forceSkipDataTypeFilter);
         }
 
         private void CreateEmptyBoundaryChunk(List<MigrationChunk> migrationChunks, DataType dataType)

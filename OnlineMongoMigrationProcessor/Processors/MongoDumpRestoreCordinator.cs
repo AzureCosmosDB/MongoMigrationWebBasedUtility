@@ -78,8 +78,11 @@ namespace OnlineMongoMigrationProcessor
         private readonly object _diskSpaceCheckLock = new object();
         private readonly object _workingSetLock = new object();
 
+        // Bound the in-memory active manifest so per-context lookups stay O(1) and memory stays flat on jobs with thousands of chunks; overflow lands in the backlog queue.
         private const int MaxManifestWorkingSetSize = 200;
+        // Hard cap prevents mongodump query timeouts and OOM on slow/unstable sources; oversize chunks are auto-split before dispatch.
         private const long AbsoluteMaxDocsPerChunk = 25000000;
+        // Below this size the dynamic per-MU threshold is skipped — splitting tiny chunks further usually hurts throughput more than a count timeout would.
         private const long DynamicThresholdMinChunkDocs = 5000000;
         private const int MaxActiveMigrationUnitsWorkingSetSize = 200;
 
@@ -277,6 +280,7 @@ namespace OnlineMongoMigrationProcessor
 
                 lock (_workingSetLock)
                 {
+                    // Bound the active tracker so memory stays flat; queued MUs get retried on the next timer tick after slots free up.
                     if (_activeMigrationUnits.Count >= MaxActiveMigrationUnitsWorkingSetSize)
                         break;
 
@@ -359,7 +363,8 @@ namespace OnlineMongoMigrationProcessor
                     _mongoToolsFolder = mongoToolsFolder;
                     _mongoDumpToolPath = mongoDumpToolPath;
                     _mongoRestoreToolPath = mongoRestoreToolPath;
-                    _processorRunId = string.IsNullOrWhiteSpace(processorRunId) ? string.Empty : processorRunId;
+                    // Empty string (not null) keeps PrepareDownloadList/PrepareRestoreList free of null-coalesce on every context they create.
+            _processorRunId = string.IsNullOrWhiteSpace(processorRunId) ? string.Empty : processorRunId;
                     _onMigrationUnitCompleted = onMigrationUnitCompleted;
                     _onPendingTasksCompleted = onPendingTasksCompleted;
                     _processNewTasks = true;
@@ -1308,6 +1313,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     int processingRetries = _uploadManifest.Values
                         .Count(ctx => ctx.State == ProcessState.Processing && IsRetryContext(ctx));
+                    // Cap retries at ~25% of capacity so a flood of fresh chunks can't starve in-flight merge/cleanup; retries finish faster on small slices.
                     int maxRetryWorkers = Math.Max(1, (int)Math.Floor(totalWorkers * 0.25));
                     retrySlotCap = Math.Max(0, maxRetryWorkers - processingRetries);
                 }
@@ -1738,7 +1744,7 @@ namespace OnlineMongoMigrationProcessor
                 return 0; // No replacement needed
             }
 
-            // Preserve the original chunk's ID for the first sub-chunk
+            // Preserve the original chunk's ID for the first sub-chunk — chunk IDs are referenced by manifests/queues and dump file paths, so reusing it lets in-flight contexts keep resolving without a rename pass.
             var originalChunk = mu.MigrationChunks[chunkIndex];
             var originalId = originalChunk.Id;
 
@@ -1894,7 +1900,7 @@ namespace OnlineMongoMigrationProcessor
                 lte,
                 dataType,
                 userFilterDoc,
-                mu.DataTypeFor_Id.HasValue
+                mu.SkipDataTypeFilterForId
             );
 
             long docCount = retrySuccess ? retryCount : 0;
@@ -2044,7 +2050,7 @@ namespace OnlineMongoMigrationProcessor
                 lte,
                 mu.MigrationChunks[chunkIndex].DataType,
                 userFilterDoc,
-                mu.DataTypeFor_Id.HasValue
+                mu.SkipDataTypeFilterForId
             );
 
             // Handle timeout by splitting chunk if needed
@@ -2234,7 +2240,7 @@ namespace OnlineMongoMigrationProcessor
                         targetColName
                     );
 
-                    // Warm up connection to target collection with async findOne
+                    // Fire-and-forget warm-up: a single findOne against the target primes the driver's connection pool and TLS handshake so mongorestore's first batch doesn't pay that latency on every chunk.
                     _ = WarmUpTargetConnectionAsync(context.TargetConnectionString, targetDbName, targetColName);
 
                     // Execute restore
@@ -2387,6 +2393,7 @@ namespace OnlineMongoMigrationProcessor
             string targetCollectionName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.BuildRestoreArguments: source={sourceDatabaseName}.{sourceCollectionName}, target={targetDatabaseName}.{targetCollectionName}, chunkIndex={chunkIndex}");
+            // Always --noIndexRestore: collection + indexes are pre-created upfront so mongorestore stays a pure data path; lets every chunk run in parallel without index-build contention on the target.
             string args = $" --uri={QuoteMongoToolArgument(targetConnectionString)} --gzip --archive --noIndexRestore";
             args = $"{args} --nsFrom={QuoteMongoToolArgument($"{sourceDatabaseName}.{sourceCollectionName}")} --nsTo={QuoteMongoToolArgument($"{targetDatabaseName}.{targetCollectionName}")}";
 
@@ -2613,7 +2620,7 @@ namespace OnlineMongoMigrationProcessor
                     lte,
                     mu.MigrationChunks[chunkIndex].DataType,
                     MongoHelper.ConvertUserFilterToBSONDocument(mu.UserFilter!),
-                    mu.DataTypeFor_Id.HasValue
+                    mu.SkipDataTypeFilterForId
                 );
 
                 // Check if counts match
@@ -2953,6 +2960,7 @@ namespace OnlineMongoMigrationProcessor
 
         private bool IsRetryContext(DumpRestoreProcessContext context)
         {
+            // Attempt > 0 means the persisted chunk has already failed at least once; used by the scheduler to reserve a 25% retry slot pool so retries don't starve.
             try
             {
                 var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
@@ -2991,6 +2999,7 @@ namespace OnlineMongoMigrationProcessor
             string sourceColName = mu.CollectionName;
             string targetDbName = mu.GetEffectiveTargetDatabaseName();
             string targetColName = mu.GetEffectiveTargetCollectionName();
+            // Per-chunk temp name keeps concurrent retries on different chunks of the same collection isolated; if a previous attempt crashed mid-merge, restoring into a fresh-but-deterministic temp lets the new attempt drop+recreate without touching the live target.
             string tempColName = $"{targetColName}.temp4merge_{chunkIndex}";
             string nsLog = Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName);
             string nsChunkLog = $"{nsLog}[{chunkIndex}]";
@@ -3082,7 +3091,7 @@ namespace OnlineMongoMigrationProcessor
                 var userFilterDoc = MongoHelper.GetFilterDoc(mu.UserFilter);
                 var chunkFilter = MongoHelper.GenerateQueryFilter(
                     bounds.gte, bounds.lt, bounds.lte, chunk.DataType, userFilterDoc,
-                    mu.DataTypeFor_Id.HasValue);
+                    mu.SkipDataTypeFilterForId);
 
                 long preDeduped = await MongoHelper.RemoveDuplicatesFromTempAsync(
                     tempCollection, targetCollection, chunkFilter, pageSize, nsChunkLog, _log, cancellationToken);

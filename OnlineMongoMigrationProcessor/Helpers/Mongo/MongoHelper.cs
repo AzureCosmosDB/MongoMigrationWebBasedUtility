@@ -1400,8 +1400,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
         public static string GenerateQueryString(BsonValue? gte, BsonValue? lt, BsonValue? lte, DataType dataType, BsonDocument? userFilterDoc, MigrationUnit? migrationUnit = null)
         {
-            // Check if we should skip DataType filter when DataTypeFor_Id is specified
-            bool skipDataTypeFilter = migrationUnit?.DataTypeFor_Id.HasValue == true;
+            // Skip the $type predicate when the migration unit's _id has only one BSON type.
+            bool skipDataTypeFilter = migrationUnit?.SkipDataTypeFilterForId == true;
 
             // Build the _id sub-object
             var idConditions = new List<string>();
@@ -1946,6 +1946,75 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 LogType.Info);
 
             return (Interlocked.Read(ref totalInserted), Interlocked.Read(ref totalSkipped));
+        }
+
+        /// <summary>
+        /// Probes the source collection with a $type findOne per candidate DataType (combined with the user filter)
+        /// and returns only the types that actually have at least one document. Types whose probe throws are kept
+        /// (fail-open) so a transient error doesn't shrink the partition plan.
+        /// </summary>
+        public static List<DataType> PruneAbsentIdDataTypes(
+            Log log,
+            IMongoCollection<BsonDocument> collection,
+            List<DataType> candidateTypes,
+            BsonDocument? userFilter,
+            CancellationToken cancellationToken)
+        {
+            if (candidateTypes == null || candidateTypes.Count <= 1)
+                return candidateTypes ?? new List<DataType>();
+
+            var present = new List<DataType>(candidateTypes.Count);
+            var rawCollection = collection.Database.GetCollection<RawBsonDocument>(collection.CollectionNamespace.CollectionName);
+
+            foreach (var dataType in candidateTypes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    BsonDocument matchCondition = SamplePartitioner.BuildDataTypeCondition(dataType, userFilter, skipDataTypeFilter: false);
+                    FilterDefinition<RawBsonDocument> filter = (matchCondition != null && matchCondition.ElementCount > 0)
+                        ? new BsonDocumentFilterDefinition<RawBsonDocument>(matchCondition)
+                        : FilterDefinition<RawBsonDocument>.Empty;
+
+                    var doc = rawCollection
+                        .Find(filter)
+                        .Project<RawBsonDocument>(Builders<RawBsonDocument>.Projection.Include("_id"))
+                        .Limit(1)
+                        .FirstOrDefault(cancellationToken);
+
+                    if (doc != null)
+                    {
+                        present.Add(dataType);
+                        log.WriteLine($"Probe for {collection.CollectionNamespace} _id type {dataType}: present", LogType.Info);
+                    }
+                    else
+                    {
+                        log.WriteLine($"Probe for {collection.CollectionNamespace} _id type {dataType}: absent (skipping)", LogType.Info);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // Fail-open: keep the type so we don't accidentally drop data on transient errors.
+                    present.Add(dataType);
+                    log.WriteLine($"Probe for {collection.CollectionNamespace} _id type {dataType} failed; keeping it. Details: {ex.Message}", LogType.Warning);
+                }
+            }
+
+            if (present.Count == 0)
+            {
+                // Nothing matched: caller will treat as empty collection. Return empty list.
+                log.WriteLine($"No _id data types matched any document in {collection.CollectionNamespace}", LogType.Debug);
+            }
+            else
+            {
+                log.WriteLine($"Detected _id data types in {collection.CollectionNamespace}: [{string.Join(", ", present)}]", LogType.Info);
+            }
+
+            return present;
         }
 
         /// <summary>

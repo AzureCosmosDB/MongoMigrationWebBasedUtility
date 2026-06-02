@@ -578,9 +578,9 @@ namespace OnlineMongoMigrationProcessor
             return connectionString.Contains("mongo.cosmos.azure.com");
         }         
 
-        public static async Task<List<MigrationUnit>> PopulateJobCollectionsAsync(MigrationJob job,string namespacesToMigrate, string connectionString, bool allCollectionsUseObjectId = false)
+        public static async Task<List<MigrationUnit>> PopulateJobCollectionsAsync(MigrationJob job,string namespacesToMigrate, string connectionString)
         {
-            MigrationJobContext.AddVerboseLog($"PopulateJobCollectionsAsync: jobId={job?.Id}, allCollectionsUseObjectId={allCollectionsUseObjectId}");
+            MigrationJobContext.AddVerboseLog($"PopulateJobCollectionsAsync: jobId={job?.Id}");
 
             List<MigrationUnit> unitsToAdd = new List<MigrationUnit>();
             if (string.IsNullOrWhiteSpace(namespacesToMigrate))
@@ -625,16 +625,6 @@ namespace OnlineMongoMigrationProcessor
                                 mu.UserFilter = item.Filter;
                                 mu.TargetDatabaseName = targetDatabaseName;
                                 mu.TargetCollectionName = targetCollectionName;
-
-
-                                if (!string.IsNullOrEmpty(item.DataTypeFor_Id) && Enum.TryParse<DataType>(item.DataTypeFor_Id, out var parsedDataType))
-                                {
-                                    mu.DataTypeFor_Id = parsedDataType;
-                                }
-                                else
-                                {
-                                    mu.DataTypeFor_Id = null;
-                                }
                                 unitsToAdd.Add(mu);
                             }
                         }
@@ -646,14 +636,6 @@ namespace OnlineMongoMigrationProcessor
                 unitsToAdd = await PopulateJobCollectionsFromCSVAsync(job,namespacesToMigrate, connectionString);
                 
                 
-            }
-            // If allCollectionsUseObjectId is true, set DataTypeFor_Id to ObjectId for all units
-            if (allCollectionsUseObjectId)
-            {
-                foreach (var mu in unitsToAdd)
-                {
-                    mu.DataTypeFor_Id = DataType.ObjectId;
-                }
             }
 
             foreach (var mu in unitsToAdd)
@@ -965,8 +947,7 @@ namespace OnlineMongoMigrationProcessor
             bool requiresJson = units.Any(mu =>
                 !string.Equals(mu.DatabaseName, mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(mu.CollectionName, mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase) ||
-                !string.IsNullOrWhiteSpace(mu.UserFilter) ||
-                mu.DataTypeFor_Id.HasValue);
+                !string.IsNullOrWhiteSpace(mu.UserFilter));
 
             if (!requiresJson)
             {
@@ -979,8 +960,7 @@ namespace OnlineMongoMigrationProcessor
                 CollectionName = mu.CollectionName,
                 TargetDatabaseName = string.Equals(mu.DatabaseName, mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase) ? null : mu.GetEffectiveTargetDatabaseName(),
                 TargetCollectionName = string.Equals(mu.CollectionName, mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase) ? null : mu.GetEffectiveTargetCollectionName(),
-                Filter = string.IsNullOrWhiteSpace(mu.UserFilter) ? null : mu.UserFilter,
-                DataTypeFor_Id = mu.DataTypeFor_Id?.ToString()
+                Filter = string.IsNullOrWhiteSpace(mu.UserFilter) ? null : mu.UserFilter
             }).ToList();
 
             return JsonConvert.SerializeObject(collectionInfos, Formatting.Indented);

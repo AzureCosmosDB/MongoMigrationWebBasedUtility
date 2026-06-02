@@ -35,7 +35,7 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
   - [Download Job Details](#download-job-details)
   - [Dynamic Scaling of MongoDump/Restore Workers](#dynamic-scaling-of-mongodumprestore-workers)
   - [Difference Between Immediate Pause and Controlled Pause](#difference-between-immediate-pause-and-controlled-pause)
-  - [Multiple Partitioners for ObjectId and Benefits of Selecting DataType for _id](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id)
+  - [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid)
 - [Collections input formats](#collections-input-formats)
   - [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format)
 - [Job lifecycle controls in Job Viewer](#job-lifecycle-controls-in-job-viewer)
@@ -252,11 +252,7 @@ When creating or resuming a job, you can tailor behavior via these options:
 - Post Migration Sync Back
     - For online jobs, after Cut Over you can enable syncing from target back to source. This reduces rollback risk. UI shows Time Since Sync Back once active.
 
-- All collections use ObjectId for the _id field
-    - If ON: Automatically applies `"DataTypeFor_Id": "ObjectId"` to all collections in the job, enabling ObjectId-specific optimizations.
-    - Benefits: Faster partitioning (6x speedup), optimized chunk boundaries, leverages timestamp-based partitioning strategies.
-    - If OFF: Each collection's _id type is auto-detected, or you can specify DataTypeFor_Id individually via JSON format.
-    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for performance details.
+> **Note:** Earlier versions exposed an **All collections use ObjectId for the _id field** checkbox on the New Job and Manage Collections screens, plus a **Binary format utilized for the _id** option in Settings, and a `DataTypeFor_Id` field in the CollectionInfo JSON. These inputs have been removed. The tool now probes each collection at partition time and automatically detects which `_id` BSON types are present, enabling ObjectId-specific optimizations and skipping the `$type` predicate when only one type exists — no user input is required.
 
 - Simulation Mode (No Writes to Target)
     - Runs a dry-run where reads occur but no writes are performed on target. Useful for validation and sizing.
@@ -384,9 +380,6 @@ These settings are persisted per app instance and affect all jobs:
         - If your app has no internet egress, upload ZIP file(s) alongside your app content and point to those hosted URLs.
         - URLs must start with `https://` and end with `.zip`.
 
-- Binary format utilized for the _id
-    - Use when your source uses binary GUIDs for _id.
-
 - Chunk size (MB) for mongodump
     - Range: 2–5120. Affects download-and-upload batching for Dump/Restore.
 
@@ -411,7 +404,7 @@ These settings are persisted per app instance and affect all jobs:
       - **Use Time Boundaries**: Time-based boundaries using ObjectId timestamps (recommended for well distributed objectId workloads)
       - **Use Adjusted Time Boundaries**: Time-based boundaries adjusted by actual record counts (best for balanced chunks)
       - **Use Pagination**: Pagination-based boundaries for equal-sized chunks (deterministic)
-    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid-and-benefits-of-selecting-datatype-for-_id) for detailed explanations.
+    - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid) for detailed explanations.
 
 - Ignore duplicates during Restore
     - When enabled, MongoRestore continues past the duplicate-key threshold instead of stopping the chunk and queuing duplicate cleanup. This avoids costly per-document cleanup retries but means duplicate documents are silently skipped. Only applies to Dump and Restore jobs.
@@ -597,7 +590,9 @@ The migration tool offers two pause mechanisms with different behaviors:
 | **Use Case** | Emergency | Planned pause |
 
 
-### Multiple Partitioners for ObjectId and Benefits of Selecting DataType for _id
+### Multiple Partitioners for ObjectId
+
+> **Note:** The tool now auto-detects the `_id` BSON type(s) present in each collection by probing the source. When only one type is found, ObjectId-specific optimizations and `$type` filter skipping are applied automatically. The previous `DataTypeFor_Id` JSON field and the **All collections use ObjectId for the _id field** UI option have been removed and are no longer required.
 
 #### Understanding Data Partitioning
 
@@ -690,129 +685,23 @@ The tool offers **four partitioning strategies** specifically optimized for Obje
 - Collections where other methods fail or timeout
 - Development/testing scenarios
 
-#### Specifying DataType for _id: Why It Matters
+#### Automatic `_id` Type Detection
 
-When you specify `"DataTypeFor_Id": "ObjectId"` in the collection configuration, you unlock significant performance benefits:
+Before partitioning, the tool runs a `findOne` per supported `_id` BSON type to determine which types are actually present in the collection. The results drive two automatic optimizations:
 
-##### Without DataType Specified (Generic Partitioning)
+- **Single-type collections**: when only one BSON type is found for `_id`, the `$type` predicate is dropped from all read queries, allowing the source to use the default `_id` index more efficiently.
+- **ObjectId-only collections**: the ObjectId-specific partitioner (time-boundary, adjusted time-boundary, pagination, or sample) is selected automatically.
 
-```json
-{ "CollectionName": "Orders", "DatabaseName": "SalesDB" }
-```
+Supported `_id` BSON types: `ObjectId`, `Int`, `Int64`, `Decimal128`, `Date`, `BinData`, `String`, `Object`.
 
-**Behavior**:
-- Tool must scan collection to determine `_id` data type
-- Uses generic partitioning suitable for mixed or unknown types
-- Performs additional type checks during processing
-- Cannot leverage ObjectId-specific optimizations
-- Slower chunk boundary calculation
+No user input is required — the previous `DataTypeFor_Id` JSON field, the **All collections use ObjectId for the _id field** checkbox, and the **Binary format utilized for the _id** setting have all been removed.
 
-##### With DataType Specified (ObjectId)
-
-```json
-{ "CollectionName": "Orders", "DatabaseName": "SalesDB", "DataTypeFor_Id": "ObjectId" }
-```
-
-**Behavior**:
-- Tool **immediately selects the optimal partitioner** for ObjectId
-- **Skips type detection overhead** (saves 1-2 queries per collection)
-- Enables **timestamp-based partitioning** by default
-- Optimizes query generation with ObjectId-specific operators
-- **Faster chunk boundary calculation** using ObjectId properties
-
-#### Performance Impact
-
-**Collection with 10M documents**:
-- **Without DataType**: ~30 seconds to analyze and partition
-- **With DataType (ObjectId)**: ~5 seconds to partition
-- **Speedup**: 6x faster startup
-
-**Chunk Processing**:
-- **Without DataType**: Generic queries like `{ "_id": { "$gte": <value>, "$lt": <value> } }`
-- **With DataType (ObjectId)**: Optimized queries leveraging timestamp component
-- **Database efficiency**: Better index utilization, fewer type coercion operations
-
-#### Supported DataType Values
-
-You can specify these values for `DataTypeFor_Id`:
-
-| DataType | Use Case | Partitioning Strategy |
-|----------|----------|----------------------|
-| **ObjectId** | Standard MongoDB collections | Timestamp-based or random sampling |
-| **Int** | Integer `_id` fields | Numeric range partitioning |
-| **Int64** | Long integer `_id` | Large numeric range partitioning |
-| **Decimal128** | High-precision numeric `_id` | Decimal range partitioning |
-| **Date** | DateTime `_id` values | Chronological partitioning |
-| **BinData** | Binary GUID/UUID `_id` | Binary range partitioning |
-| **String** | String-based `_id` | Lexicographic partitioning |
-| **Object** | Compound `_id` objects | Hash-based partitioning |
-
-#### How to Configure
-
-**Using CollectionInfoFormat JSON**:
-
-```json
-[
-    {
-        "CollectionName": "Users",
-        "DatabaseName": "AppDB",
-        "DataTypeFor_Id": "ObjectId"
-    },
-    {
-        "CollectionName": "Sessions",
-        "DatabaseName": "AppDB",
-        "DataTypeFor_Id": "String"
-    },
-    {
-        "CollectionName": "Analytics",
-        "DatabaseName": "AppDB",
-        "DataTypeFor_Id": "Date"
-    }
-]
-```
-
-#### Best Practices
-
-**Always Specify DataType When**:
-- Collection has more than 1 million documents
-- You know the `_id` field type is consistent
-- Performance is critical (large-scale migrations)
-- Collection uses ObjectId for `_id` (most common case)
-
-**Let Tool Auto-Detect When**:
-- Collection has mixed `_id` types (rare, but possible)
-- Small collections (< 100K documents) where overhead is negligible
-- Unsure about `_id` type consistency
-- Testing/development scenarios
-
-**Verification**:
-1. Before migration, run this query to check `_id` type consistency:
-```javascript
-db.collection.aggregate([
-    {
-        $group: {
-            _id: { $type: "$_id" },
-            count: { $sum: 1 }
-        }
-    }
-])
-```
-
-2. If result shows single type (e.g., "objectId"), specify that type for optimal performance
-
-#### Advanced: Chunk Size Tuning
-
-When using ObjectId with specified DataType, you can optimize chunk count:
-
-**For Time-Based Partitioning**:
-- Collections with ~1M docs/month: Use monthly chunks (12 chunks/year)
-- Collections with ~1M docs/week: Use weekly chunks (52 chunks/year)
-- Collections with ~1M docs/day: Use daily chunks (365 chunks/year)
+#### Chunk Size Tuning
 
 The tool automatically calculates optimal chunk count based on:
 - Total document count estimate
 - Target chunk size (configurable in Settings)
-- ObjectId timestamp distribution
+- ObjectId timestamp distribution (when applicable)
 
 **Result**: Balanced parallelism without creating too many tiny chunks or too few large chunks.
 
@@ -838,8 +727,8 @@ Notes:
 - If `TargetDatabaseName` or `TargetCollectionName` is omitted/empty, the tool defaults that value to the source `DatabaseName`/`CollectionName`.
 - Target namespace mapping is not supported when the source uses wildcards (`*`). Use explicit source namespaces when remapping.
 - Filters must be valid MongoDB query JSON (as a string). Only supports basic operators (`eq`,`lt`,`lte`,`gt`,`gte`,`in`) on root fields. They apply to both bulk copy and change stream.
-- Specify DataTypeFor_Id if the collection contains only a single data type for the _id field. Supported values are: ObjectId, Int, Int64, Decimal128, Date, BinData, String, and Object.
-- RU-optimized copy does not support filters or DataTypeFor_Id. `TargetDatabaseName` and `TargetCollectionName` are supported.
+- The `_id` BSON type for each collection is detected automatically at partition time; no per-collection configuration is required.
+- RU-optimized copy does not support filters. `TargetDatabaseName` and `TargetCollectionName` are supported.
 - System collections are not supported.
 
 ### CollectionInfoFormat JSON Format
@@ -861,8 +750,7 @@ Notes:
     },
     {
         "CollectionName": "Products",
-        "DatabaseName": "InventoryDB",
-        "DataTypeFor_Id": "ObjectId"
+        "DatabaseName": "InventoryDB"
     }
 ]
 ```

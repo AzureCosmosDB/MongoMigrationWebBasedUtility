@@ -69,7 +69,7 @@ namespace OnlineMongoMigrationProcessor
                 _log.WriteLine($"{ctx.DatabaseName}.{ctx.CollectionName}-Chunk [{chunkIndex}] generating query");
 
                 // Generate query and get document count
-                filter = MongoHelper.GenerateQueryFilter(gte, lt, lte, mu.MigrationChunks[chunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.DataTypeFor_Id.HasValue);
+                filter = MongoHelper.GenerateQueryFilter(gte, lt, lte, mu.MigrationChunks[chunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.SkipDataTypeFilterForId);
 
                 docCount = MongoHelper.GetDocumentCount(ctx.Collection, filter, new BsonDocument());//filter already has user filter.
                 mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
