@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import time
 from typing import List, Tuple, Dict, Any
 from pymongo import MongoClient
 from pymongo.database import Database
@@ -291,6 +292,11 @@ class SchemaMigration:
             else:
                 print("-- Skipping shard key migration for collection")
                 self._print_verbose(f"migrate_shard_key=False, skipping shard key migration")
+
+            # Optional collection placement (moveTo). Only meaningful when the collection is unsharded,
+            # i.e. when migrate_shard_key=False. JsonParser rejects moveTo + migrate_shard_key=True up front.
+            if collection_config.move_to:
+                self._move_collection(dest_client, db_name, collection_name, collection_config.move_to)
 
         # Migrate indexes
         self._print_verbose(f"Reading indexes from source collection")
@@ -952,6 +958,44 @@ class SchemaMigration:
             if main[i:i + sub_len] == sub:
                 return True
         return False
+
+    def _move_collection(self, dest_client: MongoClient, db_name: str, collection_name: str, to_shard: str) -> None:
+        """
+        Pin an unsharded collection to a specific shard via the admin `moveCollection` command.
+        Idempotent across reruns: a "cannot move shard to the same node" failure is treated as success.
+        Retries briefly when the routing catalog has not yet registered the freshly created collection
+        ("Could not find shard information for collection in metadata", code 72).
+        """
+        namespace = f"{db_name}.{collection_name}"
+        print(f"-- Moving collection '{namespace}' to shard '{to_shard}'")
+        self._print_verbose(f"  Running adminCommand moveCollection -> {to_shard}")
+
+        max_attempts = 6
+        backoff_seconds = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                dest_client.admin.command({
+                    "moveCollection": namespace,
+                    "toShard": to_shard
+                })
+                self._print_success(f"---- Successfully moved '{namespace}' to shard '{to_shard}'")
+                return
+            except Exception as e:
+                msg = str(e)
+                msg_lower = msg.lower()
+                if "cannot move shard to the same node" in msg_lower:
+                    self._print_verbose(f"  moveCollection no-op: '{namespace}' is already on shard '{to_shard}'")
+                    print(f"-- Collection '{namespace}' is already on shard '{to_shard}', skipping move")
+                    return
+                if "could not find shard information for collection in metadata" in msg_lower and attempt < max_attempts:
+                    self._print_verbose(
+                        f"  moveCollection attempt {attempt}/{max_attempts} for '{namespace}' failed "
+                        f"(catalog not ready); retrying in {backoff_seconds}s"
+                    )
+                    time.sleep(backoff_seconds)
+                    continue
+                self._print_error(f"---- Failed to move '{namespace}' to shard '{to_shard}': {msg}")
+                raise
 
     def _setup_colocation(self, dest_db: Database, collection_name: str, reference_collection: str) -> None:
         """
