@@ -193,6 +193,29 @@ class SchemaMigration:
                     f"Schema migration failed for {len(failures)} collection(s): {failure_messages}"
                 )
 
+        # Deferred moveCollection pass: run sequentially after every collection's schema is in place.
+        # Skipped entirely in postIngestion mode (collection drop/create is also skipped there).
+        if self.mode != "postIngestion":
+            move_targets = [c for c in collection_configs if getattr(c, "move_to", None)]
+            if move_targets:
+                print(f"\n-- Running deferred moveCollection for {len(move_targets)} collection(s)")
+                self._print_verbose(
+                    f"Processing {len(move_targets)} deferred moveCollection operation(s) sequentially"
+                )
+                move_failures = []
+                for cfg in move_targets:
+                    try:
+                        self._move_collection(dest_client, cfg.db_name, cfg.collection_name, cfg.move_to)
+                    except Exception as e:
+                        namespace = f"{cfg.db_name}.{cfg.collection_name}"
+                        move_failures.append((namespace, str(e)))
+                        self._print_error(f"-- moveCollection failed for {namespace}: {str(e)}")
+                if move_failures:
+                    failure_messages = "; ".join([f"{ns}: {err}" for ns, err in move_failures])
+                    raise RuntimeError(
+                        f"moveCollection failed for {len(move_failures)} collection(s): {failure_messages}"
+                    )
+
         # Report all incompatible indexes at the end
         self._report_incompatible_indexes()
         self._report_skipped_index_options()
@@ -293,10 +316,15 @@ class SchemaMigration:
                 print("-- Skipping shard key migration for collection")
                 self._print_verbose(f"migrate_shard_key=False, skipping shard key migration")
 
-            # Optional collection placement (moveTo). Only meaningful when the collection is unsharded,
-            # i.e. when migrate_shard_key=False. JsonParser rejects moveTo + migrate_shard_key=True up front.
+            # Optional collection placement (moveTo) is deferred until after all collections have
+            # been created. Running moveCollection immediately after create can race with the
+            # routing catalog and contend with concurrent DDL on other namespaces. The deferred
+            # sequential loop runs in migrate_schema() once every collection's schema is in place.
             if collection_config.move_to:
-                self._move_collection(dest_client, db_name, collection_name, collection_config.move_to)
+                self._print_verbose(
+                    f"  Deferring moveCollection for '{db_name}.{collection_name}' -> '{collection_config.move_to}' "
+                    f"until all collections are created"
+                )
 
         # Migrate indexes
         self._print_verbose(f"Reading indexes from source collection")
