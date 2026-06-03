@@ -154,6 +154,35 @@ Before running the assessment, ensure that the client machine meets the followin
         
         **Note:** The collection specified in `co_locate_with` must already exist in the same database as the collection being processed. If the reference collection is not found, the script will fail with an error.
 
+    7. To pin unsharded collections to a specific destination shard
+
+        ```json
+        {
+            "sections": [
+                {
+                    "include": [
+                        "db1.coll1",
+                        "db1.coll2"
+                    ],
+                    "migrate_shard_key": "false",
+                    "drop_if_exists": "true",
+                    "optimize_compound_indexes": "true",
+                    "move_to": "shard_0"
+                }
+            ]
+        }
+        ```
+
+        **Note:** `move_to` issues `db.adminCommand({ moveCollection: "<db>.<coll>", toShard: "<value>" })` on the destination after the collection is created. It cannot be combined with `migrate_shard_key: "true"` — a sharded collection cannot be pinned to a single shard, and the configuration will be rejected at parse time. If the collection already resides on the requested shard, the move is treated as a no-op.
+
+        **Tip:** To discover the valid shard names to use as the `move_to` value, run the following against the destination cluster:
+
+        ```javascript
+        db.adminCommand({ listShards: 1 })
+        ```
+
+        Use the `_id` field of each returned shard document as the `move_to` value.
+
 4. Run the following command, providing the full path of the JSON file created in the previous step:
 
     ```cmd
@@ -212,6 +241,7 @@ This process will generate an Azure DocumentDB-optimized schema with index and s
 | **drop_if_exists** | Specifies whether collections with the same name in the target should be dropped and recreated. If `True`, existing collections are removed before migration; if `False`, they remain unchanged. **Default:** `False`. |
 | **optimize_compound_indexes** | Controls whether compound indexes should be optimized. If `True`, the script identifies redundant indexes and excludes them from migration; if `False`, all indexes are migrated as-is. **Default:** `False`. |
 | **co_locate_with** | Specifies the name of a reference collection from the same database to colocate with. When specified, the target collection will be colocated with the reference collection for improved query performance. The reference collection must exist in the same database before colocation is applied, or an error will be thrown. This option is useful for optimizing queries that join or access related collections together. **Default:** `None`. |
+| **move_to** | Pins an unsharded collection to a specific destination shard by issuing `db.adminCommand({ moveCollection: "<db>.<coll>", toShard: "<value>" })` after the collection is created. Cannot be combined with `migrate_shard_key: "true"` (configuration will be rejected at parse time). If the collection is already on the requested shard, the move is silently skipped. Ignored in `postIngestion` mode since collection drop/create is skipped. **Default:** `None`. |
 
 ### Command Line Options
 

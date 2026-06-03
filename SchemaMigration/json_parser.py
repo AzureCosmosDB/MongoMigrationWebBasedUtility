@@ -55,12 +55,22 @@ class JsonParser:
             drop_if_exists = section.get("drop_if_exists", "false").lower() == "true"
             optimize_compound_indexes = section.get("optimize_compound_indexes", "false").lower() == "true"
             co_locate_with = section.get("co_locate_with")
+            move_to = section.get("move_to")
+            if isinstance(move_to, str):
+                move_to = move_to.strip() or None
+
+            if move_to and migrate_shard_key:
+                raise ValueError(
+                    "move_to cannot be used together with migrate_shard_key=true. "
+                    "A sharded collection cannot be pinned to a single shard."
+                )
 
             self._print_verbose(f"  Configuration:")
             self._print_verbose(f"    - migrate_shard_key: {migrate_shard_key}")
             self._print_verbose(f"    - drop_if_exists: {drop_if_exists}")
             self._print_verbose(f"    - optimize_compound_indexes: {optimize_compound_indexes}")
             self._print_verbose(f"    - co_locate_with: {co_locate_with}")
+            self._print_verbose(f"    - move_to: {move_to}")
 
             for collection in collections_to_migrate:
                 if collection in collection_configs:
@@ -81,7 +91,8 @@ class JsonParser:
                     migrate_shard_key=migrate_shard_key,
                     drop_if_exists=drop_if_exists,
                     optimize_compound_indexes=optimize_compound_indexes,
-                    co_locate_with=co_locate_with
+                    co_locate_with=co_locate_with,
+                    move_to=move_to
                 )
                 collection_configs[collection] = collection_config
         
@@ -101,11 +112,14 @@ class JsonParser:
             if collection == "*":
                 self._print_verbose(f"    Pattern '*' detected - enumerating all databases and collections")
                 # Include all collections in all databases
+                before_count = len(collection_set)
                 for db_name in self.mongo_client.list_database_names():
                     source_db = self.mongo_client[db_name]
                     for collection_name in source_db.list_collection_names():
                         collection_set.add(f"{db_name}.{collection_name}")
                 self._print_verbose(f"    Found {len(collection_set)} total collection(s) across all databases")
+                if len(collection_set) == before_count:
+                    print_warning(f"    WARNING: Pattern '*' matched no collections on the source cluster")
             elif ".*" in collection:
                 # Include all collections in a specific database
                 db_name = collection.split(".*")[0]
@@ -119,6 +133,11 @@ class JsonParser:
                 self._print_verbose(f"    Found {len(db_collections)} collection(s) in database '{db_name}'")
                 for coll in db_collections:
                     self._print_verbose(f"      - {coll}")
+                if not db_collections:
+                    print_warning(
+                        f"    WARNING: Pattern '{collection}' matched no collections "
+                        f"(database '{db_name}' does not exist on the source or is empty)"
+                    )
             else:
                 # Include specific collections
                 db_name, collection_name = collection.split(".", 1)

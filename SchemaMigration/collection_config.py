@@ -13,3 +13,4 @@ class CollectionConfig:
     drop_if_exists: bool
     optimize_compound_indexes: bool = False
     co_locate_with: Optional[str] = None
+    move_to: Optional[str] = None
