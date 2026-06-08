@@ -767,8 +767,12 @@ namespace OnlineMongoMigrationProcessor
                         }
                         else
                         {
-                            _log.WriteLine($"Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken} for {collectionNamespace}", LogType.Error);
-                            throw new Exception($"{_syncBackPrefix} Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}");
+                            // This can happen when an idle cycle advanced the resume timestamp
+                            // via postBatchResumeToken (using DateTime.UtcNow) and subsequent
+                            // change events carry older cluster timestamps. The stored position
+                            // is already ahead, so we skip the update and continue processing.
+                            _log.WriteLine($"{_syncBackPrefix}Skipping resume token update for {collectionNamespace}: stored timestamp {currentTimestamp} is already ahead of batch timestamp {accumulatedChangesInColl.LatestTimestamp}. Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken}", LogType.Warning);
+                            _log.ShowInMonitor($"{_syncBackPrefix}Resume token NOT rolled back for {collectionNamespace} - stored position is already newer.");
                         }
                         
                         _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
