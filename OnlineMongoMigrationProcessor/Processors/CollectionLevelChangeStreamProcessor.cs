@@ -757,22 +757,25 @@ namespace OnlineMongoMigrationProcessor
                         var (currentTimestamp, currentResumeToken, _, _) = GetResumeParameters(mu);
                         string collectionNamespace = $"{mu.DatabaseName}.{mu.CollectionName}";
                         
-                        // We don't allow going backwards in time
-                        if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp >= TimeSpan.FromSeconds(0))
+                        // Advance the resume token to avoid re-processing events that
+                        // were already written to the target. Keep the timestamp at the
+                        // higher of the two values so CursorUtcTimestamp never goes backward
+                        // (idle postBatchResumeToken cycles stamp DateTime.UtcNow which can
+                        // be ahead of the actual event ClusterTime).
+                        var effectiveTimestamp = accumulatedChangesInColl.LatestTimestamp >= currentTimestamp
+                            ? accumulatedChangesInColl.LatestTimestamp
+                            : currentTimestamp;
+
+                        if (effectiveTimestamp != currentTimestamp || accumulatedChangesInColl.LatestResumeToken != currentResumeToken)
                         {
-                            SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
-                            mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
+                            if (accumulatedChangesInColl.LatestTimestamp < currentTimestamp)
+                            {
+                                _log.WriteLine($"{_syncBackPrefix}Resume token advanced for {collectionNamespace} but timestamp kept at {currentTimestamp} (batch timestamp {accumulatedChangesInColl.LatestTimestamp} is older due to idle-cycle UtcNow advancement).", LogType.Warning);
+                            }
+                            SetResumeParameters(mu, effectiveTimestamp, accumulatedChangesInColl.LatestResumeToken, _syncBack);
+                            mu.SetCSLastChange(_syncBack, effectiveTimestamp, accumulatedChangesInColl.LatestResumeToken);
                             if (ShouldPersistMu(mu.Id, isFinalFlush))
                                 MigrationJobContext.SaveMigrationUnit(mu, true);
-                        }
-                        else
-                        {
-                            // This can happen when an idle cycle advanced the resume timestamp
-                            // via postBatchResumeToken (using DateTime.UtcNow) and subsequent
-                            // change events carry older cluster timestamps. The stored position
-                            // is already ahead, so we skip the update and continue processing.
-                            _log.WriteLine($"{_syncBackPrefix}Skipping resume token update for {collectionNamespace}: stored timestamp {currentTimestamp} is already ahead of batch timestamp {accumulatedChangesInColl.LatestTimestamp}. Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken}", LogType.Warning);
-                            _log.ShowInMonitor($"{_syncBackPrefix}Resume token NOT rolled back for {collectionNamespace} - stored position is already newer.");
                         }
                         
                         _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
