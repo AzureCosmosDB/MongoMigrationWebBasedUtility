@@ -3278,6 +3278,8 @@ namespace OnlineMongoMigrationProcessor
 
         /// <summary>
         /// Drops a temporary collection, logging but not throwing on failure.
+        /// Includes a brief post-drop delay to let the server release the namespace catalog lock,
+        /// preventing WriteConflict when mongorestore immediately tries to CREATE the same namespace.
         /// </summary>
         private async Task DropTempCollectionSafeAsync(
             IMongoDatabase targetDb, string tempColName, string nsChunkLog, CancellationToken cancellationToken)
@@ -3285,6 +3287,11 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 await targetDb.DropCollectionAsync(tempColName, cancellationToken);
+                await Task.Delay(3000, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                // Let cancellation propagate naturally
             }
             catch (Exception ex)
             {
