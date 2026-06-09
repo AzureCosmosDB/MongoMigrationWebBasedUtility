@@ -123,6 +123,11 @@ namespace OnlineMongoMigrationProcessor
         // paused worker's finally-block DROP races with a newly-dispatched worker's CREATE.
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _chunkMergeLocks = new();
 
+        // Per-database lock: serializes collection CREATE operations to avoid WiredTiger
+        // catalog lock contention (WriteConflict) when multiple merge workers create temp
+        // collections concurrently on the same database.
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _dbCreateLocks = new();
+
         private MongoDumpRestoreBehavior GetMongoDumpRestoreBehavior()
         {
             var config = new MigrationSettings();
@@ -3102,6 +3107,11 @@ namespace OnlineMongoMigrationProcessor
                     return false; // don't requeue — let dump dispatcher re-download
                 }
 
+                // Pre-create the temp collection under a per-database lock to avoid
+                // WiredTiger catalog lock contention (WriteConflict) when multiple merge
+                // workers issue CREATE concurrently on the same database.
+                await PreCreateCollectionAsync(targetDb, tempColName, targetDbName, nsChunkLog, cancellationToken);
+
                 bool restoreSuccess = await RestoreChunkToTempAsync(mu, chunkIndex, context, targetDbName, tempColName, cancellationToken);
                 if (!restoreSuccess)
                 {
@@ -3282,24 +3292,65 @@ namespace OnlineMongoMigrationProcessor
         }
 
         /// <summary>
-        /// Drops a temporary collection, logging but not throwing on failure.
-        /// No post-drop delay needed since each attempt uses a unique temp collection name,
-        /// eliminating WiredTiger catalog lock contention between DROP and CREATE.
+        /// Pre-creates a temp collection under a per-database semaphore so that mongorestore
+        /// finds it already existing and skips the CREATE command, avoiding WiredTiger catalog
+        /// lock deadlocks when multiple restores target the same database concurrently.
+        /// </summary>
+        private async Task PreCreateCollectionAsync(
+            IMongoDatabase targetDb, string collectionName, string dbName, string nsChunkLog, CancellationToken cancellationToken)
+        {
+            var dbLock = _dbCreateLocks.GetOrAdd(dbName, _ => new SemaphoreSlim(1, 1));
+            await dbLock.WaitAsync(cancellationToken);
+            try
+            {
+                await targetDb.CreateCollectionAsync(collectionName, cancellationToken: cancellationToken);
+                _log?.WriteLine($"[Merge] Pre-created temp collection {dbName}.{collectionName} for {nsChunkLog}", LogType.Debug);
+            }
+            catch (MongoCommandException ex) when (ex.CodeName == "NamespaceExists")
+            {
+                // Collection already exists (e.g. from a previous partial attempt) — safe to proceed
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"[Merge] Failed to pre-create temp collection {dbName}.{collectionName} for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Warning);
+            }
+            finally
+            {
+                dbLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Drops a temporary collection with retry logic, logging but not throwing on failure.
+        /// Retries handle transient errors like connection pool paused or port exhaustion.
         /// </summary>
         private async Task DropTempCollectionSafeAsync(
             IMongoDatabase targetDb, string tempColName, string nsChunkLog, CancellationToken cancellationToken)
         {
-            try
+            const int maxAttempts = 3;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                await targetDb.DropCollectionAsync(tempColName, cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                // Let cancellation propagate naturally
-            }
-            catch (Exception ex)
-            {
-                _log?.WriteLine($"[Merge] Failed to drop temp collection {tempColName} for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                try
+                {
+                    await targetDb.DropCollectionAsync(tempColName, cancellationToken);
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (attempt < maxAttempts)
+                    {
+                        _log?.WriteLine($"[Merge] Drop temp collection {tempColName} failed (attempt {attempt}/{maxAttempts}), retrying: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                        try { await Task.Delay(1000 * attempt, cancellationToken); } catch { return; }
+                    }
+                    else
+                    {
+                        _log?.WriteLine($"[Merge] Failed to drop temp collection {tempColName} for {nsChunkLog} after {maxAttempts} attempts: {Helper.RedactPii(ex.Message)}", LogType.Warning);
+                    }
+                }
             }
         }
 
