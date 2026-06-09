@@ -118,6 +118,10 @@ namespace OnlineMongoMigrationProcessor
         private bool _lastDiskSpaceCheckResult = true;
         private const int DiskSpaceCheckCacheSeconds = 30;
 
+        // Per-chunk merge lock: prevents concurrent merge/cleanup on the same chunk when a
+        // paused worker's finally-block DROP races with a newly-dispatched worker's CREATE.
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _chunkMergeLocks = new();
+
         private MongoDumpRestoreBehavior GetMongoDumpRestoreBehavior()
         {
             var config = new MigrationSettings();
@@ -2978,6 +2982,26 @@ namespace OnlineMongoMigrationProcessor
         }
 
         private async Task<bool> RunCleanupForRestoreRetryAsync(DumpRestoreProcessContext context, CancellationToken cancellationToken)
+        {
+            // Acquire per-chunk lock to prevent concurrent merge/cleanup on the same chunk.
+            // This avoids WriteConflict when an old attempt's finally-block DROP races with
+            // a newly-dispatched attempt's mongorestore CREATE on the same temp collection.
+            string chunkKey = $"{context.MigrationUnitId}_{context.ChunkIndex}";
+            var chunkLock = _chunkMergeLocks.GetOrAdd(chunkKey, _ => new SemaphoreSlim(1, 1));
+
+            await chunkLock.WaitAsync(cancellationToken);
+
+            try
+            {
+                return await RunCleanupForRestoreRetryCoreAsync(context, cancellationToken);
+            }
+            finally
+            {
+                chunkLock.Release();
+            }
+        }
+
+        private async Task<bool> RunCleanupForRestoreRetryCoreAsync(DumpRestoreProcessContext context, CancellationToken cancellationToken)
         {
             var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
             if (mu == null)
