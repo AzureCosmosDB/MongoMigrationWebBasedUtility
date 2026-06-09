@@ -2781,7 +2781,7 @@ namespace OnlineMongoMigrationProcessor
                 context.LastError = ex;
                 context.RetryCount++;
 
-                const int MaxRetries = 3;
+                const int MaxRetries = 10;
 
                 if (context.RetryCount >= MaxRetries || result == TaskResult.Abort)
                 {
@@ -2881,7 +2881,7 @@ namespace OnlineMongoMigrationProcessor
                 context.LastError = ex;
                 context.RetryCount++;
 
-                const int MaxRetries = 3;
+                const int MaxRetries = 10;
 
                 if (context.RetryCount >= MaxRetries || result == TaskResult.Abort)
                 {
