@@ -3287,7 +3287,7 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 await targetDb.DropCollectionAsync(tempColName, cancellationToken);
-                await Task.Delay(1000, cancellationToken);
+                await Task.Delay(3000, cancellationToken);
             }
             catch (OperationCanceledException)
             {
