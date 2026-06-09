@@ -19,6 +19,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 // CS4014: Use explicit discards for intentional fire-and-forget tasks.
@@ -3023,8 +3024,12 @@ namespace OnlineMongoMigrationProcessor
             string sourceColName = mu.CollectionName;
             string targetDbName = mu.GetEffectiveTargetDatabaseName();
             string targetColName = mu.GetEffectiveTargetCollectionName();
-            // Per-chunk temp name keeps concurrent retries on different chunks of the same collection isolated; if a previous attempt crashed mid-merge, restoring into a fresh-but-deterministic temp lets the new attempt drop+recreate without touching the live target.
-            string tempColName = $"{targetColName}.temp4merge_{chunkIndex}";
+            // Per-chunk temp name includes a random suffix so each merge attempt uses a unique namespace.
+            // This eliminates WiredTiger catalog lock contention (WriteConflict) that occurs when
+            // DROP and CREATE race on the same namespace between consecutive attempts or across
+            // remove/re-add cycles where Attempt resets.
+            string tempColPrefix = $"{targetColName}.temp4merge_{chunkIndex}_";
+            string tempColName = $"{tempColPrefix}{Guid.NewGuid().ToString("N").Substring(0, 8)}";
             string nsLog = Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName);
             string nsChunkLog = $"{nsLog}[{chunkIndex}]";
 
@@ -3043,8 +3048,8 @@ namespace OnlineMongoMigrationProcessor
                 var targetCollection = targetDb.GetCollection<BsonDocument>(targetColName);
                 var tempCollection = targetDb.GetCollection<BsonDocument>(tempColName);
 
-                // Step 1: Drop temp collection if it exists (leftover from a previous failed attempt)
-                await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, cancellationToken);
+                // Step 1: Drop all previous temp collections matching the pattern (orphan cleanup from crashed attempts, re-adds, etc.)
+                await DropTempCollectionsByPrefixAsync(targetDb, tempColPrefix, nsChunkLog, cancellationToken);
 
                 // Step 2: Restore chunk to the temp collection via mongorestore
                 _log?.ShowInMonitor($"[Merge] Restoring to temp: {nsChunkLog}");
@@ -3278,8 +3283,8 @@ namespace OnlineMongoMigrationProcessor
 
         /// <summary>
         /// Drops a temporary collection, logging but not throwing on failure.
-        /// Includes a brief post-drop delay to let the server release the namespace catalog lock,
-        /// preventing WriteConflict when mongorestore immediately tries to CREATE the same namespace.
+        /// No post-drop delay needed since each attempt uses a unique temp collection name,
+        /// eliminating WiredTiger catalog lock contention between DROP and CREATE.
         /// </summary>
         private async Task DropTempCollectionSafeAsync(
             IMongoDatabase targetDb, string tempColName, string nsChunkLog, CancellationToken cancellationToken)
@@ -3287,7 +3292,6 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 await targetDb.DropCollectionAsync(tempColName, cancellationToken);
-                await Task.Delay(3000, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -3296,6 +3300,44 @@ namespace OnlineMongoMigrationProcessor
             catch (Exception ex)
             {
                 _log?.WriteLine($"[Merge] Failed to drop temp collection {tempColName} for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+            }
+        }
+
+        /// <summary>
+        /// Drops all temp collections whose name starts with the given prefix.
+        /// Uses ListCollectionNames with a regex filter to find orphaned temp collections
+        /// from previous attempts, crashed merges, or remove/re-add cycles.
+        /// </summary>
+        private async Task DropTempCollectionsByPrefixAsync(
+            IMongoDatabase targetDb, string prefix, string nsChunkLog, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Also drop legacy name without random suffix (pre-upgrade orphan)
+                string legacyName = prefix.TrimEnd('_');
+                await DropTempCollectionSafeAsync(targetDb, legacyName, nsChunkLog, cancellationToken);
+
+                // List collections matching the prefix pattern
+                var filter = new BsonDocument("name", new BsonDocument("$regex", $"^{Regex.Escape(prefix)}"));
+                using var cursor = await targetDb.ListCollectionNamesAsync(new ListCollectionNamesOptions { Filter = filter }, cancellationToken);
+                var matchingNames = await cursor.ToListAsync(cancellationToken);
+
+                if (matchingNames.Count > 0)
+                {
+                    _log?.WriteLine($"[Merge] Found {matchingNames.Count} orphaned temp collection(s) for {nsChunkLog}. Dropping.", LogType.Debug);
+                    foreach (var name in matchingNames)
+                    {
+                        await DropTempCollectionSafeAsync(targetDb, name, nsChunkLog, cancellationToken);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Let cancellation propagate naturally
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"[Merge] Failed to list/drop temp collections by prefix for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Warning);
             }
         }
 
