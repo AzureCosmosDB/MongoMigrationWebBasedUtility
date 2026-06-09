@@ -1646,7 +1646,26 @@ else if (@_showLogBackupFile)
 
             foreach (var mu in migrationUnits)
             {
-                mu.ParentJob = CurrentlyLoadedMigrationJob;                
+                mu.ParentJob = CurrentlyLoadedMigrationJob;
+
+                // Detect re-added collections: if this unit has no chunks but the persisted
+                // version does, the user removed and re-added it to force a fresh start.
+                // Clear the old persisted state so repartitioning will happen on next run.
+                if ((mu.MigrationChunks == null || mu.MigrationChunks.Count == 0) && existingIds.Contains(mu.Id))
+                {
+                    var persisted = MigrationJobContext.GetMigrationUnit(mu.Id);
+                    if (persisted != null && persisted.MigrationChunks != null && persisted.MigrationChunks.Count > 0
+                        && !persisted.SkippedDueToMaxRetries)
+                    {
+                        persisted.MigrationChunks.Clear();
+                        persisted.DumpComplete = false;
+                        persisted.RestoreComplete = false;
+                        persisted.SkippedDueToMaxRetries = false;
+                        persisted.BulkCopyStartedOn = null;
+                        MigrationJobContext.SaveMigrationUnit(persisted, true);
+                        MigrationJobContext.MigrationUnitsCache.RemoveMigrationUnit(mu.Id);
+                    }
+                }
             }
 
             // Add new units that don’t exist in existingUnits
