@@ -619,10 +619,57 @@ namespace OnlineMongoMigrationProcessor.Helpers
                         {
                             if (attempt < MAX_RETRIES)
                             {
-                                int delay = CalculateRetryDelay(attempt);
-                                string errorType = GetTransientErrorType(ex);
-                                _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Details: {ex}", LogType.Warning);
-                                await Task.Delay(delay);
+                                // On timeout exceptions, try splitting the batch into smaller sub-batches
+                                if ((ex is MongoExecutionTimeoutException || ex is TimeoutException) && insertDocs.Count > 1)
+                                {
+                                    int delay = CalculateRetryDelay(attempt);
+                                    int subBatchSize = Math.Max(1, insertDocs.Count / 2);
+                                    _log.WriteLine($"{_logPrefix}Timeout for {collection.CollectionNamespace.FullName} with batch of {insertDocs.Count} inserts. Splitting into sub-batches of {subBatchSize} and retrying after {delay}ms (attempt {attempt + 1}/{MAX_RETRIES})...", LogType.Warning);
+                                    await Task.Delay(delay);
+
+                                    try
+                                    {
+                                        long totalInsertCount = 0;
+                                        foreach (var subBatch in insertDocs.Chunk(subBatchSize))
+                                        {
+                                            var subList = subBatch.ToList();
+                                            if (!isSimulatedRun)
+                                            {
+                                                if (!MongoHelper.IsCosmosRUEndpoint(collection))
+                                                {
+                                                    var insertModels = subList.Select(d => new InsertOneModel<BsonDocument>(d)).ToList();
+                                                    var writeResult = await collection.BulkWriteAsync(insertModels, new BulkWriteOptions { IsOrdered = false });
+                                                    totalInsertCount += writeResult.InsertedCount;
+                                                }
+                                                else
+                                                {
+                                                    await collection.InsertManyAsync(subList, new InsertManyOptions { IsOrdered = false });
+                                                    totalInsertCount += subList.Count;
+                                                }
+                                            }
+                                            else
+                                            {
+                                                totalInsertCount += subList.Count;
+                                            }
+                                        }
+
+                                        counterDelegate(unit, CounterType.Processed, ChangeStreamOperationType.Insert, (int)totalInsertCount);
+                                        result.Processed += (int)totalInsertCount;
+                                        break; // Sub-batch splitting succeeded
+                                    }
+                                    catch (Exception subEx) when (IsTransientException(subEx))
+                                    {
+                                        _log.WriteLine($"{_logPrefix}Sub-batch also timed out for {collection.CollectionNamespace.FullName}. Will retry with longer delay (attempt {attempt + 1}/{MAX_RETRIES})...", LogType.Warning);
+                                        // Fall through to next retry iteration with longer backoff
+                                    }
+                                }
+                                else
+                                {
+                                    int delay = CalculateRetryDelay(attempt);
+                                    string errorType = GetTransientErrorType(ex);
+                                    _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Details: {ex}", LogType.Warning);
+                                    await Task.Delay(delay);
+                                }
                             }
                             else
                             {
@@ -789,10 +836,49 @@ namespace OnlineMongoMigrationProcessor.Helpers
                         {
                             if (attempt < MAX_RETRIES)
                             {
-                                int delay = CalculateRetryDelay(attempt);
-                                string errorType = GetTransientErrorType(ex);
-                                _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Details: {ex}", LogType.Warning);
-                                await Task.Delay(delay);
+                                // On timeout exceptions, try splitting the batch into smaller sub-batches
+                                if ((ex is MongoExecutionTimeoutException || ex is TimeoutException) && updateModels.Count > 1)
+                                {
+                                    int delay = CalculateRetryDelay(attempt);
+                                    int subBatchSize = Math.Max(1, updateModels.Count / 2);
+                                    _log.WriteLine($"{_logPrefix}Timeout for {collection.CollectionNamespace.FullName} with batch of {updateModels.Count} updates. Splitting into sub-batches of {subBatchSize} and retrying after {delay}ms (attempt {attempt + 1}/{MAX_RETRIES})...", LogType.Warning);
+                                    await Task.Delay(delay);
+
+                                    try
+                                    {
+                                        // Split and process sub-batches sequentially
+                                        long totalUpdateCount = 0;
+                                        foreach (var subBatch in updateModels.Chunk(subBatchSize))
+                                        {
+                                            var subList = subBatch.ToList();
+                                            if (!isSimulatedRun)
+                                            {
+                                                var writeResult = await collection.BulkWriteAsync(subList, new BulkWriteOptions { IsOrdered = false });
+                                                totalUpdateCount += writeResult.MatchedCount + writeResult.Upserts.Count;
+                                            }
+                                            else
+                                            {
+                                                totalUpdateCount += subList.Count;
+                                            }
+                                        }
+
+                                        counterDelegate(unit, CounterType.Processed, ChangeStreamOperationType.Update, (int)totalUpdateCount);
+                                        result.Processed += (int)totalUpdateCount;
+                                        break; // Sub-batch splitting succeeded
+                                    }
+                                    catch (Exception subEx) when (IsTransientException(subEx))
+                                    {
+                                        _log.WriteLine($"{_logPrefix}Sub-batch also timed out for {collection.CollectionNamespace.FullName}. Will retry with longer delay (attempt {attempt + 1}/{MAX_RETRIES})...", LogType.Warning);
+                                        // Fall through to next retry iteration with longer backoff
+                                    }
+                                }
+                                else
+                                {
+                                    int delay = CalculateRetryDelay(attempt);
+                                    string errorType = GetTransientErrorType(ex);
+                                    _log.WriteLine($"{_logPrefix}{errorType} detected for {collection.CollectionNamespace.FullName}. Retry {attempt + 1}/{MAX_RETRIES} after {delay}ms... Details: {ex}", LogType.Warning);
+                                    await Task.Delay(delay);
+                                }
                             }
                             else
                             {
