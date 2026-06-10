@@ -3152,8 +3152,10 @@ namespace OnlineMongoMigrationProcessor
                 long localTotalInserted = totalInserted;
                 long localTotalSkipped = totalSkipped;
 
+                bool mergeWasAlreadyUploaded = false;
                 var muLocal = MigrationJobContext.MutateMigrationUnit(context.MigrationUnitId, m =>
                 {
+                    mergeWasAlreadyUploaded = m.MigrationChunks[chunkIndex].IsUploaded == true;
                     m.MigrationChunks[chunkIndex].NeedsCleanup = false;
                     m.MigrationChunks[chunkIndex].Attempt = 0;
                     // Use DumpQueryDocCount when available; fall back to actual inserted + skipped count
@@ -3168,10 +3170,21 @@ namespace OnlineMongoMigrationProcessor
                 restoredCount = muLocal?.MigrationChunks[chunkIndex].RestoredSuccessDocCount ?? (localTotalInserted + localTotalSkipped);
                 mu = muLocal ?? mu;
 
-                // Update tracker and remove from manifest (same as ProcessRestoreSuccess)
+                // Update tracker and remove from manifest (same as ProcessRestoreSuccess).
+                // Guard against double-counting: only increment if this is the first time
+                // the chunk is marked as uploaded. Without this guard, reconciliation can
+                // also count the chunk (via actualUp Exchange) between MutateMigrationUnit
+                // above and this increment, causing the tracker to overcount.
                 context.State = ProcessState.Completed;
                 context.CompletedAt = DateTime.UtcNow;
-                UpdateMigrationUnitTracker(mu.Id, restoreIncrement: 1, caller: "MergeSuccess", chunkIndex: chunkIndex);
+                if (!mergeWasAlreadyUploaded)
+                {
+                    UpdateMigrationUnitTracker(mu.Id, restoreIncrement: 1, caller: "MergeSuccess", chunkIndex: chunkIndex);
+                }
+                else
+                {
+                    _log?.WriteLine($"[Merge] SKIP tracker increment for chunk [{chunkIndex}] - already uploaded (ctxId={context.Id})", LogType.Debug);
+                }
                 _uploadManifest.TryRemove(context.Id, out _);
 
                 // Delete dump file now that data is in target
@@ -3470,6 +3483,11 @@ namespace OnlineMongoMigrationProcessor
                         int actualUp = muSnap.MigrationChunks.Count(c => c.IsUploaded == true);
                         if (actualDown > t.DownloadedChunks) Interlocked.Exchange(ref t.DownloadedChunks, actualDown);
                         if (actualUp > t.RestoredChunks) Interlocked.Exchange(ref t.RestoredChunks, actualUp);
+                        // Also correct downward: if the tracker overcounted (e.g. duplicate success
+                        // increments from concurrent workers), bring it back to the actual chunk state
+                        // to prevent premature completion marking.
+                        if (actualDown < t.DownloadedChunks) Interlocked.Exchange(ref t.DownloadedChunks, actualDown);
+                        if (actualUp < t.RestoredChunks) Interlocked.Exchange(ref t.RestoredChunks, actualUp);
                     }
                     _log?.WriteLine($"CheckCompleted: muId={t.MigrationUnitId}, downloaded={t.DownloadedChunks}/{t.TotalChunks}, restored={t.RestoredChunks}/{t.TotalChunks}, allDown={t.AllDownloadsCompleted}, allRes={t.AllRestoresCompleted}", LogType.Debug);
                 }
@@ -3483,7 +3501,31 @@ namespace OnlineMongoMigrationProcessor
                     string muId = tracker.MigrationUnitId;
                     string targetConnectionString = string.Empty;
 
-                    // Mark migration unit as complete atomically
+                    // Verify actual chunk flags before marking complete. The tracker can
+                    // overcount due to a race between reconciliation (Exchange from actualUp)
+                    // and direct increments (MergeSuccess/ProcessRestoreSuccess) — both can
+                    // count the same chunk when MutateMigrationUnit sets IsUploaded=true
+                    // and reconciliation fires before the direct increment executes.
+                    var verifyMu = MigrationJobContext.GetMigrationUnit(muId);
+                    if (verifyMu?.MigrationChunks != null && verifyMu.MigrationChunks.Count > 0)
+                    {
+                        bool allActuallyDownloaded = verifyMu.MigrationChunks.All(c => c.IsDownloaded == true);
+                        bool allActuallyUploaded = verifyMu.MigrationChunks.All(c => c.IsUploaded == true);
+                        if (!allActuallyDownloaded || !allActuallyUploaded)
+                        {
+                            // Tracker overcounted — correct it back to reality and skip completion
+                            int realDown = verifyMu.MigrationChunks.Count(c => c.IsDownloaded == true);
+                            int realUp = verifyMu.MigrationChunks.Count(c => c.IsUploaded == true);
+                            Interlocked.Exchange(ref tracker.DownloadedChunks, realDown);
+                            Interlocked.Exchange(ref tracker.RestoredChunks, realUp);
+                            _log?.WriteLine($"CheckCompleted: tracker overcount detected for {verifyMu.DatabaseName}.{verifyMu.CollectionName}. " +
+                                $"Actual downloaded={realDown}/{tracker.TotalChunks}, uploaded={realUp}/{tracker.TotalChunks}. " +
+                                $"Skipping premature completion.", LogType.Warning);
+                            continue;
+                        }
+                    }
+
+                    // All chunks verified — mark migration unit as complete atomically
                     var mu = MigrationJobContext.MutateMigrationUnit(muId, m =>
                     {
                         m.DumpComplete = true;
