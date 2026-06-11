@@ -1,5 +1,6 @@
 ﻿using MongoDB.Driver;
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Net.Security;
@@ -13,28 +14,36 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 {
     public static class MongoClientFactory
     {
+        // Cache MongoClient instances by a key derived from connection string + options
+        // to avoid exhausting logical sessions on the server (TooManyLogicalSessions)
+        private static readonly ConcurrentDictionary<string, MongoClient> _clientCache = new();
+
         public static MongoClient Create(Log log,string connectionString, bool ReadConcernMajority=false, string? PEMFileContents=null)
         {
             
             var cleanConnStr = RemovePemPathFromConnectionString(connectionString);
 
-            var settings = MongoClientSettings.FromUrl(new MongoUrl(cleanConnStr));
+            string cacheKey = $"{cleanConnStr}|{ReadConcernMajority}|{!string.IsNullOrWhiteSpace(PEMFileContents)}";
 
-        if (!string.IsNullOrWhiteSpace(PEMFileContents))
+            return _clientCache.GetOrAdd(cacheKey, _ =>
             {
+                var settings = MongoClientSettings.FromUrl(new MongoUrl(cleanConnStr));
 
-                settings.SslSettings = new SslSettings
+                if (!string.IsNullOrWhiteSpace(PEMFileContents))
                 {
-                    ServerCertificateValidationCallback = ValidateAmazonDocDbCertificate(log,PEMFileContents!)
-                };
-            }
+                    settings.SslSettings = new SslSettings
+                    {
+                        ServerCertificateValidationCallback = ValidateAmazonDocDbCertificate(log, PEMFileContents!)
+                    };
+                }
 
-        if(ReadConcernMajority)
-        {
-           settings.ReadConcern = ReadConcern.Majority;
-        }
+                if (ReadConcernMajority)
+                {
+                    settings.ReadConcern = ReadConcern.Majority;
+                }
 
-            return new MongoClient(settings);
+                return new MongoClient(settings);
+            });
         }
 
         private static string RemovePemPathFromConnectionString(string connStr)
