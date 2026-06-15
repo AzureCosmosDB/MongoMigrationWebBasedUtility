@@ -758,18 +758,16 @@ namespace OnlineMongoMigrationProcessor
                         string collectionNamespace = $"{mu.DatabaseName}.{mu.CollectionName}";
                         
                         // We don't allow going backwards in time
-                        if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp >= TimeSpan.FromSeconds(0))
+                        if (accumulatedChangesInColl.LatestTimestamp - currentTimestamp < TimeSpan.FromSeconds(0))
                         {
-                            SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
-                            mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
-                            if (ShouldPersistMu(mu.Id, isFinalFlush))
-                                MigrationJobContext.SaveMigrationUnit(mu, true);
+                            _log.WriteLine($"{_syncBackPrefix}Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}. Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken}", LogType.Error);
+                            _log.ShowInMonitor($"{_syncBackPrefix}Timestamp mismatch detected for {collectionNamespace}. This may indicate a logic error in resume token management. Please investigate the logs for details.");
                         }
-                        else
-                        {
-                            _log.WriteLine($"Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken} for {collectionNamespace}", LogType.Error);
-                            throw new Exception($"{_syncBackPrefix} Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}");
-                        }
+                        SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
+                        mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
+                        if (ShouldPersistMu(mu.Id, isFinalFlush))
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                    
                         
                         _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
                     }

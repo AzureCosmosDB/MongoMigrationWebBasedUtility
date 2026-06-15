@@ -19,6 +19,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 // CS4014: Use explicit discards for intentional fire-and-forget tasks.
@@ -117,6 +118,15 @@ namespace OnlineMongoMigrationProcessor
         private DateTime _lastDiskSpaceCheckedAtUtc = DateTime.MinValue;
         private bool _lastDiskSpaceCheckResult = true;
         private const int DiskSpaceCheckCacheSeconds = 30;
+
+        // Per-chunk merge lock: prevents concurrent merge/cleanup on the same chunk when a
+        // paused worker's finally-block DROP races with a newly-dispatched worker's CREATE.
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _chunkMergeLocks = new();
+
+        // Per-database lock: serializes collection CREATE operations to avoid WiredTiger
+        // catalog lock contention (WriteConflict) when multiple merge workers create temp
+        // collections concurrently on the same database.
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _dbCreateLocks = new();
 
         private MongoDumpRestoreBehavior GetMongoDumpRestoreBehavior()
         {
@@ -2771,7 +2781,7 @@ namespace OnlineMongoMigrationProcessor
                 context.LastError = ex;
                 context.RetryCount++;
 
-                const int MaxRetries = 3;
+                const int MaxRetries = 10;
 
                 if (context.RetryCount >= MaxRetries || result == TaskResult.Abort)
                 {
@@ -2871,7 +2881,7 @@ namespace OnlineMongoMigrationProcessor
                 context.LastError = ex;
                 context.RetryCount++;
 
-                const int MaxRetries = 3;
+                const int MaxRetries = 10;
 
                 if (context.RetryCount >= MaxRetries || result == TaskResult.Abort)
                 {
@@ -2979,6 +2989,26 @@ namespace OnlineMongoMigrationProcessor
 
         private async Task<bool> RunCleanupForRestoreRetryAsync(DumpRestoreProcessContext context, CancellationToken cancellationToken)
         {
+            // Acquire per-chunk lock to prevent concurrent merge/cleanup on the same chunk.
+            // This avoids WriteConflict when an old attempt's finally-block DROP races with
+            // a newly-dispatched attempt's mongorestore CREATE on the same temp collection.
+            string chunkKey = $"{context.MigrationUnitId}_{context.ChunkIndex}";
+            var chunkLock = _chunkMergeLocks.GetOrAdd(chunkKey, _ => new SemaphoreSlim(1, 1));
+
+            await chunkLock.WaitAsync(cancellationToken);
+
+            try
+            {
+                return await RunCleanupForRestoreRetryCoreAsync(context, cancellationToken);
+            }
+            finally
+            {
+                chunkLock.Release();
+            }
+        }
+
+        private async Task<bool> RunCleanupForRestoreRetryCoreAsync(DumpRestoreProcessContext context, CancellationToken cancellationToken)
+        {
             var mu = MigrationJobContext.GetMigrationUnit(context.MigrationUnitId);
             if (mu == null)
             {
@@ -2999,8 +3029,12 @@ namespace OnlineMongoMigrationProcessor
             string sourceColName = mu.CollectionName;
             string targetDbName = mu.GetEffectiveTargetDatabaseName();
             string targetColName = mu.GetEffectiveTargetCollectionName();
-            // Per-chunk temp name keeps concurrent retries on different chunks of the same collection isolated; if a previous attempt crashed mid-merge, restoring into a fresh-but-deterministic temp lets the new attempt drop+recreate without touching the live target.
-            string tempColName = $"{targetColName}.temp4merge_{chunkIndex}";
+            // Per-chunk temp name includes a random suffix so each merge attempt uses a unique namespace.
+            // This eliminates WiredTiger catalog lock contention (WriteConflict) that occurs when
+            // DROP and CREATE race on the same namespace between consecutive attempts or across
+            // remove/re-add cycles where Attempt resets.
+            string tempColPrefix = $"{targetColName}.temp4merge_{chunkIndex}_";
+            string tempColName = $"{tempColPrefix}{Guid.NewGuid().ToString("N").Substring(0, 8)}";
             string nsLog = Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName);
             string nsChunkLog = $"{nsLog}[{chunkIndex}]";
 
@@ -3019,8 +3053,8 @@ namespace OnlineMongoMigrationProcessor
                 var targetCollection = targetDb.GetCollection<BsonDocument>(targetColName);
                 var tempCollection = targetDb.GetCollection<BsonDocument>(tempColName);
 
-                // Step 1: Drop temp collection if it exists (leftover from a previous failed attempt)
-                await DropTempCollectionSafeAsync(targetDb, tempColName, nsChunkLog, cancellationToken);
+                // Step 1: Drop all previous temp collections matching the pattern (orphan cleanup from crashed attempts, re-adds, etc.)
+                await DropTempCollectionsByPrefixAsync(targetDb, tempColPrefix, nsChunkLog, cancellationToken);
 
                 // Step 2: Restore chunk to the temp collection via mongorestore
                 _log?.ShowInMonitor($"[Merge] Restoring to temp: {nsChunkLog}");
@@ -3073,6 +3107,11 @@ namespace OnlineMongoMigrationProcessor
                     return false; // don't requeue — let dump dispatcher re-download
                 }
 
+                // Pre-create the temp collection under a per-database lock to avoid
+                // WiredTiger catalog lock contention (WriteConflict) when multiple merge
+                // workers issue CREATE concurrently on the same database.
+                await PreCreateCollectionAsync(targetDb, tempColName, targetDbName, nsChunkLog, cancellationToken);
+
                 bool restoreSuccess = await RestoreChunkToTempAsync(mu, chunkIndex, context, targetDbName, tempColName, cancellationToken);
                 if (!restoreSuccess)
                 {
@@ -3113,8 +3152,10 @@ namespace OnlineMongoMigrationProcessor
                 long localTotalInserted = totalInserted;
                 long localTotalSkipped = totalSkipped;
 
+                bool mergeWasAlreadyUploaded = false;
                 var muLocal = MigrationJobContext.MutateMigrationUnit(context.MigrationUnitId, m =>
                 {
+                    mergeWasAlreadyUploaded = m.MigrationChunks[chunkIndex].IsUploaded == true;
                     m.MigrationChunks[chunkIndex].NeedsCleanup = false;
                     m.MigrationChunks[chunkIndex].Attempt = 0;
                     // Use DumpQueryDocCount when available; fall back to actual inserted + skipped count
@@ -3129,10 +3170,21 @@ namespace OnlineMongoMigrationProcessor
                 restoredCount = muLocal?.MigrationChunks[chunkIndex].RestoredSuccessDocCount ?? (localTotalInserted + localTotalSkipped);
                 mu = muLocal ?? mu;
 
-                // Update tracker and remove from manifest (same as ProcessRestoreSuccess)
+                // Update tracker and remove from manifest (same as ProcessRestoreSuccess).
+                // Guard against double-counting: only increment if this is the first time
+                // the chunk is marked as uploaded. Without this guard, reconciliation can
+                // also count the chunk (via actualUp Exchange) between MutateMigrationUnit
+                // above and this increment, causing the tracker to overcount.
                 context.State = ProcessState.Completed;
                 context.CompletedAt = DateTime.UtcNow;
-                UpdateMigrationUnitTracker(mu.Id, restoreIncrement: 1, caller: "MergeSuccess", chunkIndex: chunkIndex);
+                if (!mergeWasAlreadyUploaded)
+                {
+                    UpdateMigrationUnitTracker(mu.Id, restoreIncrement: 1, caller: "MergeSuccess", chunkIndex: chunkIndex);
+                }
+                else
+                {
+                    _log?.WriteLine($"[Merge] SKIP tracker increment for chunk [{chunkIndex}] - already uploaded (ctxId={context.Id})", LogType.Debug);
+                }
                 _uploadManifest.TryRemove(context.Id, out _);
 
                 // Delete dump file now that data is in target
@@ -3253,18 +3305,103 @@ namespace OnlineMongoMigrationProcessor
         }
 
         /// <summary>
-        /// Drops a temporary collection, logging but not throwing on failure.
+        /// Pre-creates a temp collection under a per-database semaphore so that mongorestore
+        /// finds it already existing and skips the CREATE command, avoiding WiredTiger catalog
+        /// lock deadlocks when multiple restores target the same database concurrently.
+        /// </summary>
+        private async Task PreCreateCollectionAsync(
+            IMongoDatabase targetDb, string collectionName, string dbName, string nsChunkLog, CancellationToken cancellationToken)
+        {
+            var dbLock = _dbCreateLocks.GetOrAdd(dbName, _ => new SemaphoreSlim(1, 1));
+            await dbLock.WaitAsync(cancellationToken);
+            try
+            {
+                await targetDb.CreateCollectionAsync(collectionName, cancellationToken: cancellationToken);
+                _log?.WriteLine($"[Merge] Pre-created temp collection {dbName}.{collectionName} for {nsChunkLog}", LogType.Debug);
+            }
+            catch (MongoCommandException ex) when (ex.CodeName == "NamespaceExists")
+            {
+                // Collection already exists (e.g. from a previous partial attempt) — safe to proceed
+            }
+            catch (Exception ex)
+            {
+                _log?.WriteLine($"[Merge] Failed to pre-create temp collection {dbName}.{collectionName} for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Warning);
+            }
+            finally
+            {
+                dbLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Drops a temporary collection with retry logic, logging but not throwing on failure.
+        /// Retries handle transient errors like connection pool paused or port exhaustion.
         /// </summary>
         private async Task DropTempCollectionSafeAsync(
             IMongoDatabase targetDb, string tempColName, string nsChunkLog, CancellationToken cancellationToken)
         {
+            const int maxAttempts = 3;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    await targetDb.DropCollectionAsync(tempColName, cancellationToken);
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (attempt < maxAttempts)
+                    {
+                        _log?.WriteLine($"[Merge] Drop temp collection {tempColName} failed (attempt {attempt}/{maxAttempts}), retrying: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                        try { await Task.Delay(1000 * attempt, cancellationToken); } catch { return; }
+                    }
+                    else
+                    {
+                        _log?.WriteLine($"[Merge] Failed to drop temp collection {tempColName} for {nsChunkLog} after {maxAttempts} attempts: {Helper.RedactPii(ex.Message)}", LogType.Warning);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Drops all temp collections whose name starts with the given prefix.
+        /// Uses ListCollectionNames with a regex filter to find orphaned temp collections
+        /// from previous attempts, crashed merges, or remove/re-add cycles.
+        /// </summary>
+        private async Task DropTempCollectionsByPrefixAsync(
+            IMongoDatabase targetDb, string prefix, string nsChunkLog, CancellationToken cancellationToken)
+        {
             try
             {
-                await targetDb.DropCollectionAsync(tempColName, cancellationToken);
+                // Also drop legacy name without random suffix (pre-upgrade orphan)
+                string legacyName = prefix.TrimEnd('_');
+                await DropTempCollectionSafeAsync(targetDb, legacyName, nsChunkLog, cancellationToken);
+
+                // List collections matching the prefix pattern
+                var filter = new BsonDocument("name", new BsonDocument("$regex", $"^{Regex.Escape(prefix)}"));
+                using var cursor = await targetDb.ListCollectionNamesAsync(new ListCollectionNamesOptions { Filter = filter }, cancellationToken);
+                var matchingNames = await cursor.ToListAsync(cancellationToken);
+
+                if (matchingNames.Count > 0)
+                {
+                    _log?.WriteLine($"[Merge] Found {matchingNames.Count} orphaned temp collection(s) for {nsChunkLog}. Dropping.", LogType.Debug);
+                    foreach (var name in matchingNames)
+                    {
+                        await DropTempCollectionSafeAsync(targetDb, name, nsChunkLog, cancellationToken);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Let cancellation propagate naturally
             }
             catch (Exception ex)
             {
-                _log?.WriteLine($"[Merge] Failed to drop temp collection {tempColName} for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Debug);
+                _log?.WriteLine($"[Merge] Failed to list/drop temp collections by prefix for {nsChunkLog}: {Helper.RedactPii(ex.Message)}", LogType.Warning);
             }
         }
 
@@ -3346,6 +3483,11 @@ namespace OnlineMongoMigrationProcessor
                         int actualUp = muSnap.MigrationChunks.Count(c => c.IsUploaded == true);
                         if (actualDown > t.DownloadedChunks) Interlocked.Exchange(ref t.DownloadedChunks, actualDown);
                         if (actualUp > t.RestoredChunks) Interlocked.Exchange(ref t.RestoredChunks, actualUp);
+                        // Also correct downward: if the tracker overcounted (e.g. duplicate success
+                        // increments from concurrent workers), bring it back to the actual chunk state
+                        // to prevent premature completion marking.
+                        if (actualDown < t.DownloadedChunks) Interlocked.Exchange(ref t.DownloadedChunks, actualDown);
+                        if (actualUp < t.RestoredChunks) Interlocked.Exchange(ref t.RestoredChunks, actualUp);
                     }
                     _log?.WriteLine($"CheckCompleted: muId={t.MigrationUnitId}, downloaded={t.DownloadedChunks}/{t.TotalChunks}, restored={t.RestoredChunks}/{t.TotalChunks}, allDown={t.AllDownloadsCompleted}, allRes={t.AllRestoresCompleted}", LogType.Debug);
                 }
@@ -3359,7 +3501,31 @@ namespace OnlineMongoMigrationProcessor
                     string muId = tracker.MigrationUnitId;
                     string targetConnectionString = string.Empty;
 
-                    // Mark migration unit as complete atomically
+                    // Verify actual chunk flags before marking complete. The tracker can
+                    // overcount due to a race between reconciliation (Exchange from actualUp)
+                    // and direct increments (MergeSuccess/ProcessRestoreSuccess) — both can
+                    // count the same chunk when MutateMigrationUnit sets IsUploaded=true
+                    // and reconciliation fires before the direct increment executes.
+                    var verifyMu = MigrationJobContext.GetMigrationUnit(muId);
+                    if (verifyMu?.MigrationChunks != null && verifyMu.MigrationChunks.Count > 0)
+                    {
+                        bool allActuallyDownloaded = verifyMu.MigrationChunks.All(c => c.IsDownloaded == true);
+                        bool allActuallyUploaded = verifyMu.MigrationChunks.All(c => c.IsUploaded == true);
+                        if (!allActuallyDownloaded || !allActuallyUploaded)
+                        {
+                            // Tracker overcounted — correct it back to reality and skip completion
+                            int realDown = verifyMu.MigrationChunks.Count(c => c.IsDownloaded == true);
+                            int realUp = verifyMu.MigrationChunks.Count(c => c.IsUploaded == true);
+                            Interlocked.Exchange(ref tracker.DownloadedChunks, realDown);
+                            Interlocked.Exchange(ref tracker.RestoredChunks, realUp);
+                            _log?.WriteLine($"CheckCompleted: tracker overcount detected for {verifyMu.DatabaseName}.{verifyMu.CollectionName}. " +
+                                $"Actual downloaded={realDown}/{tracker.TotalChunks}, uploaded={realUp}/{tracker.TotalChunks}. " +
+                                $"Skipping premature completion.", LogType.Warning);
+                            continue;
+                        }
+                    }
+
+                    // All chunks verified — mark migration unit as complete atomically
                     var mu = MigrationJobContext.MutateMigrationUnit(muId, m =>
                     {
                         m.DumpComplete = true;
