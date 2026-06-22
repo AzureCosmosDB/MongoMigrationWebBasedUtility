@@ -36,13 +36,30 @@ namespace OnlineMongoMigrationProcessor.Context
 
         public static ActiveMigrationUnitsCache MigrationUnitsCache { get; set; }
 
-        // Track OS process IDs for mongodump and mongorestore to enable cleanup
-        public static List<int> ActiveDumpProcessIds { get; set; } = new List<int>();
-        public static List<int> ActiveRestoreProcessIds { get; set; } = new List<int>();
+        // Reference to the active MigrationProcessor (registered by MigrationWorker when a job starts).
+        // Used by PurgeMigrationUnit to clear in-memory processor state when a collection is removed
+        // from a running job.
+        public static OnlineMongoMigrationProcessor.Processors.MigrationProcessor? ActiveMigrationProcessor { get; set; }
+
+        // Track OS process IDs for mongodump and mongorestore to enable cleanup.
+        // ConcurrentDictionary<int, byte> because Add/Remove are called concurrently from
+        // multiple worker threads; List<T>.Remove(item) is not thread-safe and can throw
+        // ArgumentOutOfRangeException when IndexOf/RemoveAt race against a concurrent Add/Remove.
+        public static System.Collections.Concurrent.ConcurrentDictionary<int, byte> ActiveDumpProcessIds { get; set; } = new();
+        public static System.Collections.Concurrent.ConcurrentDictionary<int, byte> ActiveRestoreProcessIds { get; set; } = new();
 
         public static string ActiveMigrationJobId { get; set; }
 
         public static bool ControlledPauseRequested { get; private set; } = false;
+
+        // Set true by MigrationProcessor.SignalStop(); cleared by MigrationWorker when a new
+        // processor (re)starts. In-flight async continuations
+        // (DocumentCopyWorker.UpdateProgress, CopyProcessor.ProcessSegmentAsync,
+        // MigrationWorker.UpdateDocumentCountsAsync) check this and skip MU writes so
+        // mid-cancel snapshot values are not persisted after Pause. A static (not a
+        // computed property over ActiveMigrationProcessor) because StopMigration nulls out
+        // ActiveMigrationProcessor before all in-flight continuations have drained.
+        public static volatile bool StopRequested = false;
 
 #if LEGACY_MONGODB_DRIVER
         /// <summary>
@@ -123,7 +140,7 @@ namespace OnlineMongoMigrationProcessor.Context
             int killedOrphaned = 0;
             
             // First, kill tracked processes by PID
-            foreach (int pid in ActiveDumpProcessIds.Concat(ActiveRestoreProcessIds))
+            foreach (int pid in ActiveDumpProcessIds.Keys.Concat(ActiveRestoreProcessIds.Keys))
             {
                 try
                 {
@@ -361,15 +378,55 @@ namespace OnlineMongoMigrationProcessor.Context
                 if (mu == null)
                     return false;
 
+                // Reject cross-job writes. MigrationUnit.Id is deterministic from db.collection
+                // (SHA256), so a stale background task from a previous job holds an MU object
+                // whose Id collides with the freshly-added unit in the new active job. Without
+                // this guard, the code below would rebind mu.ParentJob to CurrentlyActiveJob and
+                // overwrite the new job's MigrationUnitBasics (and persisted job JSON) with the
+                // old percent/state — visibly contaminating brand-new jobs.
+                if (CurrentlyActiveJob != null
+                    && !string.IsNullOrEmpty(mu.JobId)
+                    && !string.Equals(mu.JobId, CurrentlyActiveJob.Id, StringComparison.Ordinal))
+                {
+                    AddVerboseLog($"SaveMigrationUnit: rejecting cross-job write for muId={mu.Id} (mu.JobId={mu.JobId}, activeJob.Id={CurrentlyActiveJob.Id}).");
+                    return false;
+                }
+
+                // Reject writes from stale MU instances inside the same job. After a collection
+                // is removed and re-added, the cache is rebuilt with a fresh MU instance; any
+                // pre-purge instance still held by a background worker would otherwise overwrite
+                // the new instance's persisted state with stale chunks/percent values.
+                if (MigrationUnitsCache != null && !string.IsNullOrEmpty(mu.JobId) && !string.IsNullOrEmpty(mu.Id))
+                {
+                    var canonical = MigrationUnitsCache.GetMigrationUnit(mu.Id, mu.JobId);
+                    if (canonical != null && !ReferenceEquals(canonical, mu))
+                    {
+                        AddVerboseLog($"SaveMigrationUnit: rejecting stale MU instance for jobId={mu.JobId}, muId={mu.Id} (not canonical).");
+                        return false;
+                    }
+                }
+
                 if (CurrentlyActiveJob != null)
                     mu.ParentJob = CurrentlyActiveJob;
 
+                bool parentUpdated = true;
                 if(mu.ParentJob != null && updateParent)
-                    mu.UpdateParentJob();      
+                    parentUpdated = mu.UpdateParentJob();
 
+                bool persisted;
                 lock (_writeMULock)
                 {
-                    mu.Persist();
+                    persisted = mu.Persist();
+                }
+
+                // A failed parent update or persist means we couldn't write this MU. Evict it
+                // from the cache so subsequent loads pull the on-disk record, and skip writing
+                // the parent job (which could re-introduce stale basics).
+                if (!parentUpdated || !persisted)
+                {
+                    AddVerboseLog($"SaveMigrationUnit: stale write rejected for {mu.Id} (parentUpdated={parentUpdated}, persisted={persisted}); evicting cache.");
+                    MigrationUnitsCache?.RemoveMigrationUnit(mu.Id);
+                    return false;
                 }
 
                 if (CurrentlyActiveJob != null && updateParent)
@@ -390,6 +447,53 @@ namespace OnlineMongoMigrationProcessor.Context
             {
                 AddVerboseLog($"SaveMigrationUnit FAILED for {mu?.Id}: {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Removes every trace of a migration unit so a later re-add (which deterministically
+        /// regenerates the same id from db+collection) starts from a clean slate. Clears:
+        ///   - persisted MU JSON file (migrationjobs\{jobId}\{muId}.json)
+        ///   - in-memory MigrationUnitsCache entry
+        ///   - per-MU mutate lock in _muMutateLocks
+        ///   - in-memory state inside the active MigrationProcessor / change-stream processors
+        /// Caller is responsible for removing the unit from job.MigrationUnitBasics and persisting
+        /// the job; this method does not mutate the job.
+        /// </summary>
+        public static void PurgeMigrationUnit(string jobId, string muId)
+        {
+            if (string.IsNullOrEmpty(jobId) || string.IsNullOrEmpty(muId))
+                return;
+
+            AddVerboseLog($"MigrationJobContext.PurgeMigrationUnit: jobId={jobId}, muId={muId}");
+
+            try
+            {
+                Store?.DeleteDocument($"migrationjobs\\{jobId}\\{muId}.json");
+            }
+            catch (Exception ex)
+            {
+                AddVerboseLog($"PurgeMigrationUnit: DeleteDocument failed for {jobId}/{muId}: {ex.Message}");
+            }
+
+            try
+            {
+                MigrationUnitsCache?.RemoveMigrationUnit(muId);
+            }
+            catch (Exception ex)
+            {
+                AddVerboseLog($"PurgeMigrationUnit: cache eviction failed for {muId}: {ex.Message}");
+            }
+
+            _muMutateLocks.TryRemove($"{jobId}::{muId}", out _);
+
+            try
+            {
+                ActiveMigrationProcessor?.RemoveMigrationUnit(muId);
+            }
+            catch (Exception ex)
+            {
+                AddVerboseLog($"PurgeMigrationUnit: processor cleanup failed for {muId}: {ex.Message}");
             }
         }
 

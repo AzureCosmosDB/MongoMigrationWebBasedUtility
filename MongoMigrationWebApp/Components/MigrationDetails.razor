@@ -50,20 +50,7 @@
                             </select>
                         </div>
                     }                
-                    <div class="mb-3 checkbox-container">
-                        <div class="checkbox-group">
-                            <label title="Keep the target collection and append new data without deleting existing records.">
-                                <input type="checkbox" id="appendMode" disabled="@(!NewMode)" @bind="appendMode" />
-                                Append Data
-                            </label>
-                        </div>
-                        <div class="checkbox-group">                    
-                            <label title="Skip copying indexes from the source; only data will be migrated.">
-                                <input type="checkbox" id="copyIndex" disabled="@(!NewMode || appendMode || jobType==JobType.RUOptimizedCopy)" @bind="skipIndexes" />
-                                Skip Indexes
-                            </label>
-                        </div>
-                    </div>
+                    
                    
                     <div class="mb-3">
                         <label for="sourceConnectionString" class="form-label">Source Connection String</label>
@@ -83,36 +70,13 @@
                         }
                     </div>
 
-                    <div class="mb-3">
-                        <label for="nameSpaces" class="form-label">Collections To Migrate</label>
-                        <textarea id="nameSpaces" disabled="@(!NewMode || isFileUploaded)" rows="4" placeholder="e.g. db1.col1,db1.col2,db2.col1,db2.col5 or CollectionInfo JSON format as described in readme. Max 1000 characters, use 'Upload File' for larger text." class="form-control" @bind="namespaces" @oninput="OnTextAreaInput"></textarea>
-                        @if (NewMode)
-                        {
-                            <div class="mt-2">
-                                <label for="fileUpload" class="btn btn-sm btn-outline-secondary" style="cursor: pointer;">
-                                    <i class="bi bi-upload"></i> Upload File
-                                </label>
-                                <InputFile id="fileUpload" OnChange="HandleFileUpload" class="d-none" disabled="@isTextAreaUsed" accept=".txt,.json" />
-                                @if (isFileUploaded)
-                                {
-                                    <span class="ms-2 text-success">
-                                        <i class="bi bi-check-circle"></i> @uploadedFileName
-                                    </span>
-                                    <button type="button" class="btn btn-sm btn-link text-danger" @onclick="ClearFileUpload">
-                                        <i class="bi bi-x-circle"></i> Clear
-                                    </button>
-                                }
-                            </div>
-                            @if (isTextAreaUsed && !isFileUploaded)
-                            {
-                                <small class="text-muted">File upload is disabled when text is entered manually.</small>
-                            }
-                            else if (isFileUploaded)
-                            {
-                                <small class="text-muted">Text area is disabled when a file is uploaded.</small>
-                            }
-                        }
-                    </div>
+                    @if (NewMode)
+                    {
+                        <div class="alert alert-info py-2 mb-3">
+                            You will be able to add collections once the job is created.
+                        </div>
+                    }
+
                     <div class="mb-3">
                         <label for="migration-mode" class="form-label" title="Online migration allows live data replication during the process.">
                             Migration Mode
@@ -126,6 +90,31 @@
                             <!--<option value="SyncOnly">Sync Only</option>-->
                         </select>
                     </div>
+                    <div class="mb-3">
+                        <label for="change-stream-scope" class="form-label" title="Specify the scope of change stream monitoring during online migration.">
+                            Change Stream Scope
+                        </label>                
+                        <select id="change-stream-scope" value="@SelectedChangeStreamScope" class="form-select" @onchange="OnChangeStreamScopeChanged" disabled="@(cdcMode == CDCMode.Offline || jobType == JobType.RUOptimizedCopy)">
+                            <option value="Collection" title="Monitor changes at the collection level. Use when collect count is less than 200">Collection</option>
+                            <option value="Server" title="Monitor changes at the server level across all databases. Recommended when migration hundreds of collections.">Server</option>
+                        </select>
+                        <div class="form-text">
+                            <strong>Collection:</strong> Use when the job has fewer than 100 collections.<br />
+                            <strong>Server:</strong> Recommended when migrating hundreds of collections.
+                        </div>
+                    </div>
+                    @if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Collection && changeStreamLevel == ChangeStreamLevel.Server)
+                    {
+                        <div class="alert alert-warning mt-2">
+                            <strong>Warning:</strong> Switching Change Stream Scope from Collection to Server for an existing job cannot be reversed, and change processing will be pushed back to the earliest change since the job was created. Before submitting, verify the oplog has not rotated past that start point.
+                        </div>
+                    }
+                    @if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server && changeStreamLevel == ChangeStreamLevel.Collection)
+                    {
+                        <div class="alert alert-warning mt-2">
+                            <strong>Warning:</strong> Switching Change Stream Scope from Server to Collection will reset the change stream for every collection in this job (equivalent to running Reset Change Stream on each). Processing will restart from when each collection was added to the job. Before submitting, verify the oplog has not rotated past those start points.
+                        </div>
+                    }
                 </div>
 
                 <!-- Advanced Tab Content -->
@@ -141,27 +130,6 @@
                             <option value="@LogType.Verbose">Verbose</option>
                         </select>
                     </div>
-                    <div class="mb-3">
-                        <label for="change-stream-scope" class="form-label" title="Specify the scope of change stream monitoring during online migration.">
-                            Change Stream Scope
-                        </label>                
-                        <select id="change-stream-scope" value="@SelectedChangeStreamScope" class="form-select" @onchange="OnChangeStreamScopeChanged" disabled="@(cdcMode == CDCMode.Offline || jobType == JobType.RUOptimizedCopy)">
-                            <option value="Collection" title="Monitor changes at the collection level. Use when collect count is less than 200">Collection</option>
-                            <option value="Server" title="Monitor changes at the server level across all databases. Recommended when migration hundreds of collections.">Server</option>
-                        </select>
-                    </div>
-                    @if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Collection && changeStreamLevel == ChangeStreamLevel.Server)
-                    {
-                        <div class="alert alert-warning mt-2">
-                            <strong>Warning:</strong> Switching Change Stream Scope from Collection to Server for an existing job cannot be reversed, and change processing will be pushed back to the earliest change since the job was created. Before submitting, verify the oplog has not rotated past that start point.
-                        </div>
-                    }
-                    @if (!NewMode && Job?.ChangeStreamLevel == ChangeStreamLevel.Server && changeStreamLevel == ChangeStreamLevel.Collection)
-                    {
-                        <div class="alert alert-warning mt-2">
-                            <strong>Warning:</strong> Switching Change Stream Scope from Server to Collection will reset the change stream for every collection in this job (equivalent to running Reset Change Stream on each). Processing will restart from when each collection was added to the job. Before submitting, verify the oplog has not rotated past those start points.
-                        </div>
-                    }
                     <div class="mb-3">
                         <label for="change-stream-mode" class="form-label" title="Configure when change stream processing begins during migration.">
                             Change Stream Mode
@@ -219,22 +187,7 @@
                         </div>
                     }                </div>
 
-                @if(ShowWarning())
-                {
-                    <div class="alert alert-warning mt-2">
-                        <label for="overwrite" class="form-label" title="Enable simulated run where no actual writes will occur on the target database.">
-                        <input type="checkbox" id="overwrite" @bind="overwrite" />
-                            I agree to overwrite the target collections. This will remove all existing data in the target collections before migration begins.
-                        </label>
-                        Choose the <b>Append Data</b> option if you want to keep existing data without overwriting it.
-                    </div>
-                }
-                @if (NewMode && appendMode)
-                {
-                    <div class="alert alert-info mt-2 mb-3">
-                        In Append Data, when both the source and target collections contain documents with identical _id values, the de-duplication and conflict checks can significantly impact migration performance. Duplicate records will be skipped — they will not be updated.
-                    </div>
-                }
+                
                 @if (!string.IsNullOrEmpty(errorMessage))
                 {
                     <div class="alert alert-danger mt-2">
@@ -275,8 +228,6 @@
     private bool isSimulatedRun = false; // Variable to track the dummy run option
     private ChangeStreamMode changeStreamMode = ChangeStreamMode.Delayed; // Change stream processing mode
     private bool enableSyncBack = false;// if the migration is online, reverse sync can be enabled
-    private bool skipIndexes = false;// create indexes on Target
-    private bool appendMode = true;// if the target collection exists, it will be deleted
     private bool enableParallelProcessing = true; // Enable parallel processing for dump and restore operations
     private int? maxDumpWorkers = null; // Max parallel dump processes
     private int? maxRestoreWorkers = null; // Max parallel restore processes
@@ -299,20 +250,8 @@
     private CDCMode cdcMode =CDCMode.Offline;
     private string targetConnectionString { get; set; } = string.Empty;
     private bool AllowMongoDump => Configuration.GetValue<bool>("AllowMongoDump");
-    private bool overwrite = false; // Flag to indicate if the target collections should be overwritten
     private string CurrentSourceEndpoint => GetDisplayedEndpoint(sourceConnectionString, sourceEndpoint);
     private string CurrentTargetEndpoint => GetDisplayedEndpoint(targetConnectionString, targetEndpoint);
-
-    // File upload state
-    private bool isFileUploaded = false;
-    private bool isTextAreaUsed = false;
-    private string uploadedFileName = string.Empty;
-
-    private void OnTextAreaInput(ChangeEventArgs e)
-    {
-        var value = e?.Value?.ToString() ?? string.Empty;
-        isTextAreaUsed = !string.IsNullOrWhiteSpace(value);
-    }
 
     private static string GetDisplayedEndpoint(string connectionString, string fallbackEndpoint)
     {
@@ -369,49 +308,6 @@
         defaultInsertionWorkers = Math.Max(1, Math.Min(processorCount / 2, 8));
     }
 
-    private async Task HandleFileUpload(InputFileChangeEventArgs e)
-    {
-        try
-        {
-            var file = e.File;
-
-            if (file == null)
-            {
-                return;
-            }
-
-            // Limit file size to 10MB
-            const long maxFileSize = 10 * 1024 * 1024;
-            if (file.Size > maxFileSize)
-            {
-                errorMessage = "File size exceeds 10MB limit.";
-                return;
-            }
-
-            using var stream = file.OpenReadStream(maxFileSize);
-            using var reader = new StreamReader(stream);
-            namespaces = await reader.ReadToEndAsync();
-
-            isFileUploaded = true;
-            uploadedFileName = file.Name;
-            isTextAreaUsed = false; // Reset text area flag when file is uploaded
-            errorMessage = string.Empty;
-            StateHasChanged();
-        }
-        catch (Exception ex)
-        {
-            errorMessage = $"Error reading file: {ex.Message}";
-        }
-    }
-
-    private void ClearFileUpload()
-    {
-        isFileUploaded = false;
-        uploadedFileName = string.Empty;
-        namespaces = string.Empty;
-        StateHasChanged();
-    }
-
     private void OnModeSelectionChanged(ChangeEventArgs e)
     {
         var val = e?.Value?.ToString() ?? string.Empty;
@@ -453,12 +349,6 @@
         };
     }
 
-    private bool ShowWarning()
-    {
-        // Show warning if the job is new, and append mode is not selected
-        return NewMode && !appendMode && !isSimulatedRun;
-    }
-
     private void OnSelectionChanged(ChangeEventArgs e)
     {
         selectedOption = e?.Value?.ToString() ?? selectedOption;
@@ -471,7 +361,6 @@
 
         if (jobType == JobType.RUOptimizedCopy)
         {
-            skipIndexes = true; // Skip indexes for RU optimized copy
             SelectedChangeStreamMode = "Immediate"; // Set to Immediate for RU optimized copy
             SelectedChangeStreamScope = "Collection"; // Set to Collection for RU optimized copy
             changeStreamMode = ChangeStreamMode.Immediate; // Force to Immediate
@@ -492,8 +381,6 @@
             jobType = JobType.DumpAndRestore;
             selectedOption = "MongoDump and MongoRestore";
             isSimulatedRun = false;
-            skipIndexes = false;
-            appendMode = true;
             enableParallelProcessing = true; // Default to enabled
             maxDumpWorkers = null;
             maxRestoreWorkers = null;
@@ -505,9 +392,6 @@
             SelectedChangeStreamMode = "Delayed"; // Default to Delayed
             SelectedChangeStreamScope = "Collection"; // Default to Collection
             changeStreamLevel = ChangeStreamLevel.Collection; // Default to Collection
-            isFileUploaded = false;
-            isTextAreaUsed = false;
-            uploadedFileName = string.Empty;
         }
         else
         {
@@ -528,8 +412,6 @@
                 _ => "MongoDB Driver"
             };
             isSimulatedRun = Job?.IsSimulatedRun ?? false;
-            skipIndexes = Job?.SkipIndexes ?? false;
-            appendMode = Job?.AppendMode ?? false;
             enableParallelProcessing = Job?.EnableParallelProcessing ?? true;
             maxDumpWorkers = Job?.CurrentDumpWorkers;
             maxRestoreWorkers = Job?.CurrentRestoreWorkers;
@@ -572,12 +454,6 @@
 
     private async void HandleSubmit()
     {
-        if (ShowWarning() && !overwrite)
-        {
-            errorMessage = "Please check the overwrite option to proceed with migration.";
-            return;
-        }
-
         if (string.IsNullOrEmpty(name))
         {
             errorMessage = "Name can't be empty.";
@@ -634,27 +510,6 @@
             return;
         }
 
-        if (NewMode)
-        {
-            var retValue = Helper.ValidateNamespaceFormat(namespaces, jobType);
-
-            if (retValue == null)
-            {
-                errorMessage = "Invalid namespace format.";
-                return;
-            }
-            if (!retValue.Item1)
-            {
-                errorMessage = retValue.Item3;
-                return;
-            }
-            else
-            {
-                namespaces = retValue.Item2;
-            }
-        }
-
-
         var job = new MigrationJob
         {
             Name = name,
@@ -665,8 +520,6 @@
             NameSpaces = namespaces,
             JobType = jobType,
             IsSimulatedRun = isSimulatedRun,
-            SkipIndexes = skipIndexes,
-            AppendMode = appendMode,
             EnableParallelProcessing = enableParallelProcessing,
             CurrentDumpWorkers = maxDumpWorkers ?? defaultDumpWorkers,
             CurrentRestoreWorkers = maxRestoreWorkers ?? defaultRestoreWorkers,

@@ -29,13 +29,21 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
 
             var cacheKey = BuildCacheKey(migrationUnitId, JobId);
 
-            if (_migrationUnits.TryGetValue(cacheKey, out MigrationUnit? cachedMigrationUnit))
+            if (_migrationUnits.TryGetValue(cacheKey, out MigrationUnit? cachedMigrationUnit) && cachedMigrationUnit != null)
                 return cachedMigrationUnit;
 
-            var mu = MigrationJobContext.GetMigrationUnitFromStorage(JobId, migrationUnitId);
+            // Atomic load: under concurrent misses, the factory may run more than once,
+            // but only one MigrationUnit instance ever survives in the dictionary. Every caller
+            // — past, present, and future — sees the same shared instance for this key.
+            var mu = _migrationUnits.GetOrAdd(cacheKey, _ =>
+                MigrationJobContext.GetMigrationUnitFromStorage(JobId, migrationUnitId));
 
-            if (mu != null)
-                _migrationUnits[cacheKey] = mu;
+            if (mu == null)
+            {
+                // Don't keep a null entry around; it would mask future loads.
+                _migrationUnits.TryRemove(new System.Collections.Generic.KeyValuePair<string, MigrationUnit>(cacheKey, null!));
+                return null;
+            }
 
             return mu;
         }

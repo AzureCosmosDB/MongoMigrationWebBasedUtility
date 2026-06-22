@@ -102,6 +102,11 @@ namespace OnlineMongoMigrationProcessor
             MigrationJobContext.AddVerboseLog("MongoChangeStreamProcessor.RunChangeStreamProcessorForAllCollections: starting post-processing");
             await _processor.RunChangeStreamProcessorForAllCollections(cts);
         }
+
+        public void RemoveMigrationUnit(string migrationUnitId)
+        {
+            _processor?.RemoveMigrationUnit(migrationUnitId);
+        }
     }
 }
 #endif // !LEGACY_MONGODB_DRIVER

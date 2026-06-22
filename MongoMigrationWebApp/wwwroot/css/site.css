@@ -228,6 +228,8 @@ a, .btn-link {
 
 .collections-table {
     margin-bottom: 0;
+    table-layout: fixed;
+    width: 100%;
 }
 
 .collections-table thead th {
@@ -236,12 +238,33 @@ a, .btn-link {
     font-weight: 600;
     font-size: 0.875rem;
     padding: 0.75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .collections-table tbody td {
     padding: 0.75rem;
     vertical-align: middle;
     font-size: 0.875rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.collections-table tbody td.cell-scroll-x {
+    overflow-x: auto;
+    overflow-y: hidden;
+    text-overflow: clip;
+}
+
+.collections-table tbody td.cell-scroll-x::-webkit-scrollbar {
+    height: 4px;
+}
+
+.collections-table tbody td.cell-scroll-x::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.25);
+    border-radius: 2px;
 }
 
 .collections-table tbody tr:hover {

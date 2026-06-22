@@ -71,7 +71,9 @@ namespace OnlineMongoMigrationProcessor
                 // Generate query and get document count
                 filter = MongoHelper.GenerateQueryFilter(gte, lt, lte, mu.MigrationChunks[chunkIndex].DataType, MongoHelper.GetFilterDoc(mu.UserFilter), mu.SkipDataTypeFilterForId);
 
+                _log.ShowInMonitor($"Counting documents for {ctx.DatabaseName}.{ctx.CollectionName}[{chunkIndex}] of {mu.MigrationChunks.Count}...");
                 docCount = MongoHelper.GetDocumentCount(ctx.Collection, filter, new BsonDocument());//filter already has user filter.
+                _log.ShowInMonitor($"Counted {docCount} document(s) for {ctx.DatabaseName}.{ctx.CollectionName}[{chunkIndex}] of {mu.MigrationChunks.Count}.");
                 mu.MigrationChunks[chunkIndex].DumpQueryDocCount = docCount;
 
                 ctx.DownloadCount += mu.MigrationChunks[chunkIndex].DumpQueryDocCount;
@@ -206,12 +208,14 @@ namespace OnlineMongoMigrationProcessor
                     mu.RestorePercent = 100;
                     mu.RestoreComplete = true;
 
-                    // Start change stream processing for the completed migration unit
-                    AddCollectionToChangeStreamQueue(mu);
+                    MigrationJobContext.SaveMigrationUnit(mu, true);
 
-                    MigrationJobContext.SaveMigrationUnit(mu,true);
-
-                    MigrationJobContext.MigrationUnitsCache.RemoveMigrationUnit(mu.Id);
+                    // Hand off non-unique index build (and change-stream enqueue on success) to a
+                    // background task so the main migration loop can advance to the next collection
+                    // immediately. Mirrors the dump/restore path where each unit's post-copy work
+                    // runs independently. StopOfflineOrInvokeChangeStreams already defers final
+                    // completion while pending background index builds are in flight.
+                    _migrationWorker?.StartBackgroundIndexBuildAndQueue(mu);
                 }
                 else
                 {

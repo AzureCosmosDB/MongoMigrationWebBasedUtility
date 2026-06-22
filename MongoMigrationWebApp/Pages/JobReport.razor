@@ -105,13 +105,21 @@ else
                     {
                         <div><span class="lbl">Target Namespace:</span> @GetTargetNamespace(mu)</div>
                     }
+                    <div><span class="lbl">Overwrite:</span> @FormatOverwrite(mu.Overwrite)</div>
+                    <div><span class="lbl">Indexing:</span> @FormatIndexing(mu.IndexingStrategy)</div>
+                    <div><span class="lbl">Sharding:</span> @FormatSharding(mu.ShardingStrategy)</div>
+                    @if (mu.ShardingStrategy == ShardingStrategy.DontShard && !string.IsNullOrWhiteSpace(mu.MoveToShard))
+                    {
+                        <div><span class="lbl">Move To Shard:</span> @mu.MoveToShard</div>
+                    }
                 </td>
                 <td class="group-cell">
                     <div><span class="lbl">Source Status:</span> @mu.SourceStatus</div>
                     <div><span class="lbl">Started On (UTC):</span> @(mu.BulkCopyStartedOn?.ToString() ?? "N/A")</div>
                     <div><span class="lbl">Ended On (UTC):</span> @(mu.BulkCopyEndedOn?.ToString() ?? "N/A")</div>
                     <div><span class="lbl">Duration:</span> @duration</div>
-                    <div><span class="lbl">Indexes Migrated:</span> @mu.IndexesMigrated</div>
+                    <div><span class="lbl">Non-Unique Indexes Migrated:</span> @(mu.IndexesExpected > 0 ? $"{mu.IndexesMigrated} of {mu.IndexesExpected}{(mu.IndexesFailed > 0 ? $" ({mu.IndexesFailed} failed)" : string.Empty)}" : mu.IndexesMigrated.ToString())</div>
+                    <div><span class="lbl">Index Build Progress:</span> @(mu.IndexBuildComplete && mu.IndexesFailed == 0 ? "Complete" : mu.IndexBuildComplete ? $"{mu.IndexPercent:F1}% ({mu.IndexesFailed} failed)" : $"{mu.IndexPercent:F1}%")</div>
                     <div><span class="lbl">Estimated Count:</span> @FormatLong(mu.EstimatedDocCount)</div>
                     <div><span class="lbl">Actual Count:</span> @FormatLong(mu.ActualDocCount)</div>
                     <div><span class="lbl">Count While Copying:</span> @FormatLong(mu.SourceCountDuringCopy)</div>
@@ -227,6 +235,28 @@ else
    
 
     private static string FormatLong(long value) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:N0}", value);
+
+    private static string FormatOverwrite(bool? overwrite) => overwrite switch
+    {
+        true => "Overwrite (drop target before copy)",
+        false => "Append (keep existing target data)",
+        _ => "Default"
+    };
+
+    private static string FormatIndexing(IndexingStrategy? strategy) => strategy switch
+    {
+        IndexingStrategy.SameAsSource => "Copy indexes from source (non-blocking)",
+        IndexingStrategy.SameAsSourceBlocking => "Copy indexes from source (blocking)",
+        IndexingStrategy.DontIndex => "Do not create indexes",
+        _ => "Default"
+    };
+
+    private static string FormatSharding(ShardingStrategy? strategy) => strategy switch
+    {
+        ShardingStrategy.SameAsSource => "Copy sharding from source",
+        ShardingStrategy.DontShard => "Do not shard target collection",
+        _ => "Default"
+    };
 
     private static string GetChangeStreamStartedOnForDisplay(MigrationUnit mu, MigrationJob migrationJob)
     {

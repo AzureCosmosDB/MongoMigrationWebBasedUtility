@@ -47,6 +47,17 @@ namespace OnlineMongoMigrationProcessor
                 set => _dict[jobId] = value;
             }
 
+            public bool TryGetValue(string jobId, out string value)
+            {
+                if (_dict.TryGetValue(jobId, out var v))
+                {
+                    value = v;
+                    return true;
+                }
+                value = string.Empty;
+                return false;
+            }
+
             // Add this property to expose dictionary keys
             public IEnumerable<string> Keys => _dict.Keys;
         }

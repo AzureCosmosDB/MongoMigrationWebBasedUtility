@@ -14,7 +14,6 @@ namespace OnlineMongoMigrationProcessor
         public string? MongoDumpToolPath { get; set; }
         public string? MongoRestoreToolPath { get; set; }
         public int LogPageSize { get; set; }
-        public long ChunkSizeInMb { get; set; }
         public int ChangeStreamMaxDocsInBatch { get; set; }
 		public int ChangeStreamBatchDuration { get; set; }
         public int ChangeStreamBatchDurationMin { get; set; }
@@ -68,7 +67,6 @@ namespace OnlineMongoMigrationProcessor
                     MongoToolsDownloadUrl = loadedObject.MongoToolsDownloadUrl;
                     MongoDumpToolPath = loadedObject.MongoDumpToolPath;
                     MongoRestoreToolPath = loadedObject.MongoRestoreToolPath;
-                    ChunkSizeInMb = loadedObject.ChunkSizeInMb;
 					ChangeStreamMaxDocsInBatch = loadedObject.ChangeStreamMaxDocsInBatch == 0 ? 10000 : loadedObject.ChangeStreamMaxDocsInBatch;
 					ChangeStreamBatchDuration = loadedObject.ChangeStreamBatchDuration == 0 ? 120 : loadedObject.ChangeStreamBatchDuration;
                     ChangeStreamBatchDurationMin = loadedObject.ChangeStreamBatchDurationMin == 0 ? 30 : loadedObject.ChangeStreamBatchDurationMin;
@@ -102,8 +100,7 @@ namespace OnlineMongoMigrationProcessor
                 MongoToolsDownloadUrl = "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.10.0.zip";
                 MongoDumpToolPath = string.Empty;
                 MongoRestoreToolPath = string.Empty;
-                ChunkSizeInMb = 512;
-				MongoCopyPageSize = 500;
+                MongoCopyPageSize = 500;
 				ChangeStreamMaxDocsInBatch = 10000;
                 ChangeStreamBatchDuration = 120;
                 ChangeStreamBatchDurationMin = 30;
@@ -116,7 +113,7 @@ namespace OnlineMongoMigrationProcessor
                 LargePartitionsShouldBeSplit = true;
                 MongoDumpRestoreBehavior = MongoDumpRestoreBehavior.DumpAndRestore;
                 IgnoreDuplicatesAndContinueRestore = false;
-                ContinuousDuplicateThresholdInSeconds = 300;
+                ContinuousDuplicateThresholdInSeconds = 2;
                 EnableCSWatchLog = false;
                 OptimizeForLargeDocs = false;
             }

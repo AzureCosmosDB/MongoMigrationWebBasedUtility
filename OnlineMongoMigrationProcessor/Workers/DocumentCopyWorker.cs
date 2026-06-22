@@ -46,6 +46,10 @@ namespace OnlineMongoMigrationProcessor.Workers
             long failureCount,
             long skippedCount)
         {
+            // Skip late progress writes after Pause: an in-flight batch completion must not
+            // overwrite the paused MU state with a mid-cancel snapshot.
+            if (MigrationJobContext.StopRequested)
+                return;
             
             MigrationChunk migrationChunk = mu.MigrationChunks[migrationChunkIndex];
             var percent = Math.Round((double)(successCount + skippedCount) / targetCount * 100, 3);
@@ -238,7 +242,9 @@ namespace OnlineMongoMigrationProcessor.Workers
                 return TaskResult.Success;
             }
 
+            _log.ShowInMonitor($"Counting documents for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}]...");
             segment.QueryDocCount = MongoHelper.GetDocumentCount(_sourceCollection, combinedFilter,null);
+            _log.ShowInMonitor($"Counted {segment.QueryDocCount} document(s) for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}].");
             // Don't save immediately - reduces I/O overhead
 
             try
@@ -276,11 +282,14 @@ namespace OnlineMongoMigrationProcessor.Workers
                     _log.WriteLine($"Document copy completed for segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] with {_successCount} documents copied.", LogType.Debug);
                 }
                 bool processed = !failed;
-                MigrationJobContext.MutateMigrationUnit(mu.Id, m =>
+                if (!MigrationJobContext.StopRequested)
                 {
-                    var seg = m.MigrationChunks[migrationChunkIndex].Segments.FirstOrDefault(s => s.Id == segmentId);
-                    if (seg != null) seg.IsProcessed = processed;
-                }, updateParent: false);
+                    MigrationJobContext.MutateMigrationUnit(mu.Id, m =>
+                    {
+                        var seg = m.MigrationChunks[migrationChunkIndex].Segments.FirstOrDefault(s => s.Id == segmentId);
+                        if (seg != null) seg.IsProcessed = processed;
+                    }, updateParent: false);
+                }
                 return failed ? TaskResult.Retry : TaskResult.Success;
             }
             catch (Exception ex) when (!(ex is OperationCanceledException))

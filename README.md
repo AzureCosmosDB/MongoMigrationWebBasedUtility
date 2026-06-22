@@ -24,10 +24,16 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
   - [Choosing the Right Deployment](#choosing-the-right-deployment)
 - [On-Premises Deployment](#on-premises-deployment)
 - [How to Use](#how-to-use)
+  - [First-time sign-in](#first-time-sign-in)
   - [Schema Migration Tool](#schema-migration-tool)
   - [Add a New Job](#add-a-new-job)
+  - [Manage Collections](#manage-collections)
+    - [Per-collection options](#per-collection-options)
+    - [Indexing: blocking vs non-blocking](#indexing-blocking-vs-non-blocking)
+    - [Sharding and Move-to-shard](#sharding-and-move-to-shard)
   - [Migration modes](#migration-modes)
   - [Job options and behaviors](#job-options-and-behaviors)
+  - [Async partitioning and index-build monitoring](#async-partitioning-and-index-build-monitoring)
   - [Get List of Collections](#get-list-of-collections)
   - [View a Job](#view-a-job)
   - [Update Web App Settings](#update-web-app-settings)
@@ -147,7 +153,11 @@ The MongoDB Migration Web-Based Utility can be deployed to Azure using three dif
 
 ### Schema Migration Tool
 
-Before migrating your data, it's essential to prepare your target Azure DocumentDB environment with the proper schema structure. The **Schema Migration Tool** (located in the `/SchemaMigration` folder) automates this critical preparation step.
+> **Optional.** The same capabilities — collection creation, index migration (including unique indexes built before data copy), shard-key migration, and per-collection placement — are now built directly into the Migration Web App via **Manage Collections** (see [Per-collection options](#per-collection-options), [Indexing: blocking vs non-blocking](#indexing-blocking-vs-non-blocking), and [Sharding and Move-to-shard](#sharding-and-move-to-shard)). For most migrations you can skip this section and configure everything from the UI.
+>
+> You may still want to run the standalone **Schema Migration Tool** in the `/SchemaMigration` folder when you need to: pre-stage the target schema independently of data movement, take advantage of its **redundant compound-index removal** and **collection colocation** heuristics, or script schema preparation as a separate CI/CD step. When you do use it, run the Migration Web App with **Overwrite = False** on each collection (so the data migration preserves the schema you already created — see [Per-collection options](#per-collection-options)) and pair it with **Indexing strategy = Do not create indexes**.
+
+The **Schema Migration Tool** (located in the `/SchemaMigration` folder) analyzes your source MongoDB collections and prepares the target Azure DocumentDB environment up-front.
 
 #### What It Does
 
@@ -163,15 +173,15 @@ The Schema Migration Tool analyzes your source MongoDB collections and intellige
 - **Index Optimization**: Identifies and removes redundant compound indexes to improve performance
 - **Collection Colocation**: Groups related collections together for better query performance
 
-#### Why Schema Migration Must Be Performed First
+#### When to use the standalone tool vs the built-in UI
 
-Running the Schema Migration Tool **before** data migration is crucial for several reasons:
-
-1. **Performance Optimization**: Creating indexes after data is loaded can be extremely time-consuming and resource-intensive. Pre-creating indexes ensures optimal write performance during bulk data migration.
-
-2. **Schema Compatibility**: Azure DocumentDB may have different schema requirements or optimizations compared to your source MongoDB. The tool ensures your target schema is properly configured before data arrives.
-
-3. **Sharding Configuration**: If your collections are sharded, the shard key must be defined before any data is written to the collection. You cannot add or modify shard keys after data insertion.
+| Need | Use |
+|---|---|
+| Standard migration, want everything in one place | **Manage Collections** (built-in) |
+| Pre-stage schema separately from data movement | Standalone Schema Migration Tool |
+| Automatic redundant compound-index removal | Standalone Schema Migration Tool |
+| Heuristic-based collection colocation across shards | Standalone Schema Migration Tool |
+| Scripted / CI-driven schema preparation | Standalone Schema Migration Tool |
 
 #### Quick Start
 
@@ -182,29 +192,98 @@ python main.py --config-file <config.json> --source-uri <source_connection_strin
 
 **[📖 Complete Schema Migration Guide](SchemaMigration/README.md)**
 
-#### Recommended Workflow
+#### Recommended Workflow (when using the standalone tool)
 
 1. ✅ **Schema Migration**: Run the Schema Migration Tool to prepare your Azure DocumentDB environment
 2. ✅ **Verify Schema**: Confirm all collections, indexes, and shard keys are correctly created
-3. ✅ **Data Migration**: Use the main Migration Web App to copy your data
+3. ✅ **Data Migration**: Use the main Migration Web App to copy your data, with **Overwrite = False** and **Indexing strategy = Do not create indexes** on each collection
 4. ✅ **Validate**: Verify data integrity and application compatibility
 
-> **Important**: When running data migration after schema migration, ensure you enable **Append Mode** in the Migration Web App. This preserves the collections, indexes, and shard keys created by the Schema Migration Tool. Without Append Mode, the data migration tool may drop and recreate collections, losing your optimized schema configuration.
+> **Important**: When running data migration after schema migration, set each collection's **Overwrite** option to `False` in **Manage Collections**. This preserves the collections, indexes, and shard keys created by the Schema Migration Tool. With Overwrite = `True`, the data migration would drop and recreate the target collections, losing your optimized schema.
+
+### First-time sign-in
+
+The web app is protected by a single application password.
+
+1. The first time you open the app, it redirects to the **Change Password** screen because no password has been set yet. Pick a strong password and submit — this becomes the application password.
+2. Subsequent visits go to the **Login** screen, where you enter the same password.
+3. You can change the password later from the **Change Password** link in the layout.
+
 
 ### Add a New Job
 
-1. Go to the home page. Click **New Job**.  
-2. In the **New Job Details** pop-up, enter all required information.  
-3. Refer to [Collections input formats](#collections-input-formats) to learn multiple ways to input collection list for migration. If necessary, use the [list collection steps](#get-list-of-collections) to create a comma-separated list of collection names.  
-4. Choose the migration tool: either **Mongo Dump/Restore** or **Mongo Driver**.  
-5. Select the desired [migration mode](#migration-modes).
-1. Select **Append Mode** to preserve existing collection(s) on the target without deleting them.  
-1. Select **Skip Indexes** to prevent the tool from copying indexes from the source.
-1. Once all fields are filled, select **OK**.  
-1. The job will automatically start if no other jobs are running.  
+1. Go to the home page. Click **New Job**.
+2. In the **New Job Details** pop-up enter the job **Name**, **Source Connection String**, and **Target Connection String**.
+3. Pick the **Migration Tool** (MongoDump and MongoRestore, MongoDB Driver, or MongoDB Driver — Cosmos DB RU read optimized) and the **Migration Mode** (Offline or Online).
+4. Optionally switch to the **Advanced** tab to set Log Level, Change Stream Scope, Change Stream Mode, Post Migration Sync Back, Simulation Mode, and Parallel Processing knobs.
+5. Click **OK** to create the job. The dialog tells you up front: *"You will be able to add collections once the job is created."*
 
+> **What changed:** The New Job dialog no longer accepts a collection list, Append Mode toggle, Skip Indexes toggle, or `_id` ObjectId flag. Collections (and all per-collection options) are now added from the job's **Manage Collections** dialog after the job is created. This lets you stage a curated list, edit each entry, and apply changes as a single batch.
 
 **Note for Azure Web App deployments:** For the Mongo Dump/Restore option, the Web App will download the mongo-tools from the URL specified in the Web App settings. Ensure that the Web App has access to this URL. If the Web App does not have internet access, you can download the mongo-tools zip file to your development machine, then copy it to the wwwroot folder inside the published folder before compressing it. Afterward, update the URL in the Web App settings to point to the Web App's URL (e.g., https://<WebAppName>.azurewebsites.net/<zipfilename.zip>). This note does not apply to Azure Container Apps (ACA) deployments, where mongo-tools are pre-installed in the container image.
+
+### Manage Collections
+
+After a job is created (or whenever a job is paused), open **Manage Collections** from the Job Viewer to add, remove, and configure collections. The dialog has two views:
+
+- **List view** — searchable, paginated table of the job's collections plus any drafts you stage.
+- **Summary view** — preview of the additions and removals you are about to apply, with conflict warnings if the same namespace appears in both lists.
+
+Common operations:
+
+- **Add collections** — Opens the **Add** panel. Paste namespaces (`db.collection`, one per line, wildcards like `db.*` supported) or upload a `.txt` (CSV of namespaces) or `.json` (CollectionInfo array) file. The contents are appended to the textarea so you can review before adding.
+- **Edit a draft** — Click the pencil icon on a draft row to change its options inline.
+- **Remove a collection** — Click the trash icon to queue an existing collection for removal. Use the undo arrow to take it off the removal list before applying. Removing a partially or fully migrated collection discards its migration and change-stream state.
+- **Bulk actions** — Select rows with the checkboxes to apply Overwrite, Indexing, Sharding, Move-to-shard, Clear filter, or pin `_id` BSON type to all selected drafts in one click.
+- **Search / filter** — Filter by namespace text or by row type (Existing, New drafts, Pending removal).
+
+Click **Next** to review pending additions/removals, then **Apply changes** to commit. Nothing is persisted until you confirm in the summary view.
+
+#### Per-collection options
+
+Each collection (draft or existing) carries its own options. The badges on the list view summarise these. Locked options show a *Locked* badge with the reason.
+
+| Option | Values | Notes |
+|---|---|---|
+| **Overwrite** | `False` (append) / `True` (drop target first) | When `False` the target keeps its current collection, indexes, and shard key. Indexing, Sharding, and Move-to are locked because the target is not recreated. |
+| **Indexing strategy** | `Copy indexes from source (non-blocking)` / `Copy indexes from source (blocking)` / `Do not create indexes` | See [Indexing: blocking vs non-blocking](#indexing-blocking-vs-non-blocking). |
+| **Sharding strategy** | `Copy sharding from source` / `Do not shard target collection` | Mutually exclusive with **Move to shard** — see [Sharding and Move-to-shard](#sharding-and-move-to-shard). |
+| **Move to shard** | `Don't move` / `Auto` / `<shard name>` | Only available when Sharding = *Do not shard* and the target cluster has more than one shard. |
+| **Filter (JSON)** | MongoDB query JSON | Applies to bulk copy and change stream. Filters are not supported for RU-optimized copy jobs. |
+| **_id data type** | `Unknown / Multiple (auto-detect)` or a pinned BSON type | Pinning skips the per-collection probe and speeds up partitioning when you already know the `_id` type. |
+
+> Simulation Mode and RU-optimized copy disable Indexing, Sharding, and Move-to options automatically.
+
+#### Indexing: blocking vs non-blocking
+
+The tool splits index migration into two phases, and the `blocking` / `non-blocking` choice only affects the second phase. Both phases only run when the strategy is `Copy indexes from source (non-blocking)` or `Copy indexes from source (blocking)` — choosing `Do not create indexes` skips them both.
+
+1. **Unique indexes — built before data copy.** When a *Copy indexes from source* strategy is selected, all unique indexes from the source are created on the target collection up-front, before any documents are inserted. This makes duplicate-key violations on the source surface immediately during the copy (instead of having to be detected and reconciled later), and ensures any constraints the application relies on are enforced from the first write.
+2. **Non-unique indexes — built after data copy.** Indexes that are not unique are submitted on the target only after the bulk copy of the collection finishes. Building them after the data is loaded is dramatically faster and cheaper than maintaining them per-write during the bulk insert. The **Indexing strategy** controls how this second phase interacts with the change stream:
+
+- **Copy indexes from source (non-blocking)** — Submit the non-unique index build, then let the **change stream start in parallel** while the target builds the indexes in the background. The Job Viewer shows the index build progress and **defers job completion** until all background builds finish. Best when you want minimum cut-over lag and the source oplog retention is short.
+- **Copy indexes from source (blocking)** — Submit the non-unique index build and **wait for it to complete before the change stream starts** for that collection. Use this when you have a **large number of non-unique indexes to build** and want the job to finish ASAP, or when the target has limited capacity and you don't want change-stream writes competing with index builds. Because the change stream is held back, **make sure the source oplog retention is large enough to cover the index build duration** — otherwise the change stream may fall off the oplog and the job will need a full resync for that collection.
+- **Do not create indexes** — Skip the index migration entirely: **neither unique nor non-unique indexes are created** on the target. The target collection is still created, but no indexes are copied from the source. Use this when you have already provisioned the target schema yourself (for example, via the Schema Migration Tool) or when you don't need indexes on the target. If the source has unique indexes and your application depends on those constraints, create them on the target **before** the data copy runs — otherwise duplicate-key conflicts will only be discovered later.
+
+**Rule of thumb:**
+
+- Few indexes / online job with a small/medium oplog → **non-blocking**.
+- Many indexes (long total build time) or you want a clean finish line → **blocking**, after confirming the oplog retention covers both bulk copy and the longest index build.
+- Schema already created on the target → **Do not create indexes** + **Overwrite = False** (append).
+
+#### Sharding and Move-to-shard
+
+These two options are **mutually exclusive** and operate on the target collection right after it is created (and before the data copy begins):
+
+- **Sharding = Copy sharding from source** — Reads the shard key from the source collection (if the source is sharded) and applies the same shard key on the target via `shardCollection`. The collection is created as a sharded collection on the target.
+- **Sharding = Do not shard target collection** — The target collection is created unsharded. You can additionally pin it to a specific shard with **Move to shard**:
+  - `Don't move` — Let the server place the collection (default).
+  - `Auto` — The tool runs a greedy bin-pack across the cluster's shards, distributing collections by source storage size so each shard receives roughly equal data.
+  - `<shard name>` — Pin the collection to that specific shard via `moveCollection`.
+
+> **Co-locate related collections on the same shard.** When you use **Move to shard** to manually place unsharded collections, keep collections that are queried together (via `$lookup`, `$unionWith`, or `$merge`) on the **same shard**. Cross-shard joins and merges are far more expensive than co-located ones and can dominate query latency. Use a single named shard for a related group, rather than `Auto`, when you need that guarantee.
+
+The `Auto` and named-shard moves use admin `moveCollection`, which is supported on Azure DocumentDB The tool defers the move briefly after collection creation and retries on transient internal errors before giving up.
 
 
 ### Migration modes
@@ -222,7 +301,7 @@ For online jobs, ensure that the oplog retention size of the source MongoDB is l
 
 ### Job options and behaviors
 
-When creating or resuming a job, you can tailor behavior via these options:
+When creating or resuming a job, you can tailor behavior via these options. **Append Mode** (now per-collection Overwrite), **Skip Indexes** (now per-collection Indexing strategy), and the **All collections use ObjectId for the _id field** flag have moved to **Manage Collections** — see [Per-collection options](#per-collection-options).
 
 - Migration tool
     - MongoDump and MongoRestore: Uses mongo-tools. Best for moving from self-hosted or Atlas to Cosmos DB. Requires access to Mongo Tools ZIP URL configured in Settings.
@@ -233,12 +312,12 @@ When creating or resuming a job, you can tailor behavior via these options:
     - Offline: Snapshot-only copy. Job completes automatically when copy finishes.
     - Online: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
 
-- Append Mode
-    - If ON: Keeps existing target data and appends new documents. No collection drop. Good for incremental top-ups.
-    - If OFF: Target collections are overwritten. A confirmation checkbox is required to proceed.
-
-- Skip Indexes
-    - If ON: Skips index creation on target (data only). Forced ON for RU-optimized copy. You can create indexes separately before migration.
+- Per-collection options (set in **Manage Collections**)
+    - **Overwrite**: drop the target collection before migration (`True`) or append to existing target (`False`).
+    - **Indexing strategy**: `Copy indexes from source (non-blocking)`, `Copy indexes from source (blocking)`, or `Do not create indexes`. See [Indexing: blocking vs non-blocking](#indexing-blocking-vs-non-blocking).
+    - **Sharding strategy / Move to shard**: copy the source shard key onto the target, or create the target unsharded and optionally pin it to a specific shard. See [Sharding and Move-to-shard](#sharding-and-move-to-shard).
+    - **Filter**: MongoDB query JSON applied to bulk copy and change stream.
+    - **_id data type**: optionally pin the BSON type of `_id` to skip per-collection probing.
 
 - Change Stream Scope (configured in the **Advanced** tab of the **New Job Details** screen)
     - **Collection**: Opens a separate change stream per collection. Collections are batched together and processed in round-robin fashion, so each collection is watched only during its turn. This can lead to higher lag when migrating many collections because each collection must wait for its batch slot. Best when the number of collections is small (roughly < 50) or when only a few collections receive frequent writes.
@@ -252,10 +331,21 @@ When creating or resuming a job, you can tailor behavior via these options:
 - Post Migration Sync Back
     - For online jobs, after Cut Over you can enable syncing from target back to source. This reduces rollback risk. UI shows Time Since Sync Back once active.
 
-> **Note:** Earlier versions exposed an **All collections use ObjectId for the _id field** checkbox on the New Job and Manage Collections screens, plus a **Binary format utilized for the _id** option in Settings, and a `DataTypeFor_Id` field in the CollectionInfo JSON. These inputs have been removed. The tool now probes each collection at partition time and automatically detects which `_id` BSON types are present, enabling ObjectId-specific optimizations and skipping the `$type` predicate when only one type exists — no user input is required.
+> **Note:** Earlier versions exposed an **All collections use ObjectId for the _id field** checkbox on the New Job and Manage Collections screens, plus a **Binary format utilized for the _id** option in Settings, and a `DataTypeFor_Id` field in the CollectionInfo JSON. These inputs have been removed. The tool now probes each collection at partition time and automatically detects which `_id` BSON types are present, enabling ObjectId-specific optimizations and skipping the `$type` predicate when only one type exists — no user input is required. You can still pin a type per collection from **Manage Collections** if you want to skip the probe.
 
 - Simulation Mode (No Writes to Target)
     - Runs a dry-run where reads occur but no writes are performed on target. Useful for validation and sizing.
+
+### Async partitioning and index-build monitoring
+
+The migration pipeline overlaps preparation, copy, and index builds so collections start moving as soon as they are ready instead of waiting for the whole job to be prepped.
+
+- **Async partitioning** — For driver and dump/restore jobs, the worker partitions each collection (validate source, count documents, prepare target, compute chunk boundaries) in a background pool while collections that are already partitioned start copying. Concurrency is capped automatically (up to 8, scaled by available CPUs / parallel-threads). The Monitor pane reports progress as `Background preparation: N/M collection(s) ready`. RU-optimized copy jobs keep the original sequential partition-then-copy flow.
+- **Index-build monitoring** — Unique indexes are created synchronously on the target **before** the bulk copy starts, so any duplicate-key conflicts surface immediately. After the bulk copy of a collection finishes the tool then kicks off the **non-unique** index builds (per the per-collection [Indexing strategy](#indexing-blocking-vs-non-blocking)) and tracks them via `currentOp`:
+    - Blocking mode waits in-process for the target's non-unique index builds to finish before allowing the change stream to start for that collection.
+    - Non-blocking mode lets the change stream run in parallel, monitoring non-unique index builds in the background and **deferring offline job completion** until every build is finished. The Job Viewer's collection table shows `N indexes (xx.x%)` while builds are running, `Success` when complete, or a failed-count suffix if any builds were rejected.
+    - Both modes handle stalls: if no `currentOp` progress is seen for an extended window the tool unblocks the change stream and surfaces a Monitor warning so you can finish the missing indexes manually on the target.
+- **Cut Over readiness** — For online jobs, Cut Over stays disabled until every collection has `IndexBuildComplete = true` (or 100% indexed) in addition to the usual zero-lag check.
 
 ### Get List of Collections
 
@@ -329,10 +419,10 @@ The job processes collections in the order they are added. Since larger collecti
 1. Depending on the job's status, one or more of the following buttons will be visible:  
    - **Resume Job**: Visible if the migration is paused. Select this to resume the current job. The app may prompt you to provide the connection strings if the cache has expired.
    - **Pause Job**: Visible if the current job is running. Select this to pause the current job. You can resume it later.  
-   - **Update Collections**: Select this to add/remove collections in the current job. You can only update collections for a paused job. Removing a collection that is partially or fully migrated will lead to the loss of its migration details, and you will need to remigrate it from the start.  
+   - **Update Collections**: Opens **Manage Collections** to add or remove collections in the current job. Only available on a paused job. Removing a collection that is partially or fully migrated discards its migration and change stream state, and the collection must be remigrated from the start.  
    - **Cut Over**: Select this to cut over an online job when the source and target are completely synced. Before cutting over, ensure to stop write traffic to the source and wait for the Time Since Last Change to become zero for all collections. Once cut over is performed, there is no rollback.  
 1. The **Monitor** section lists the current actions being performed.  
-1. The **Logs** section displays system-generated logs for debugging. You can download the logs by selecting the **download icon** next to the header.  
+1. The **Logs** section displays system-generated logs for debugging. You can download the logs by selecting the **download icon** next to the header. For very large log files the app prompts you with a **Download in Pages** dialog so you can fetch the log a page at a time (each page is the size configured under *Log page size* in Settings) and resume if the browser drops a download.  
 
 **Note**: An offline job will automatically terminate once the data is copied. However, an online job requires a manual cut over to complete.
 
@@ -380,9 +470,6 @@ These settings are persisted per app instance and affect all jobs:
         - If your app has no internet egress, upload ZIP file(s) alongside your app content and point to those hosted URLs.
         - URLs must start with `https://` and end with `.zip`.
 
-- Chunk size (MB) for mongodump
-    - Range: 2–5120. Affects download-and-upload batching for Dump/Restore.
-
 - Mongo driver page size
     - Range: 50–40000. Controls batch size for driver-based bulk reads/writes.
 
@@ -405,6 +492,21 @@ These settings are persisted per app instance and affect all jobs:
       - **Use Adjusted Time Boundaries**: Time-based boundaries adjusted by actual record counts (best for balanced chunks)
       - **Use Pagination**: Pagination-based boundaries for equal-sized chunks (deterministic)
     - See [Multiple Partitioners for ObjectId](#multiple-partitioners-for-objectid) for detailed explanations.
+
+- Non ObjectId Partitioner
+    - Partitioning method for collections whose `_id` is not an ObjectId (e.g., string, int, binary, compound). Choose between **Use Sample Command** and **Use Pagination**.
+
+- Split large partitions automatically
+    - When enabled, oversized chunks discovered during dump query planning are split further before processing. Helps even out worker load when a single chunk would otherwise dominate runtime.
+
+- Optimize for large docs
+    - Tunes the change-stream pipeline for collections with large documents (lower batch fan-out, smaller in-flight windows) to avoid pressure on driver buffers and worker memory.
+
+- Enable change stream watch logging
+    - Records a diagnostic entry on the target for every change stream watch cycle. See [Change Stream Watch Log](#change-stream-watch-log).
+
+- Log page size
+    - Number of log entries per page. Also controls the page size used by the **Download in Pages** dialog on very large log files.
 
 - Ignore duplicates during Restore
     - When enabled, MongoRestore continues past the duplicate-key threshold instead of stopping the chunk and queuing duplicate cleanup. This avoids costly per-document cleanup retries but means duplicate documents are silently skipped. Only applies to Dump and Restore jobs.
@@ -453,8 +555,8 @@ You can use different versions of `mongodump` and `mongorestore` when source com
 
 - **Resume Job**: Resume with updated or existing connection strings.
 - **Pause Job**: Safely pause the running job.
-- **Cut Over**: For online jobs, enabled when change stream lag reaches zero for all collections. You can choose Cut Over with or without Sync Back.
-- **Update Collections**: Add/remove collections on a paused job. Removing a collection discards its migration and change stream state.
+- **Cut Over**: For online jobs, enabled when change stream lag reaches zero for all collections **and** all background index builds have completed. You can choose Cut Over with or without Sync Back.
+- **Manage Collections**: Add or remove collections on a paused job; edit per-collection Overwrite, Indexing, Sharding, Move-to-shard, Filter, and `_id` type options for drafts. See [Manage Collections](#manage-collections). Removing a collection discards its migration and change stream state.
 - **Reset Change Stream**: For selected collections, reset the checkpoint to reprocess from the beginning. Useful if you suspect missed events.
 - **Run Hash Check**: Randomly samples documents and compares hashes between source and target to detect mismatches. Controlled by the Settings sample size.
 
@@ -709,25 +811,26 @@ The tool automatically calculates optimal chunk count based on:
 
 ## Collections input formats
 
-You can specify collections in three ways:
+Collections are added from **Manage Collections** (see [Manage Collections](#manage-collections)) either by typing namespaces or by uploading a file. Three input formats are supported:
 
-1) CSV list
-- Example: `db1.col1,db1.col2,db2.colA`
+1) Newline- or comma-separated list of namespaces
+- Example: `db1.col1`, `db1.col2`, `db2.colA` (one per line in the textarea, or as comma-separated values in an uploaded `.txt`).
 - Order matters. Larger collections should appear first to reduce overall time.
-- 
-2) CSV list with wildcards
-- Example: `db1.*,*.users,*.*`
+
+2) Wildcard list
+- Example: `db1.*`, `*.users`, `*.*`
 - If the collection count is large consider splitting it into multiple jobs.
 
 3) JSON list with optional target namespace mapping and filters
-- Use the [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format):
+- Use the [CollectionInfoFormat JSON Format](#collectioninfoformat-json-format) — paste the array into the textarea, or upload it as a `.json` file.
 
 Notes:
+- The per-collection **Overwrite**, **Indexing**, **Sharding**, **Move-to-shard**, and **_id type** options are set via the Manage Collections UI (or the bulk action toolbar) after the namespaces are staged as drafts — they are not part of the CollectionInfo JSON.
 - You can optionally remap each source namespace to a different target namespace by providing `TargetDatabaseName` and/or `TargetCollectionName`.
 - If `TargetDatabaseName` or `TargetCollectionName` is omitted/empty, the tool defaults that value to the source `DatabaseName`/`CollectionName`.
 - Target namespace mapping is not supported when the source uses wildcards (`*`). Use explicit source namespaces when remapping.
 - Filters must be valid MongoDB query JSON (as a string). Only supports basic operators (`eq`,`lt`,`lte`,`gt`,`gte`,`in`) on root fields. They apply to both bulk copy and change stream.
-- The `_id` BSON type for each collection is detected automatically at partition time; no per-collection configuration is required.
+- The `_id` BSON type for each collection is detected automatically at partition time; per-collection pinning is available from the Manage Collections UI but not via JSON.
 - RU-optimized copy does not support filters. `TargetDatabaseName` and `TargetCollectionName` are supported.
 - System collections are not supported.
 

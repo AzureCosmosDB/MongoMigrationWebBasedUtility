@@ -24,7 +24,7 @@ using System.Threading.Tasks;
 
 namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 {
-    internal static class MongoHelper
+    public static class MongoHelper
     {
         // Define the new delegate type - made public for use in ParallelWriteHelper
         public delegate void CounterDelegate<TMigration>(
@@ -1071,13 +1071,23 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
             catch
             {
+                try
+                {
+                    // Check if collection has at least one index
+                    var indexCursor = await coll.Indexes.ListAsync();
+                    var indexes = await indexCursor.ToListAsync();
 
-                // Check if collection has at least one index
-                var indexCursor = await coll.Indexes.ListAsync();
-                var indexes = await indexCursor.ToListAsync();
-
-                bool collectionExists = indexes.Count > 0;
-                return collectionExists;
+                    bool collectionExists = indexes.Count > 0;
+                    return collectionExists;
+                }
+                catch (MongoCommandException listIxEx)
+                    when (listIxEx.Code == 166 /* CommandNotSupportedOnView */
+                          || listIxEx.CodeName == "CommandNotSupportedOnView"
+                          || (listIxEx.Message?.IndexOf("is a view, not a collection", StringComparison.OrdinalIgnoreCase) ?? -1) >= 0)
+                {
+                    // Namespace exists as a view. Caller's IsCollection check will downgrade it to IsView.
+                    return true;
+                }
             }
 
         }
@@ -1222,7 +1232,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         }
 
 
-        public static async Task<bool> DeleteAndCopyIndexesAsync(Log log,MigrationUnit mu, string targetConnectionString, IMongoCollection<BsonDocument> sourceCollection, bool skipIndexes)
+        public static async Task<bool> DeleteAndCopyIndexesAsync(Log log,MigrationUnit mu, string targetConnectionString, IMongoCollection<BsonDocument> sourceCollection, bool skipIndexes, bool uniqueOnly = false)
         {
             MigrationJobContext.AddVerboseLog($"Starting index copy for {sourceCollection.CollectionNamespace.DatabaseNamespace.DatabaseName}.{sourceCollection.CollectionNamespace.CollectionName}");
             try
@@ -1255,9 +1265,14 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 }
 
                 if (skipIndexes)
+                {
+                    // Ensure the collection is created even when indexes are skipped
+                    await targetDatabase.CreateCollectionAsync(targetCollectionName);
+                    mu.TargetCreated = true;
                     return true;
+                }
 
-                log.WriteLine($"Creating indexes for: {namespaceForLog}");
+                log.WriteLine($"Creating {(uniqueOnly ? "unique " : "")}indexes for: {namespaceForLog}");
                 
 
                 // Create the target collection
@@ -1267,9 +1282,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 var targetCollection = targetDatabase.GetCollection<BsonDocument>(targetCollectionName);
 
                 IndexCopier indexCopier = new IndexCopier();
-                int count=await indexCopier.CopyIndexesAsync(sourceCollection, targetClient, targetDatabaseName, targetCollectionName, log);
+                int count;
+                if (uniqueOnly)
+                    count = await indexCopier.CopyUniqueIndexesAsync(sourceCollection, targetClient, targetDatabaseName, targetCollectionName, log);
+                else
+                    count = await indexCopier.CopyIndexesAsync(sourceCollection, targetClient, targetDatabaseName, targetCollectionName, log);
                 mu.IndexesMigrated = count;
-                log.WriteLine($"{count} Indexes copied successfully to {namespaceForLog}");
+                log.WriteLine($"{count} {(uniqueOnly ? "unique " : "")}Indexes copied successfully to {namespaceForLog}");
                 
                 return true;
             }
@@ -1279,6 +1298,320 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Retrieves the shard key definition for a collection from the source config.collections.
+        /// Returns null if the collection is not sharded or the shard key cannot be determined.
+        /// </summary>
+        public static async Task<BsonDocument?> GetShardKeyFromSourceAsync(Log log, MongoClient sourceClient, string databaseName, string collectionName)
+        {
+            try
+            {
+                var configDb = sourceClient.GetDatabase("config");
+                var collectionsCol = configDb.GetCollection<BsonDocument>("collections");
+                var ns = $"{databaseName}.{collectionName}";
+
+                var filter = Builders<BsonDocument>.Filter.Eq("_id", ns);
+                var doc = await collectionsCol.Find(filter).FirstOrDefaultAsync();
+
+                if (doc != null && doc.Contains("key"))
+                {
+                    var key = doc["key"].AsBsonDocument;
+                    log.WriteLine($"Found shard key for {ns}: {key}", LogType.Debug);
+                    return key;
+                }
+
+                log.WriteLine($"No shard key found for {ns}", LogType.Debug);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error reading shard key for {databaseName}.{collectionName}: {ex.Message}", LogType.Warning);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Shards a target collection using a hashed version of the source shard key.
+        /// Only single-field shard keys are supported on Cosmos DB; compound keys use the first field.
+        /// </summary>
+        public static async Task<bool> ShardCollectionAsync(Log log, MongoClient targetClient, string databaseName, string collectionName, BsonDocument sourceShardKey)
+        {
+            var ns = $"{databaseName}.{collectionName}";
+            try
+            {
+                // Convert to hashed shard key (Cosmos DB only supports hashed)
+                // For compound keys, use just the first field
+                BsonDocument hashedKey;
+                if (sourceShardKey.ElementCount > 1)
+                {
+                    var firstField = sourceShardKey.Elements.First().Name;
+                    log.WriteLine($"Compound shard key {sourceShardKey} not fully supported. Using first field '{firstField}' as hashed.", LogType.Warning);
+                    hashedKey = new BsonDocument(firstField, "hashed");
+                }
+                else
+                {
+                    hashedKey = new BsonDocument(
+                        sourceShardKey.Elements.Select(e => new BsonElement(e.Name, "hashed"))
+                    );
+                }
+
+                log.WriteLine($"Sharding collection {ns} with key: {hashedKey}");
+
+                var adminDb = targetClient.GetDatabase("admin");
+                var command = new BsonDocument
+                {
+                    { "shardCollection", ns },
+                    { "key", hashedKey }
+                };
+
+                await adminDb.RunCommandAsync<BsonDocument>(command);
+                log.WriteLine($"Successfully sharded collection {ns}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error sharding collection {ns}: {ex.Message}", LogType.Error);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Gets the storage size (in bytes) of a source collection using collStats.
+        /// Returns 0 if the size cannot be determined.
+        /// </summary>
+        public static async Task<long> GetCollectionStorageSizeAsync(Log log, MongoClient sourceClient, string databaseName, string collectionName)
+        {
+            try
+            {
+                var db = sourceClient.GetDatabase(databaseName);
+                var command = new BsonDocument
+                {
+                    { "collStats", collectionName }
+                };
+
+                var result = await db.RunCommandAsync<BsonDocument>(command);
+
+                if (result.Contains("storageSize"))
+                    return result["storageSize"].ToInt64();
+
+                if (result.Contains("size"))
+                    return result["size"].ToInt64();
+
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error getting storage size for {databaseName}.{collectionName}: {ex.Message}", LogType.Warning);
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// Moves an unsharded collection to a specific shard using the moveCollection admin command.
+        /// </summary>
+        public static async Task<bool> MoveCollectionAsync(Log log, MongoClient targetClient, string databaseName, string collectionName, string toShard)
+        {
+            var ns = $"{databaseName}.{collectionName}";
+            try
+            {
+                log.WriteLine($"Moving collection {ns} to shard: {toShard}");
+
+                var adminDb = targetClient.GetDatabase("admin");
+                var command = new BsonDocument
+                {
+                    { "moveCollection", ns },
+                    { "toShard", toShard }
+                };
+
+                await adminDb.RunCommandAsync<BsonDocument>(command);
+                log.WriteLine($"Successfully moved collection {ns} to shard {toShard}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // Ignore error if collection is already on the target shard
+                if (ex.Message.Contains("cannot move shard to the same node", StringComparison.OrdinalIgnoreCase))
+                {
+                    log.WriteLine($"Collection {ns} is already on shard {toShard}, skipping move", LogType.Debug);
+                    return true;
+                }
+
+                log.WriteLine($"Error moving collection {ns} to shard {toShard}: {ex.Message}", LogType.Error);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Builds non-unique indexes on the target collection after offline data copy.
+        /// Returns the number of non-unique indexes created.
+        /// </summary>
+        public static async Task<int> BuildNonUniqueIndexesAsync(Log log, MigrationUnit mu, string targetConnectionString, IMongoCollection<BsonDocument> sourceCollection, bool useBlockingBuilds = false)
+        {
+            var namespaceForLog = Log.FormatNamespaceForLog(mu.DatabaseName, mu.CollectionName, mu.GetEffectiveTargetDatabaseName(), mu.GetEffectiveTargetCollectionName());
+            log.WriteLine($"Building non-unique indexes for: {namespaceForLog}");
+
+            try
+            {
+                var targetClient = MongoClientFactory.Create(log, targetConnectionString);
+                var targetDatabaseName = mu.GetEffectiveTargetDatabaseName();
+                var targetCollectionName = mu.GetEffectiveTargetCollectionName();
+
+                IndexCopier indexCopier = new IndexCopier();
+                int count = await indexCopier.CopyNonUniqueIndexesAsync(sourceCollection, targetClient, targetDatabaseName, targetCollectionName, log, useBlockingBuilds);
+                mu.IndexesMigrated += count;
+                log.WriteLine($"{count} non-unique indexes created on {namespaceForLog}");
+                return count;
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error building non-unique indexes on {namespaceForLog}: {ex}", LogType.Error);
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// Checks active index builds on a target collection using the currentOp command.
+        /// Returns (activeBuilds, progressPercent) where progressPercent is based on how many
+        /// non-unique indexes are already READY on the target vs the expected total.
+        /// This avoids unreliable currentOp percentage parsing entirely.
+        /// </summary>
+        public static async Task<(int ActiveBuilds, double ProgressPercent)> CheckIndexBuildProgressAsync(Log log, string targetConnectionString, string databaseName, string collectionName, int expectedTotalBuilds = 0)
+        {
+            try
+            {
+                var targetClient = MongoClientFactory.Create(log, targetConnectionString);
+                var adminDb = targetClient.GetDatabase("admin");
+
+                // Some servers (e.g. Azure DocumentDB) emit currentOp
+                // responses that contain duplicate field names (most commonly `createIndexes`
+                // on parent worker ops). The driver's default BsonDocument serializer rejects
+                // any such response with "Duplicate element name", so we use a permissive
+                // serializer that walks the BSON tree manually and allows duplicates.
+                var currentOpCommand = new BsonDocument { { "currentOp", 1 }, { "$all", true } };
+                var command = new BsonDocumentCommand<BsonDocument>(currentOpCommand, DuplicateTolerantBsonDocumentSerializer.Instance);
+                var result = await adminDb.RunCommandAsync(command);
+
+                var targetNs = $"{databaseName}.{collectionName}";
+                int activeBuilds = 0;
+                double partialFromActive = 0;
+                var seenBuildIds = new HashSet<string>(StringComparer.Ordinal);
+
+                if (result.Contains("inprog") && result["inprog"].IsBsonArray)
+                {
+                    foreach (var op in result["inprog"].AsBsonArray)
+                    {
+                        if (!op.IsBsonDocument) continue;
+                        var opDoc = op.AsBsonDocument;
+
+                        var nsValue = opDoc.GetValue("ns", "");
+                        var ns = nsValue.IsString ? nsValue.AsString : nsValue.ToString();
+                        if (ns != targetNs) continue;
+
+                        bool isCreateIndexes = false;
+                        string idxName = "";
+                        if (opDoc.TryGetValue("command", out var cmdVal) && cmdVal.IsBsonDocument)
+                        {
+                            var cmdDoc = cmdVal.AsBsonDocument;
+                            if (cmdDoc.Contains("createIndexes"))
+                            {
+                                isCreateIndexes = true;
+                                if (cmdDoc.TryGetValue("indexes", out var idxArr) && idxArr.IsBsonArray && idxArr.AsBsonArray.Count > 0 && idxArr.AsBsonArray[0].IsBsonDocument)
+                                    idxName = idxArr.AsBsonArray[0].AsBsonDocument.GetValue("name", "").ToString();
+                            }
+                        }
+
+                        if (!isCreateIndexes && opDoc.TryGetValue("msg", out var msgVal) && msgVal.IsString)
+                        {
+                            var m = msgVal.AsString;
+                            if (m.Contains("index build", StringComparison.OrdinalIgnoreCase) || m.Contains("queued", StringComparison.OrdinalIgnoreCase))
+                                isCreateIndexes = true;
+                        }
+
+                        if (!isCreateIndexes) continue;
+
+                        var opid = opDoc.GetValue("opid", "").ToString();
+                        var key = string.IsNullOrEmpty(opid) ? $"queued|{idxName}" : $"{idxName}|{opid}";
+                        if (seenBuildIds.Add(key))
+                        {
+                            activeBuilds++;
+                            partialFromActive += TryGetOpBuildFraction(opDoc);
+                        }
+                    }
+                }
+
+                if (activeBuilds == 0)
+                {
+                    return (0, 100); // No builds in-flight — treat as complete (caller may apply warm-up guard)
+                }
+
+                // completed (whole) = expected - pending(currentOp)
+                // plus partial credit from active op's progress.builds[].terms_progress (each op contributes 0..1)
+                double progress = 0;
+                if (expectedTotalBuilds > 0)
+                {
+                    var effectivePending = Math.Min(activeBuilds, expectedTotalBuilds);
+                    var completedCount = Math.Max(0, expectedTotalBuilds - effectivePending);
+                    // Cap partial credit to the number of pending builds so we never exceed expected.
+                    var partialCapped = Math.Min(effectivePending, partialFromActive);
+                    var doneEquivalent = completedCount + partialCapped;
+                    progress = Math.Min(99, (doneEquivalent * 100.0) / expectedTotalBuilds);
+                }
+
+                return (activeBuilds, progress);
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error checking index build progress for {databaseName}.{collectionName}: {ex.Message}", LogType.Warning);
+                return (-1, 0); // Signal error: callers must not treat this as completion.
+            }
+        }
+
+        /// <summary>
+        /// Extracts a 0..1 progress fraction for a single index-build op from currentOp output.
+        /// Reads progress.builds[0].terms_progress when present, otherwise falls back to
+        /// terms_done/terms_total. Returns 0 for queued ops or when no usable field is found.
+        /// </summary>
+        private static double TryGetOpBuildFraction(BsonDocument opDoc)
+        {
+            try
+            {
+                if (!opDoc.TryGetValue("progress", out var progVal) || !progVal.IsBsonDocument)
+                    return 0;
+                var progDoc = progVal.AsBsonDocument;
+                if (!progDoc.TryGetValue("builds", out var buildsVal) || !buildsVal.IsBsonArray)
+                    return 0;
+                var buildsArr = buildsVal.AsBsonArray;
+                if (buildsArr.Count == 0 || !buildsArr[0].IsBsonDocument)
+                    return 0;
+                var b = buildsArr[0].AsBsonDocument;
+
+                if (b.TryGetValue("terms_progress", out var tp))
+                {
+                    try
+                    {
+                        var v = tp.ToDouble();
+                        if (v > 0)
+                            return Math.Min(1.0, v / 100.0);
+                    }
+                    catch { }
+                }
+
+                if (b.TryGetValue("terms_done", out var td) && b.TryGetValue("terms_total", out var tt))
+                {
+                    try
+                    {
+                        var done = td.ToDouble();
+                        var total = tt.ToDouble();
+                        if (total > 0)
+                            return Math.Min(1.0, done / total);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return 0;
         }
 
         private static FilterDefinition<BsonDocument> BuildFilterLt(string fieldName, BsonValue? value, DataType dataType)
@@ -2108,6 +2441,111 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 DataType.Object => value.ToJson(),
                 _ => value.ToString()
             };
+        }
+
+        /// <summary>
+        /// Discovers cluster nodes (shards) for the Cosmos vCore / MongoDB target.
+        /// Returns shard IDs for vCore, node identifiers for replica sets, or empty for standalone/RU.
+        /// Used to populate the "Move to" dropdown when ShardingStrategy = DontShard.
+        /// </summary>
+        public static async Task<List<string>> GetClusterNodesAsync(string connectionString)
+        {
+            var nodes = new List<string>();
+            
+            try
+            {
+                var client = new MongoClient(connectionString);
+                
+                // 1. vCore: db.adminCommand({ listShards: 1 }) -> { shards: [ { _id, host, ... } ], ok: 1 }
+                if (connectionString.Contains("mongocluster.cosmos.azure.com"))
+                {
+                    try
+                    {
+                        var adminDb = client.GetDatabase("admin");
+                        var command = new BsonDocument { { "listShards", 1 } };
+                        var result = await adminDb.RunCommandAsync<BsonDocument>(command);
+
+                        if (result.Contains("shards") && result["shards"].IsBsonArray)
+                        {
+                            foreach (var shard in result["shards"].AsBsonArray)
+                            {
+                                if (shard.IsBsonDocument && shard.AsBsonDocument.Contains("_id"))
+                                {
+                                    nodes.Add(shard.AsBsonDocument["_id"].AsString);
+                                }
+                            }
+                        }
+
+                        if (nodes.Count > 0)
+                            return nodes;
+                    }
+                    catch
+                    {
+                        // Fall through to next probes
+                    }
+                }
+                
+                // 2. RU (MongoDB API for Cosmos DB): Return empty - no sharding control available
+                if (Helper.IsRU(connectionString))
+                {
+                    return nodes; // Empty list
+                }
+                
+                // 3. Native sharded cluster: Query config.shards
+                try
+                {
+                    var configDb = client.GetDatabase("config");
+                    var shardsCollection = configDb.GetCollection<BsonDocument>("shards");
+                    
+                    var shardsCursor = await shardsCollection.FindAsync(FilterDefinition<BsonDocument>.Empty);
+                    var shardDocs = await shardsCursor.ToListAsync();
+                    
+                    foreach (var doc in shardDocs)
+                    {
+                        if (doc.Contains("_id"))
+                        {
+                            nodes.Add(doc["_id"].AsString);
+                        }
+                    }
+                    
+                    if (nodes.Count > 0)
+                        return nodes;
+                }
+                catch
+                {
+                    // Not a sharded cluster or no access to config db
+                }
+                
+                // 4. Native replica set: Use SDAM (Server Discovery and Monitoring)
+                try
+                {
+                    var cluster = client.Cluster;
+                    var description = cluster.Description;
+                    if (description.Type == ClusterType.ReplicaSet)
+                    {
+                        foreach (var server in description.Servers)
+                        {
+                            // Add server endpoint as node identifier
+                            nodes.Add(server.EndPoint.ToString());
+                        }
+                        
+                        if (nodes.Count > 0)
+                            return nodes;
+                    }
+                }
+                catch
+                {
+                    // SDAM probe failed
+                }
+                
+                // 5. Standalone or unable to determine: Return empty
+                return nodes;
+            }
+            catch (Exception ex)
+            {
+                MigrationJobContext.AddVerboseLog($"GetClusterNodesAsync failed: {ex.Message}");
+                return nodes; // Empty list on error
+            }
         }
 
     }

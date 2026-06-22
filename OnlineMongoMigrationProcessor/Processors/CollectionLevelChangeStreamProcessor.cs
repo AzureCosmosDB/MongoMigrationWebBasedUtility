@@ -69,6 +69,21 @@ namespace OnlineMongoMigrationProcessor
                 _syncBack ? null : _config.CACertContentsForSourceServer);
         }
 
+        public override void RemoveMigrationUnit(string migrationUnitId)
+        {
+            base.RemoveMigrationUnit(migrationUnitId);
+
+            if (string.IsNullOrEmpty(migrationUnitId))
+                return;
+
+            if (_flushLocks.TryRemove(migrationUnitId, out var sem))
+            {
+                try { sem.Dispose(); } catch { /* best-effort */ }
+            }
+
+            _lastPerMuPersistUtc.TryRemove(migrationUnitId, out _);
+        }
+
         protected override async Task ProcessChangeStreamsAsync(CancellationToken token)
         {
             MigrationJobContext.AddVerboseLog("CollectionLevelChangeStreamProcessor.ProcessChangeStreamsAsync: starting");
@@ -113,8 +128,6 @@ namespace OnlineMongoMigrationProcessor
                     var (tasks, collectionProcessed) = await PrepareCollectionTasks(batchKeys, seconds, token);
 
                     await ExecuteBatchTasks(tasks, collectionProcessed, seconds);
-
-                    CleanupProcessedCollections(batchKeys);
 
                     index += _concurrentProcessors;
 
@@ -186,7 +199,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     _log.WriteLine($"{_syncBackPrefix}Processing pending ResetChangeStream for {mu.DatabaseName}.{mu.CollectionName}", LogType.Warning);
                     await MongoHelper.ResetCS(MigrationJobContext.CurrentlyActiveJob, mu, _syncBack);
-                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                    TrySaveMigrationUnit(mu, true);
                     _log.WriteLine($"{_syncBackPrefix}ResetChangeStream completed for {mu.DatabaseName}.{mu.CollectionName}. Collection will be re-included in next round.", LogType.Warning);
                 }
                 catch (Exception ex)
@@ -384,15 +397,6 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private void CleanupProcessedCollections(List<string> batchKeys)
-        {
-            MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.CleanupProcessedCollections: batchKeys.Count={batchKeys.Count}");
-            foreach (var key in batchKeys)
-            {
-                MigrationJobContext.MigrationUnitsCache.RemoveMigrationUnit(key);
-            }
-        }
-
         private void LogRoundCompletion(long loops, int totalKeys)
         {
             MigrationJobContext.AddVerboseLog($"CollectionLevelChangeStreamProcessor.LogRoundCompletion: loops={loops}, totalKeys={totalKeys}");
@@ -415,7 +419,7 @@ namespace OnlineMongoMigrationProcessor
                     : "Watch failed (cursor creation timed out)";
                 _log.WriteLine($"{_syncBackPrefix}{reason} for {mu.DatabaseName}.{mu.CollectionName}. Collection will be excluded from change stream processing.", LogType.Warning);
                 _log.ShowInMonitor($"{_syncBackPrefix}{reason} for {mu.DatabaseName}.{mu.CollectionName}. Collection will be excluded from change stream processing.");
-                MigrationJobContext.SaveMigrationUnit(mu, true);
+                TrySaveMigrationUnit(mu, true);
                 return false;
             }
             catch (Exception ex)
@@ -473,12 +477,12 @@ namespace OnlineMongoMigrationProcessor
                         }
 
                         mu.CSLastChecked = DateTime.UtcNow;
-                        mu.UpdateParentJob();
-                        MigrationJobContext.SaveMigrationUnit(mu, true);
+                        if (!IsJobInactive)
+                        {
+                            mu.UpdateParentJob();
+                            TrySaveMigrationUnit(mu, true);
+                        }
                     }
-
-                    //remove from cache
-                    MigrationJobContext.MigrationUnitsCache.RemoveMigrationUnit(mu.Id);
                 }
 
             }
@@ -621,7 +625,7 @@ namespace OnlineMongoMigrationProcessor
                 if (string.IsNullOrEmpty(documentKey))
                 {
                     mu.SetInitialDocumenReplayed(_syncBack, true);
-                    MigrationJobContext.SaveMigrationUnit(mu, false);
+                    TrySaveMigrationUnit(mu, false);
                     _log.WriteLine($"{_syncBackPrefix}No first change to replay for {collectionKey} (postBatchResumeToken), skipping auto-replay", LogType.Debug);
                     return;
                 }
@@ -643,7 +647,7 @@ namespace OnlineMongoMigrationProcessor
                     mu.SetInitialDocumenReplayed(_syncBack, true);
                     var (csTime, csToken, _, _) = GetResumeParameters(mu);
                     mu.SetCSLastChange(_syncBack, csTime, csToken);
-                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                    TrySaveMigrationUnit(mu, true);
                     _log.WriteLine($"{_syncBackPrefix}Auto-replay successful for {collectionKey}, proceeding with change stream", LogType.Debug);
                 }
                 else
@@ -660,7 +664,7 @@ namespace OnlineMongoMigrationProcessor
                 if (!initialDocReplayed)
                 {
                     mu.SetInitialDocumenReplayed(_syncBack, true);
-                    MigrationJobContext.SaveMigrationUnit(mu, false);
+                    TrySaveMigrationUnit(mu, false);
                     _log.WriteLine($"{_syncBackPrefix}Auto-replay not needed for {collectionKey} (IsSimulated={MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun}, ChangeStreamMode={MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode}), marking InitialDocumenReplayed=true", LogType.Debug);
                 }
             }
@@ -766,7 +770,7 @@ namespace OnlineMongoMigrationProcessor
                         SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
                         mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
                         if (ShouldPersistMu(mu.Id, isFinalFlush))
-                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            TrySaveMigrationUnit(mu, true);
                     
                         
                         _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
@@ -1321,7 +1325,7 @@ namespace OnlineMongoMigrationProcessor
                             }
                             // Persist every idle cycle — payload is tiny (token + timestamp)
                             // and skipping the write hides the cursor's progress for hours.
-                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            TrySaveMigrationUnit(mu, true);
                         }
                         catch (Exception ex)
                         {
@@ -1391,7 +1395,7 @@ namespace OnlineMongoMigrationProcessor
                     }
                 }
 
-                MigrationJobContext.SaveMigrationUnit(mu,true);
+                TrySaveMigrationUnit(mu, true);
                 _lastPerMuPersistUtc[mu.Id] = DateTime.UtcNow;
                 
                 // Update the dictionary with the latest CSNormalizedUpdatesInLastBatch for accurate sorting

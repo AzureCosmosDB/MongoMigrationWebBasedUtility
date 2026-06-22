@@ -44,29 +44,43 @@ namespace OnlineMongoMigrationProcessor
 
         /// <summary>
         /// Callback invoked by coordinator when a migration unit completes dump/restore.
-        /// Handles post-processing like change stream setup.
+        /// Handles post-processing like non-unique index building and change stream setup.
         /// </summary>
-        private void OnMigrationUnitCompleted(MigrationUnit mu)
+        private async void OnMigrationUnitCompleted(MigrationUnit mu)
         {
-            MigrationJobContext.AddVerboseLog($"DumpRestoreProcessor.OnMigrationUnitCompleted: mu={mu.DatabaseName}.{mu.CollectionName}");
-            _log.WriteLine($"Processing completion callback for migration unit {mu.DatabaseName}. {mu.CollectionName}", LogType.Debug);
-
-            if (MigrationJobContext.ControlledPauseRequested)
+            try
             {
-                _log.WriteLine("Controlled pause active - skipping post-processing",LogType.Debug);
-                return;
+                MigrationJobContext.AddVerboseLog($"DumpRestoreProcessor.OnMigrationUnitCompleted: mu={mu.DatabaseName}.{mu.CollectionName}");
+                _log.WriteLine($"Processing completion callback for migration unit {mu.DatabaseName}. {mu.CollectionName}", LogType.Debug);
+
+                if (MigrationJobContext.ControlledPauseRequested || _cts.Token.IsCancellationRequested || !ProcessRunning)
+                {
+                    _log.WriteLine("Pause/stop active - skipping post-processing callback", LogType.Debug);
+                    return;
+                }
+
+                // Hand off non-unique index build (and change-stream enqueue on success) to a
+                // background task so the post-copy callback returns immediately and the coordinator
+                // can pick up the next completed unit. StopOfflineOrInvokeChangeStreams already
+                // defers final completion while pending background index builds are in flight.
+                _migrationWorker?.StartBackgroundIndexBuildAndQueue(mu);
+
+                PercentageUpdater.RemovePercentageTracker(mu.Id, false, _log);
+                PercentageUpdater.RemovePercentageTracker(mu.Id, true, _log);
+
+                _log.WriteLine($"Offline dump/restore processing completed for {mu.DatabaseName}. {mu.CollectionName}",LogType.Debug);
+
+                // Handle post-completion logic -stop if offline, else invoke change streams
+                StopOfflineOrInvokeChangeStreams();
             }
-
-            // Start change stream processing for the completed migration unit
-            AddCollectionToChangeStreamQueue(mu);
-
-            PercentageUpdater.RemovePercentageTracker(mu.Id, false, _log);
-            PercentageUpdater.RemovePercentageTracker(mu.Id, true, _log);
-
-            _log.WriteLine($"Offline dump/restore processing completed for {mu.DatabaseName}. {mu.CollectionName}",LogType.Debug);
-
-            // Handle post-completion logic -stop if offline, else invoke change streams
-            StopOfflineOrInvokeChangeStreams();
+            catch (OperationCanceledException)
+            {
+                _log.WriteLine($"Post-processing canceled for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Post-processing callback failed for {mu.DatabaseName}.{mu.CollectionName}: {ex.Message}", LogType.Warning);
+            }
         }
 
         /// <summary>
@@ -168,8 +182,9 @@ namespace OnlineMongoMigrationProcessor
         /// Signals the coordinator to stop immediately (sets flags + cancels CTS)
         /// without awaiting in-flight workers. Call before KillAllMigrationProcesses.
         /// </summary>
-        public void SignalStop()
+        public override void SignalStop()
         {
+            base.SignalStop();
             _coordinator?.SignalStop();
         }
 
@@ -185,6 +200,11 @@ namespace OnlineMongoMigrationProcessor
             base.StopProcessing(updateStatus);
             
             _log.WriteLine("DumpRestoreProcessor stopped");
+        }
+
+        public override void MarkAllUnitsDispatched()
+        {
+            _coordinator?.CloseRegistration();
         }
     }
 }
