@@ -48,7 +48,21 @@
                                     }
                                     <div><span class="lbl">Before Copying:</span> @FormatLong(MigrationUnit.ActualDocCount)</div>
                                     <div><span class="lbl">While Processing:</span> @FormatLong(MigrationUnit.SourceCountDuringCopy)</div>
-                                    <div><span class="lbl">Indexes Created:</span> @MigrationUnit.IndexesMigrated</div>
+                                    <div><span class="lbl">Non-Unique Indexes Created:</span> @(MigrationUnit.IndexesExpected > 0 ? $"{MigrationUnit.IndexesMigrated} of {MigrationUnit.IndexesExpected}{(MigrationUnit.IndexesFailed > 0 ? $" ({MigrationUnit.IndexesFailed} failed)" : string.Empty)}" : MigrationUnit.IndexesMigrated.ToString())</div>
+                                    <div><span class="lbl">Index Build Progress:</span> @(MigrationUnit.IndexBuildComplete && MigrationUnit.IndexesFailed == 0 ? "Complete" : MigrationUnit.IndexBuildComplete ? $"{MigrationUnit.IndexPercent:F1}% ({MigrationUnit.IndexesFailed} failed)" : $"{MigrationUnit.IndexPercent:F1}%")</div>
+                                </td>
+                            </tr>
+
+                            <tr>
+                                <td class="cd-col-label">Options</td>
+                                <td class="group">
+                                    <div><span class="lbl">Overwrite:</span> @FormatOverwrite(MigrationUnit.Overwrite)</div>
+                                    <div><span class="lbl">Indexing:</span> @FormatIndexing(MigrationUnit.IndexingStrategy)</div>
+                                    <div><span class="lbl">Sharding:</span> @FormatSharding(MigrationUnit.ShardingStrategy)</div>
+                                    @if (MigrationUnit.ShardingStrategy == ShardingStrategy.DontShard && !string.IsNullOrWhiteSpace(MigrationUnit.MoveToShard))
+                                    {
+                                        <div><span class="lbl">Move To Shard:</span> @MigrationUnit.MoveToShard</div>
+                                    }
                                 </td>
                             </tr>
 
@@ -194,6 +208,28 @@
     }
 
     private static string FormatLong(long value) => string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:N0}", value);
+
+    private static string FormatOverwrite(bool? overwrite) => overwrite switch
+    {
+        true => "Overwrite (drop target before copy)",
+        false => "Append (keep existing target data)",
+        _ => "Default"
+    };
+
+    private static string FormatIndexing(IndexingStrategy? strategy) => strategy switch
+    {
+        IndexingStrategy.SameAsSource => "Copy indexes from source (non-blocking)",
+        IndexingStrategy.SameAsSourceBlocking => "Copy indexes from source (blocking)",
+        IndexingStrategy.DontIndex => "Do not create indexes",
+        _ => "Default"
+    };
+
+    private static string FormatSharding(ShardingStrategy? strategy) => strategy switch
+    {
+        ShardingStrategy.SameAsSource => "Copy sharding from source",
+        ShardingStrategy.DontShard => "Do not shard target collection",
+        _ => "Default"
+    };
 
     private static string GetChangeStreamStartedOnForDisplay(MigrationUnit migrationUnit, MigrationJob migrationJob)
     {

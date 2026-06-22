@@ -129,7 +129,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
             }
 
             if (isRestore && mu.RestoreComplete)
+            {
                 return true;
+            }
 
             
 
@@ -169,7 +171,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
             else // MongoDump
             {
                 if (mu.DumpComplete)
+                {
                     return true;
+                }
 
                 // Check for active or pending dump chunks
                 foreach (var chunk in mu.MigrationChunks)

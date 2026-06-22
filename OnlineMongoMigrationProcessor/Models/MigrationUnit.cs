@@ -4,6 +4,7 @@ using MongoDB.Driver;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OnlineMongoMigrationProcessor.Context;
+using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -27,6 +28,7 @@ namespace OnlineMongoMigrationProcessor
 
         public string Id { get; set; }
         public string JobId { get; set; }
+
         public string DatabaseName { get; set; }
         public string CollectionName { get; set; }
         public string? TargetDatabaseName { get; set; }
@@ -51,14 +53,41 @@ namespace OnlineMongoMigrationProcessor
         }
         public double DumpPercent { get; set; }
         public double RestorePercent { get; set; }
+        /// <summary>
+        /// Tracks progress of non-unique index builds after offline data copy (0–100).
+        /// Only applies when IndexingStrategy is SameAsSource or SameAsSourceBlocking.
+        /// </summary>
+        public double IndexPercent { get; set; }
         public bool DumpComplete { get; set; }
         public bool RestoreComplete { get; set; }
+        /// <summary>
+        /// Set to true when all non-unique index builds have completed on the target.
+        /// </summary>
+        public bool IndexBuildComplete { get; set; }
+        /// <summary>
+        /// Count of non-unique indexes that have been created on the target collection.
+        /// </summary>
+        public int IndexesMigrated { get; set; }
+        /// <summary>
+        /// Expected number of non-unique indexes to build for the collection.
+        /// Used for in-progress UI display while server-side blocking builds are queued/running.
+        /// </summary>
+        public int IndexesExpected { get; set; }
+        /// <summary>
+        /// Number of non-unique indexes the server failed to build (or that never appeared on the
+        /// target) after the build phase was unblocked due to a stall. Surfaced in the UI alongside
+        /// the partial IndexPercent so the discrepancy is visible to the user.
+        /// </summary>
+        public int IndexesFailed { get; set; }
 
         public CollectionStatus SourceStatus { get; set; }
         public bool ResetChangeStream { get; set; }
         // Set to true when partitioning detected exactly one _id BSON type (or the user-pinned one),
         // letting downstream readers omit the $type predicate.
         public bool SkipDataTypeFilterForId { get; set; }
+        // User-pinned single _id BSON type. When set, partitioning skips type probing and uses
+        // only this type; null means "unknown / multiple" and lets the partitioner detect.
+        public DataType? DataTypeForId { get; set; }
         public DateTime? CSLastChangeUTCTime { get; set; }
         public DateTime? SyncBackCSLastChangeUTCTime { get; set; }
 
@@ -86,7 +115,8 @@ namespace OnlineMongoMigrationProcessor
                 var filePath = $"migrationjobs\\{this.JobId}\\{this.Id}.json";
                 MigrationJobContext.Store.DeleteDocument(filePath);
 
-                return MigrationJobContext.SaveMigrationJob(ParentJob);
+                bool saved = MigrationJobContext.SaveMigrationJob(ParentJob);
+                return saved;
 
             }
             catch
@@ -147,7 +177,6 @@ namespace OnlineMongoMigrationProcessor
         public DateTime? BulkCopyStartedOn { get; set; }
         public DateTime? BulkCopyEndedOn { get; set; }
         public bool TargetCreated { get; set; }
-        public int IndexesMigrated { get; set; }
 
         public DateTime? ComparedOn { get; set; }
         public int VarianceCount { get; set; }
@@ -160,6 +189,29 @@ namespace OnlineMongoMigrationProcessor
         public string? SyncBackCSLastResumeTokenWithChange { get; set; }
 
         public string? UserFilter { get; set; }
+        
+        // Per-collection options (nullable = use defaults when not set)
+        /// <summary>
+        /// Per-collection overwrite mode. When TRUE, target collection is dropped before migration.
+        /// Defaults to false (append mode) when not set.
+        /// </summary>
+        public bool? Overwrite { get; set; }
+        
+        /// <summary>
+        /// Per-collection indexing strategy. Defaults to migrating indexes when not set.
+        /// </summary>
+        public IndexingStrategy? IndexingStrategy { get; set; }
+        
+        /// <summary>
+        /// Per-collection sharding strategy. Null inherits existing behavior.
+        /// </summary>
+        public ShardingStrategy? ShardingStrategy { get; set; }
+        
+        /// <summary>
+        /// Target shard/node identifier for unsharded collections. Only applies when ShardingStrategy = DontShard.
+        /// </summary>
+        public string? MoveToShard { get; set; }
+        
         public string? SyncBackResumeToken { get; set; }
         public string? SyncBackOriginalResumeToken { get; set; }
         public bool SyncBackInitialDocumenReplayed { get; set; } = false;
@@ -321,7 +373,7 @@ namespace OnlineMongoMigrationProcessor
 
         public MigrationUnit(MigrationJob job, string databaseName, string collectionName, List<MigrationChunk> migrationChunks)
         {
-            this.Id = Helper.GenerateMigrationUnitId(databaseName, collectionName);            
+            this.Id = Helper.GenerateMigrationUnitId(databaseName, collectionName);
             this.DatabaseName = databaseName;
             this.CollectionName = collectionName;
             this.TargetDatabaseName = databaseName;
@@ -342,9 +394,14 @@ namespace OnlineMongoMigrationProcessor
             try
             {
                 var index = ParentJob.MigrationUnitBasics.FindIndex(mu => mu.Id == this.Id);
-                if (index == -1) return false; // not found
+                if (index == -1)
+                {
+                    return false;
+                }
 
-                GetBasic(ParentJob.MigrationUnitBasics[index]);
+                var basic = ParentJob.MigrationUnitBasics[index];
+
+                GetBasic(basic);
 
                 return true;
             }
@@ -373,11 +430,17 @@ namespace OnlineMongoMigrationProcessor
             mub.SyncBackCursorUtcTimestamp = this.SyncBackCursorUtcTimestamp;
             mub.DumpPercent = this.DumpPercent;
             mub.RestorePercent = this.RestorePercent;
+            mub.IndexPercent = this.IndexPercent;
             mub.DumpComplete = this.DumpComplete;
             mub.RestoreComplete = this.RestoreComplete;
+            mub.IndexBuildComplete = this.IndexBuildComplete;
+            mub.IndexesMigrated = this.IndexesMigrated;
+            mub.IndexesExpected = this.IndexesExpected;
+            mub.IndexesFailed = this.IndexesFailed;
             mub.SourceStatus = this.SourceStatus;
             mub.ResetChangeStream = this.ResetChangeStream;
             mub.SkipDataTypeFilterForId = this.SkipDataTypeFilterForId;
+            mub.DataTypeForId = this.DataTypeForId;
             mub.SkippedDueToMaxRetries = this.SkippedDueToMaxRetries;
             mub.FailedOperation = this.FailedOperation;
             mub.CSLastChangeUTCTime = this.CSLastChangeUTCTime;
@@ -388,3 +451,5 @@ namespace OnlineMongoMigrationProcessor
 
     }
 }
+
+

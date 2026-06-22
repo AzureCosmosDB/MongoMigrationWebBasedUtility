@@ -110,6 +110,13 @@ namespace OnlineMongoMigrationProcessor
         private bool _processNewTasks = true;
         private volatile bool _stopped = false; // Volatile flag to prevent queued timer callbacks from executing after stop
 
+        // When false, IsAllWorkComplete returns false in the normal _processNewTasks=true branch even if all
+        // queues are empty. The orchestrator flips this to true via CloseRegistration() once it has finished
+        // dispatching every MU. Without this gate, a fast empty MU finishing before its slower siblings have
+        // been partitioned-and-registered causes the coordinator to self-shutdown and dispose its timer, after
+        // which subsequent MU registrations succeed but do no actual work.
+        private volatile bool _registrationClosed = false;
+
         // Cached duplicate settings (read once at Initialize)
         private bool _ignoreDuplicatesAndContinueRestore = false;
         private TimeSpan _continuousDuplicateThreshold = TimeSpan.FromMinutes(5);
@@ -246,7 +253,9 @@ namespace OnlineMongoMigrationProcessor
                 TotalChunks = mu.MigrationChunks.Count,
                 DownloadedChunks = mu.MigrationChunks.Count(c => c.IsDownloaded == true),
                 RestoredChunks = mu.MigrationChunks.Count(c => c.IsUploaded == true),
-                AddedAt = DateTime.UtcNow
+                AddedAt = DateTime.UtcNow,
+                SourceConnectionString = ctx.SourceConnectionString ?? string.Empty,
+                TargetConnectionString = ctx.TargetConnectionString ?? string.Empty
             };
 
             bool trackerAdded;
@@ -345,6 +354,9 @@ namespace OnlineMongoMigrationProcessor
             public int DownloadedChunks;  // Field instead of property for Interlocked.Add support
             public int RestoredChunks;  // Field instead of property for Interlocked.Add support
             public DateTime AddedAt { get; set; }
+            // Stashed so CheckForCompletedMigrationUnits can re-queue missing chunks (e.g. sub-chunks added by a split whose Interlocked.Add was lost) without plumbing them in via every call site.
+            public string SourceConnectionString { get; set; } = string.Empty;
+            public string TargetConnectionString { get; set; } = string.Empty;
             public bool AllDownloadsCompleted => DownloadedChunks >= TotalChunks;
             public bool AllRestoresCompleted => RestoredChunks >= TotalChunks;
         }
@@ -753,6 +765,7 @@ namespace OnlineMongoMigrationProcessor
                     // Reset state flags
                     _coordinatorInitialized = false;
                     _timerStarted = false;
+                    _registrationClosed = false;
 
                     // Clear job-specific data
                     _jobId = null;
@@ -923,7 +936,8 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 int addedCount = 0;
-                for (int i = 0; i < mu.MigrationChunks.Count; i++)
+                int totalChunks = mu.MigrationChunks.Count;
+                for (int i = 0; i < totalChunks; i++)
                 {
                     var chunk = mu.MigrationChunks[i];
 
@@ -955,6 +969,7 @@ namespace OnlineMongoMigrationProcessor
                 if (addedCount > 0)
                 {
                     _log?.WriteLine($"Added {addedCount} chunks to download manifest for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                    _log?.ShowInMonitor($"Queued {addedCount} chunk(s) for download on {mu.DatabaseName}.{mu.CollectionName} ({totalChunks} total)");
                 }
             }
             catch (Exception ex)
@@ -1055,7 +1070,8 @@ namespace OnlineMongoMigrationProcessor
 
                 int addedCount = 0;
                 string folder = PrepareDumpFolder(mu.DatabaseName, mu.CollectionName);
-                for (int i = 0; i < mu.MigrationChunks.Count; i++)
+                int totalChunks = mu.MigrationChunks.Count;
+                for (int i = 0; i < totalChunks; i++)
                 {
                     var chunk = mu.MigrationChunks[i];
 
@@ -1104,6 +1120,7 @@ namespace OnlineMongoMigrationProcessor
                 if (addedCount > 0)
                 {
                     _log?.WriteLine($"Added {addedCount} chunks to restore manifest for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                    _log?.ShowInMonitor($"Queued {addedCount} chunk(s) for restore on {mu.DatabaseName}.{mu.CollectionName} ({totalChunks} total)");
                 }
                 int alreadyUploaded = mu.MigrationChunks.Count(c => c.IsUploaded == true);
                 int eligible = mu.MigrationChunks.Count(c => c.IsDownloaded == true && c.IsUploaded != true);
@@ -1250,16 +1267,15 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 string folder = Helper.GetWorkingFolder();
-                MigrationSettings config = new MigrationSettings();
-                config.Load();
-               
 
                 //checking if there are too many downloads or disk full. Caused by limited uploads.
+                // Pause downloads when free disk drops below 1 GB headroom for the next mongodump.
+                const long MinFreeDiskMb = 1024;
                 bool continueDownlods;
                 double pendingUploadsGB = 0;
                 double freeSpaceGB = 0;
-                
-                continueDownlods = Helper.CanProceedWithDownloads(folder, config.ChunkSizeInMb * 2, out pendingUploadsGB, out freeSpaceGB);
+
+                continueDownlods = Helper.CanProceedWithDownloads(folder, MinFreeDiskMb, out pendingUploadsGB, out freeSpaceGB);
                 _lastDiskSpaceCheckResult = continueDownlods;
                 _lastDiskSpaceCheckedAtUtc = DateTime.UtcNow;
 
@@ -1458,6 +1474,10 @@ namespace OnlineMongoMigrationProcessor
                 string dumpFilePath = GetDumpFilePath(dbName, colName, chunkIndex, true);
                 MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator GetDumpFilePath={dumpFilePath}");
 
+                // Surface to the monitor: the count probe (and any chunk-split path it triggers) can run for many minutes
+                // on large chunks against indexes that aren't selective, leaving the UI looking idle.
+                _log?.ShowInMonitor($"Computing document count for {dbName}.{colName}[{chunkIndex}] before dump...");
+
                 // Build dump arguments with query
                 var dumpArgs = await BuildDumpArgumentsAsync(
                     mu,
@@ -1572,6 +1592,9 @@ namespace OnlineMongoMigrationProcessor
             //double initialPercent = ((double)100 / mu.MigrationChunks.Count) * chunkIndex;
             //double contributionFactor = 1.0 / mu.MigrationChunks.Count;
 
+            // Surface to the monitor: mongodump on a multi-100M-doc chunk can run for tens of minutes without emitting progress.
+            _log?.ShowInMonitor($"Starting mongodump for {mu.DatabaseName}.{mu.CollectionName}[{chunkIndex}] ({docCount:N0} docs)...");
+
             // Execute dump process
             var processExecutor = new ProcessExecutor(_log);
             var dumpToolPath = GetMongoToolPath("mongodump");
@@ -1586,8 +1609,8 @@ namespace OnlineMongoMigrationProcessor
                 _processCts?.Token ?? CancellationToken.None,
                 _ignoreDuplicatesAndContinueRestore,
                 _continuousDuplicateThreshold,
-                onProcessStarted: pid => MigrationJobContext.ActiveDumpProcessIds.Add(pid),
-                onProcessEnded: pid => MigrationJobContext.ActiveDumpProcessIds.Remove(pid)
+                onProcessStarted: pid => MigrationJobContext.ActiveDumpProcessIds.TryAdd(pid, 0),
+                onProcessEnded: pid => MigrationJobContext.ActiveDumpProcessIds.TryRemove(pid, out _)
             ), _processCts?.Token ?? CancellationToken.None);
 
             return success;
@@ -2253,6 +2276,9 @@ namespace OnlineMongoMigrationProcessor
                     // Fire-and-forget warm-up: a single findOne against the target primes the driver's connection pool and TLS handshake so mongorestore's first batch doesn't pay that latency on every chunk.
                     _ = WarmUpTargetConnectionAsync(context.TargetConnectionString, targetDbName, targetColName);
 
+                    // Surface to the monitor: mongorestore on a large chunk can run for many minutes without producing progress lines.
+                    _log?.ShowInMonitor($"Starting mongorestore for {Log.FormatNamespaceForLog(sourceDbName, sourceColName, targetDbName, targetColName)}[{chunkIndex}] ({restoreArgs.docCount:N0} docs)...");
+
                     // Execute restore
                     bool success = await ExecuteRestoreProcessAsync(
                         mu,
@@ -2519,8 +2545,8 @@ namespace OnlineMongoMigrationProcessor
                 _processCts?.Token ?? CancellationToken.None,
                 _ignoreDuplicatesAndContinueRestore,
                 _continuousDuplicateThreshold,
-                onProcessStarted: pid => MigrationJobContext.ActiveRestoreProcessIds.Add(pid),
-                onProcessEnded: pid => MigrationJobContext.ActiveRestoreProcessIds.Remove(pid)
+                onProcessStarted: pid => MigrationJobContext.ActiveRestoreProcessIds.TryAdd(pid, 0),
+                onProcessEnded: pid => MigrationJobContext.ActiveRestoreProcessIds.TryRemove(pid, out _)
             ), _processCts?.Token ?? CancellationToken.None);
 
             return success;
@@ -3479,6 +3505,13 @@ namespace OnlineMongoMigrationProcessor
                     var muSnap = MigrationJobContext.GetMigrationUnit(t.MigrationUnitId);
                     if (muSnap?.MigrationChunks != null && muSnap.MigrationChunks.Count > 0)
                     {
+                        // Re-sync TotalChunks first: ReplaceChunkWithSubChunks can add chunks under races where the
+                        // tracker's Interlocked.Add was skipped (MU briefly absent from _activeMigrationUnits, etc.),
+                        // leaving the tracker permanently smaller than the real chunk list and the MU stuck in the
+                        // "premature completion" skip loop. Always trust the persisted MU.
+                        int actualTotal = muSnap.MigrationChunks.Count;
+                        if (actualTotal != t.TotalChunks) Interlocked.Exchange(ref t.TotalChunks, actualTotal);
+
                         int actualDown = muSnap.MigrationChunks.Count(c => c.IsDownloaded == true);
                         int actualUp = muSnap.MigrationChunks.Count(c => c.IsUploaded == true);
                         if (actualDown > t.DownloadedChunks) Interlocked.Exchange(ref t.DownloadedChunks, actualDown);
@@ -3513,14 +3546,39 @@ namespace OnlineMongoMigrationProcessor
                         bool allActuallyUploaded = verifyMu.MigrationChunks.All(c => c.IsUploaded == true);
                         if (!allActuallyDownloaded || !allActuallyUploaded)
                         {
-                            // Tracker overcounted — correct it back to reality and skip completion
+                            // Tracker overcounted (or new chunks were added since seed) — re-sync to reality,
+                            // re-queue the missing chunks, and skip completion. Without the re-queue the MU
+                            // would loop here forever because nothing else periodically prepares chunks that
+                            // were never (or no longer) in a manifest.
+                            int actualTotal = verifyMu.MigrationChunks.Count;
                             int realDown = verifyMu.MigrationChunks.Count(c => c.IsDownloaded == true);
                             int realUp = verifyMu.MigrationChunks.Count(c => c.IsUploaded == true);
+                            Interlocked.Exchange(ref tracker.TotalChunks, actualTotal);
                             Interlocked.Exchange(ref tracker.DownloadedChunks, realDown);
                             Interlocked.Exchange(ref tracker.RestoredChunks, realUp);
                             _log?.WriteLine($"CheckCompleted: tracker overcount detected for {verifyMu.DatabaseName}.{verifyMu.CollectionName}. " +
-                                $"Actual downloaded={realDown}/{tracker.TotalChunks}, uploaded={realUp}/{tracker.TotalChunks}. " +
-                                $"Skipping premature completion.", LogType.Warning);
+                                $"Actual downloaded={realDown}/{actualTotal}, uploaded={realUp}/{actualTotal}. " +
+                                $"Re-queuing missing chunks and skipping premature completion.", LogType.Warning);
+
+                            // Re-queue any chunks still missing from the manifests. Uses connection strings
+                            // stashed on the tracker at TryStartMigrationUnit time.
+                            try
+                            {
+                                if (!string.IsNullOrEmpty(tracker.SourceConnectionString))
+                                {
+                                    PrepareDownloadList(verifyMu, tracker.SourceConnectionString, tracker.TargetConnectionString);
+                                    PrepareRestoreList(verifyMu, tracker.SourceConnectionString, tracker.TargetConnectionString);
+                                    RefillManifestWorkingSets();
+                                }
+                                else
+                                {
+                                    _log?.WriteLine($"CheckCompleted: cannot re-queue missing chunks for {verifyMu.DatabaseName}.{verifyMu.CollectionName} — tracker has no stored connection strings.", LogType.Warning);
+                                }
+                            }
+                            catch (Exception requeueEx)
+                            {
+                                _log?.WriteLine($"CheckCompleted: error re-queuing missing chunks for {verifyMu.DatabaseName}.{verifyMu.CollectionName}: {Helper.RedactPii(requeueEx.ToString())}", LogType.Error);
+                            }
                             continue;
                         }
                     }
@@ -3588,10 +3646,16 @@ namespace OnlineMongoMigrationProcessor
                     bool pendMUEmpty = _pendingMigrationUnitIndex.IsEmpty;
                     bool dlBacklogEmpty = _downloadBacklogIndex.IsEmpty;
                     bool ulBacklogEmpty = _uploadBacklogIndex.IsEmpty;
-                    bool result = activeMUEmpty && dlManEmpty && ulManEmpty && pendMUEmpty && dlBacklogEmpty && ulBacklogEmpty;
-                    if (result)
+                    bool queuesEmpty = activeMUEmpty && dlManEmpty && ulManEmpty && pendMUEmpty && dlBacklogEmpty && ulBacklogEmpty;
+                    if (queuesEmpty && !_registrationClosed)
+                    {
+                        // Queues are empty but the orchestrator may still be partitioning sibling MUs that
+                        // will register shortly. Keep the timer alive.
+                        return false;
+                    }
+                    if (queuesEmpty)
                         _log?.WriteLine($"IsAllWorkComplete=true (all queues empty)", LogType.Debug);
-                    return result;
+                    return queuesEmpty;
                 }
             }
             catch (Exception ex)
@@ -3614,6 +3678,21 @@ namespace OnlineMongoMigrationProcessor
             _stopped = true;
             _processNewTasks = false;
             _processCts?.Cancel();
+        }
+
+        /// <summary>
+        /// Closes the MU registration phase. After this call, IsAllWorkComplete is allowed to return true
+        /// once all queues drain. The orchestrator must call this after it has dispatched every MU via
+        /// StartCoordinatedProcess (directly or via the migration processor), otherwise a fast MU finishing
+        /// before its slower siblings register will cause the coordinator to self-shutdown prematurely.
+        /// Idempotent.
+        /// </summary>
+        public void CloseRegistration()
+        {
+            if (_registrationClosed)
+                return;
+            _registrationClosed = true;
+            _log?.WriteLine("Coordinator registration phase closed - self-shutdown enabled once queues drain", LogType.Debug);
         }
 
         public void StopCoordinatedProcessing()
@@ -3674,7 +3753,7 @@ namespace OnlineMongoMigrationProcessor
                     _log?.WriteLine($"Waiting for {pendingTasks.Count} in-flight worker(s) to finish...", LogType.Info);
                     try
                     {
-                        Task.WaitAll(pendingTasks.ToArray(), TimeSpan.FromSeconds(30));
+                        Task.WaitAll(pendingTasks.ToArray(), TimeSpan.FromSeconds(10));
                     }
                     catch (AggregateException)
                     {

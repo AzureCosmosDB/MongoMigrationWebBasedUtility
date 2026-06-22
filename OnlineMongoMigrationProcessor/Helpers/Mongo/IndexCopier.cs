@@ -36,11 +36,111 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             "$or", "$nor"
         };
 
+        /// <summary>
+        /// Index filter mode for selective index copying.
+        /// </summary>
+        public enum IndexFilter
+        {
+            All,
+            UniqueOnly,
+            NonUniqueOnly
+        }
+
+        /// <summary>
+        /// Copies all indexes from source to target (original behavior).
+        /// </summary>
         public async Task<int> CopyIndexesAsync(IMongoCollection<BsonDocument> sourceCollection,
             MongoClient _targetClient,
             string databaseName,
             string collectionName,
             Log log)
+        {
+            return await CopyIndexesInternalAsync(sourceCollection, _targetClient, databaseName, collectionName, log, IndexFilter.All);
+        }
+
+        /// <summary>
+        /// Copies only unique indexes from source to target.
+        /// Call this before offline data copy to enforce uniqueness constraints during insertion.
+        /// </summary>
+        public async Task<int> CopyUniqueIndexesAsync(IMongoCollection<BsonDocument> sourceCollection,
+            MongoClient _targetClient,
+            string databaseName,
+            string collectionName,
+            Log log)
+        {
+            return await CopyIndexesInternalAsync(sourceCollection, _targetClient, databaseName, collectionName, log, IndexFilter.UniqueOnly);
+        }
+
+        /// <summary>
+        /// Copies only non-unique indexes from source to target.
+        /// Call this after offline data copy completes for better performance.
+        /// </summary>
+        public async Task<int> CopyNonUniqueIndexesAsync(IMongoCollection<BsonDocument> sourceCollection,
+            MongoClient _targetClient,
+            string databaseName,
+            string collectionName,
+            Log log,
+            bool useBlockingBuilds = false)
+        {
+            return await CopyIndexesInternalAsync(sourceCollection, _targetClient, databaseName, collectionName, log, IndexFilter.NonUniqueOnly, useBlockingBuilds);
+        }
+
+        /// <summary>
+        /// Returns the count of non-unique indexes on the source collection (excluding _id_).
+        /// Used for calculating IndexPercent progress.
+        /// </summary>
+        public async Task<int> CountNonUniqueIndexesAsync(IMongoCollection<BsonDocument> sourceCollection, Log log)
+        {
+            var indexDocuments = await sourceCollection.Indexes.List().ToListAsync();
+            int count = 0;
+            foreach (var indexDocument in indexDocuments)
+            {
+                var indexName = indexDocument.GetValue("name", null)?.AsString;
+                if (indexName == "_id_") continue;
+                bool isUnique = indexDocument.TryGetValue("unique", out var unique) && unique.ToBoolean();
+                if (!isUnique) count++;
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// Returns the count of non-unique indexes currently present on the target collection
+        /// (excluding _id_). Used to verify blocking/non-blocking index-build completion instead of
+        /// relying on currentOp activity, which can briefly report zero while builds are still queued.
+        /// Returns -1 on failure so callers can keep waiting rather than declaring completion.
+        /// </summary>
+        public static async Task<int> CountNonUniqueIndexesOnTargetAsync(MongoClient targetClient, string databaseName, string collectionName, Log log)
+        {
+            try
+            {
+                var targetCollection = targetClient
+                    .GetDatabase(databaseName)
+                    .GetCollection<BsonDocument>(collectionName);
+                var indexDocuments = await targetCollection.Indexes.List().ToListAsync();
+                int count = 0;
+                foreach (var indexDocument in indexDocuments)
+                {
+                    var indexName = indexDocument.GetValue("name", null)?.AsString;
+                    if (indexName == "_id_") continue;
+                    bool isUnique = indexDocument.TryGetValue("unique", out var unique) && unique.ToBoolean();
+                    if (!isUnique) count++;
+                }
+                return count;
+            }
+            catch (Exception ex)
+            {
+                log?.WriteLine($"CountNonUniqueIndexesOnTargetAsync failed for {databaseName}.{collectionName}: {ex.Message}", LogType.Warning);
+                return -1;
+            }
+        }
+
+        private async Task<int> CopyIndexesInternalAsync(IMongoCollection<BsonDocument> sourceCollection,
+            MongoClient _targetClient,
+            string databaseName,
+            string collectionName,
+            Log log,
+            IndexFilter filter,
+            bool useBlockingBuilds = false)
         {
  
             var targetCollection = _targetClient
@@ -67,6 +167,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 try
                 {
                     var keys = indexDocument["key"].AsBsonDocument;
+
+                    // Determine uniqueness for filtering
+                    bool isUnique = indexDocument.TryGetValue("unique", out var uniqueVal) && uniqueVal.ToBoolean();
+                    if (filter == IndexFilter.UniqueOnly && !isUnique) continue;
+                    if (filter == IndexFilter.NonUniqueOnly && isUnique) continue;
 
                     if (HasUnsupportedIndexOption(indexDocument, indexName, databaseName, collectionName, log))
                     {
@@ -219,8 +324,20 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                     var indexModel = new CreateIndexModel<BsonDocument>(keys, options);
 
-                    await targetCollection.Indexes.CreateOneAsync(indexModel);
-                    counter++;
+                    if (filter == IndexFilter.NonUniqueOnly)
+                    {
+                        // One createIndexes command per index. We never wait for the build to
+                        // complete here — server-side build progress is monitored separately.
+                        // The `blocking` field is forwarded from the configured indexing strategy.
+                        bool submitted = await SubmitNonUniqueIndexBuildAsync(_targetClient, databaseName, collectionName, keys, options, useBlockingBuilds, log);
+                        if (submitted)
+                            counter++;
+                    }
+                    else
+                    {
+                        await targetCollection.Indexes.CreateOneAsync(indexModel);
+                        counter++;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -230,6 +347,83 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             }
 
             return counter;
+        }
+
+        private static async Task<bool> SubmitNonUniqueIndexBuildAsync(
+            MongoClient targetClient,
+            string databaseName,
+            string collectionName,
+            BsonDocument keys,
+            CreateIndexOptions<BsonDocument> options,
+            bool blocking,
+            Log log)
+        {
+            var targetDb = targetClient.GetDatabase(databaseName);
+
+            var indexDoc = new BsonDocument
+            {
+                { "key", keys }
+            };
+
+            if (!string.IsNullOrWhiteSpace(options.Name))
+                indexDoc["name"] = options.Name;
+            if (options.Unique.HasValue)
+                indexDoc["unique"] = options.Unique.Value;
+            if (options.Sparse.HasValue)
+                indexDoc["sparse"] = options.Sparse.Value;
+            if (options.PartialFilterExpression != null)
+                indexDoc["partialFilterExpression"] = options.PartialFilterExpression.ToBsonDocument();
+            if (options.ExpireAfter.HasValue)
+                indexDoc["expireAfterSeconds"] = (int)options.ExpireAfter.Value.TotalSeconds;
+            if (options.StorageEngine != null)
+                indexDoc["storageEngine"] = options.StorageEngine;
+
+            var command = new BsonDocument
+            {
+                { "createIndexes", collectionName },
+                { "indexes", new BsonArray { indexDoc } },
+                { "blocking", blocking },
+                { "maxTimeMS", 5000 }
+            };
+
+            try
+            {
+                await targetDb.RunCommandAsync<BsonDocument>(command);
+                return true;
+            }
+            catch (MongoCommandException ex) when (IsExpectedBlockingTimeout(ex))
+            {
+                // Timeout is expected; server-side index build continues and queues.
+                return true;
+            }
+            catch (MongoExecutionTimeoutException ex) when (IsExpectedBlockingTimeout(ex))
+            {
+                // Timeout is expected; server-side index build continues and queues.
+                return true;
+            }
+            catch (TimeoutException ex) when (IsExpectedBlockingTimeout(ex))
+            {
+                // Timeout is expected; server-side index build continues and queues.
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (IsExpectedBlockingTimeout(ex))
+                    return true;
+
+                var indexName = options.Name ?? "unnamed";
+                log.WriteLine($"Failed to submit non-unique index build '{indexName}' on {databaseName}.{collectionName}. Details: {ex.Message}", LogType.Error);
+                return false;
+            }
+        }
+
+        private static bool IsExpectedBlockingTimeout(Exception ex)
+        {
+            var message = ex.Message ?? string.Empty;
+            return message.Contains("MaxTimeMS expired", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("operation exceeded time limit", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("exceeded time limit", StringComparison.OrdinalIgnoreCase)
+                || (ex is MongoCommandException mce && mce.Code == 50);
         }
 
         private static bool HasUnsupportedIndexOption(BsonDocument indexDocument, string? indexName, string databaseName, string collectionName, Log log)

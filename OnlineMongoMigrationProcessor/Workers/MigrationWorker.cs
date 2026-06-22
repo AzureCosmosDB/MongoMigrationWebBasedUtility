@@ -12,6 +12,7 @@ using OnlineMongoMigrationProcessor.Processors;
 using OnlineMongoMigrationProcessor.Workers;
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.IO;
@@ -44,6 +45,13 @@ namespace OnlineMongoMigrationProcessor.Workers
         bool _syncBack = false;
         private string? _webAppBaseUrl = null;
 
+        // Process-wide SSL failure tracking for keep-alive. Some hosts (e.g. behind a proxy that intermittently
+        // breaks TLS) produce a flood of SSL errors that the retry loop alone can't recover from; once we hit
+        // the threshold we stop calling KeepAlive for the rest of the app lifetime to avoid noisy logs and CPU.
+        private const int KeepAliveSslFailureThreshold = 10;
+        private static int _keepAliveSslFailureCount = 0;
+        private static bool _keepAliveDisabledForProcess = false;
+
         private CancellationTokenSource? _compare_cts;
         private CancellationTokenSource? _cts;
 
@@ -51,11 +59,112 @@ namespace OnlineMongoMigrationProcessor.Workers
         
         // Track resume token setup tasks per collection to enable per-collection waiting
         private Dictionary<string, Task> _resumeTokenTasksByCollection = new Dictionary<string, Task>();
-       
+
+        // Pending post-copy index-build tasks per migration unit. Lets blocking index builds run
+        // in the background so the main migration loop is not held up while waiting for one
+        // collection's indexes to finish. Entry is removed once the task completes.
+        private readonly ConcurrentDictionary<string, Task> _pendingIndexBuildTasksByUnit = new ConcurrentDictionary<string, Task>();
+
+        // Pending moveCollection requests captured during prep. Drained per-unit just before data
+        // copy starts so we (a) create all collections first and (b) leave a gap between create
+        // and moveCollection (the server returns a transient internal error if moveCollection is
+        // called immediately after collection creation).
+        private readonly ConcurrentDictionary<string, (string Shard, DateTime EnqueuedAtUtc)> _pendingMovesByUnitId = new ConcurrentDictionary<string, (string, DateTime)>();
+        
         public MigrationWorker()
         {            
             _log = new Log();          
             MigrationJobContext.JobList.SetLog(_log);
+        }
+
+        /// <summary>
+        /// Gets the effective overwrite setting for a migration unit.
+        /// Per-unit Overwrite value determines behavior.
+        /// Returns: true if unit should overwrite (drop target first), false if append.
+        /// </summary>
+        private bool GetEffectiveOverwrite(MigrationUnit mu)
+        {
+            // Simulated run always skips overwrite
+            if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
+                return false;
+
+            // Per-unit override (defaults to false / append if not set)
+            if (mu.Overwrite.HasValue)
+                return mu.Overwrite.Value;
+
+            // Default: append mode (don't overwrite)
+            return false;
+        }
+
+        /// <summary>
+        /// Gets the effective skip-indexes setting for a migration unit.
+        /// Per-unit IndexingStrategy determines behavior.
+        /// Returns: true if indexes should be skipped, false if indexes should be migrated.
+        /// </summary>
+        private bool GetEffectiveSkipIndexes(MigrationUnit mu)
+        {
+            // Simulated run always skips indexes
+            if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
+                return true;
+
+            // Per-unit override
+            if (mu.IndexingStrategy.HasValue)
+                return mu.IndexingStrategy.Value == IndexingStrategy.DontIndex;
+
+            // Default: migrate indexes
+            return false;
+        }
+
+        /// <summary>
+        /// Gets whether blocking index creation should be used for a migration unit.
+        /// Returns: true if indexes should be created in blocking mode, false for non-blocking (background).
+        /// </summary>
+        private bool GetEffectiveBlockingIndexes(MigrationUnit mu)
+        {
+            if (mu.IndexingStrategy.HasValue)
+                return mu.IndexingStrategy.Value == IndexingStrategy.SameAsSourceBlocking;
+
+            // Default: non-blocking
+            return false;
+        }
+
+        /// <summary>
+        /// Gets the effective sharding strategy for a migration unit.
+        /// Per-unit value wins; null means "inherit existing pre-feature behaviour".
+        /// Simulated runs force <see cref="ShardingStrategy.DontShard"/> regardless of the stored value
+        /// so that no shardCollection command can be issued against the target.
+        /// Note: actual shardCollection execution today lives in the Python SchemaMigration tool;
+        /// the .NET worker exposes this helper so any future .NET-side sharding path consumes the
+        /// per-unit value through one entry point.
+        /// </summary>
+        private ShardingStrategy GetEffectiveShardingStrategy(MigrationUnit mu)
+        {
+            if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
+                return ShardingStrategy.DontShard;
+
+            return mu.ShardingStrategy ?? ShardingStrategy.SameAsSource;
+        }
+
+        /// <summary>
+        /// Gets the effective target shard/node identifier for a migration unit.
+        /// Only meaningful when <see cref="GetEffectiveShardingStrategy"/> returns
+        /// <see cref="ShardingStrategy.DontShard"/>; null means "let the server decide".
+        /// Simulated runs always return null.
+        /// </summary>
+        private string? GetEffectiveMoveToShard(MigrationUnit mu)
+        {
+            if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun)
+                return null;
+
+            if (GetEffectiveShardingStrategy(mu) != ShardingStrategy.DontShard)
+                return null;
+
+            // "Auto" should have been resolved by ResolveAutoShardAssignmentsAsync;
+            // if it wasn't, treat as null (no move)
+            if (string.Equals(mu.MoveToShard, "Auto", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            return mu.MoveToShard;
         }
 
         /// <summary>
@@ -123,6 +232,12 @@ namespace OnlineMongoMigrationProcessor.Workers
         public void StopMigration()
         {
             MigrationJobContext.AddVerboseLog($"StopMigration: _activeJobId={_activeJobId}");
+            // Signal the processor BEFORE cancelling tokens or killing processes so that:
+            //   - DumpRestoreProcessor stops the coordinator queue (prevents re-enqueue of killed chunks).
+            //   - CopyProcessor/RUCopyProcessor in-flight async continuations (UpdateProgress,
+            //     ProcessSegmentAsync, UpdateDocumentCountsAsync) see StopRequested and skip
+            //     mid-cancel MU writes.
+            _migrationProcessor?.SignalStop();
             try
             {
                 _activeJobId=string.Empty;
@@ -130,14 +245,6 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _cts?.Cancel();
                 _compare_cts?.Cancel();
 
-                // Signal the coordinator to stop BEFORE killing processes.
-                // This prevents HandleDumpFailure/HandleRestoreFailure from re-enqueueing
-                // killed chunks for retry during the window between kill and StopCoordinatedProcessing.
-                if (_migrationProcessor is DumpRestoreProcessor drp)
-                {
-                    drp.SignalStop();
-                }
-                
                 // Kill all active mongodump and mongorestore processes
                 MigrationJobContext.KillAllMigrationProcesses();
                 
@@ -149,6 +256,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 {
                     _migrationProcessor.StopProcessing(true);
                     _migrationProcessor = null;
+                    MigrationJobContext.ActiveMigrationProcessor = null;
                 }
                 
                 ProcessRunning = false;
@@ -240,6 +348,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     // Stop the processor with full cleanup
                     _migrationProcessor.StopProcessing(true);
                     _migrationProcessor = null;
+                    MigrationJobContext.ActiveMigrationProcessor = null;
                     
                     // Give time for cleanup to complete
                     await Task.Delay(1000);
@@ -276,23 +385,9 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             else
             {
-                if (MigrationJobContext.CurrentlyActiveJob.AppendMode)
+                if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy)
                 {
-                    _log.WriteLine("Target collections will not be dropped, and no indexes will be modified or created. Only new data will be migrated.", LogType.Warning);
-                }
-                else
-                {
-                    if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy)
-                    {
-                        _log.WriteLine("This migration job will not transfer the indexes to the target collections. Use the schema migration script at https://aka.ms/mongoruschemamigrationscript to create the indexes on the target collections.", LogType.Warning);
-                    }
-                    else
-                    {
-                        if (MigrationJobContext.CurrentlyActiveJob.SkipIndexes)
-                        {
-                            _log.WriteLine("No indexes will be created.", LogType.Warning);
-                        }
-                    }
+                    _log.WriteLine("This migration job will not transfer the indexes to the target collections. Use the schema migration script at https://aka.ms/mongoruschemamigrationscript to create the indexes on the target collections.", LogType.Warning);
                 }
             }
             if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.DumpAndRestore)
@@ -372,6 +467,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                     break;
             }
             _migrationProcessor.ProcessRunning = true;
+            MigrationJobContext.ActiveMigrationProcessor = _migrationProcessor;
+            // Clear the stop flag now that a fresh processor is in place. Late continuations
+            // from a previous run would already have been short-circuited.
+            MigrationJobContext.StopRequested = false;
             
 #if !LEGACY_MONGODB_DRIVER
             // Set the delegate to wait for resume token tasks before processing collections
@@ -618,12 +717,20 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             
             _log.WriteLine("About to enter foreach loop for migration units", LogType.Debug);
+            _log.ShowInMonitor($"Preparing {unitsForPrep.Count} collection(s) for migration...");
+
+            // Resolve "Auto" shard assignments before processing
+            await ResolveAutoShardAssignmentsAsync(unitsForPrep);
 
             int unitIndex = 0;
             foreach (var mu in unitsForPrep)
             {
                 unitIndex++;
                 _log.WriteLine($"Entered foreach loop - iteration {unitIndex}", LogType.Debug);
+                if (unitIndex == 1 || unitIndex % 10 == 0 || unitIndex == unitsForPrep.Count)
+                {
+                    _log.ShowInMonitor($"Preparing collection {unitIndex}/{unitsForPrep.Count}: {mu?.DatabaseName}.{mu?.CollectionName}");
+                }
                 
                 if (mu == null)
                 {
@@ -641,10 +748,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                         return TaskResult.Canceled;
                     }
 
-                    var result = await ProcessMigrationUnitAsync(mu, prepContext, _cts);
+                    var result = await PrepareUnitForCopyAsync(mu, prepContext, _cts);
                     if (result != TaskResult.Success)
                     {
-                        _log.WriteLine($"ProcessMigrationUnitAsync returned {result} for {mu.DatabaseName}.{mu.CollectionName}", LogType.Error);
+                        _log.WriteLine($"PrepareUnitForCopyAsync returned {result} for {mu.DatabaseName}.{mu.CollectionName}", LogType.Error);
                         return result;
                     }
                     
@@ -680,10 +787,93 @@ namespace OnlineMongoMigrationProcessor.Workers
             return (true, useServerLevel);
         }
 
-        private async Task<TaskResult> ProcessMigrationUnitAsync(MigrationUnit mu, PartitionPrepContext context, CancellationToken _cts)
+        /// <summary>
+        /// Shared fast-path for migration units whose offline copy is already complete.
+        /// Ensures any pending blocking index builds finish (or non-blocking monitoring restarts)
+        /// before the collection is added to the change-stream queue. Returns true if the caller
+        /// can short-circuit and skip the normal validation/partition path.
+        /// </summary>
+        private Task<bool> TryQueueCompletedUnitForChangeStreamAsync(MigrationUnit mu, string logCallerTag)
         {
-            MigrationJobContext.AddVerboseLog($"ProcessMigrationUnitAsync: mu={mu.DatabaseName}.{mu.CollectionName}");
-            _log.WriteLine($"Starting ProcessMigrationUnitAsync for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+            bool offlineCompleted = (mu.DumpComplete && mu.RestoreComplete)
+                || (mu.MigrationChunks != null
+                    && mu.MigrationChunks.Count > 0
+                    && mu.MigrationChunks.TrueForAll(c => c.IsDownloaded == true && c.IsUploaded == true));
+
+            if (!offlineCompleted)
+                return Task.FromResult(false);
+
+            if (_migrationProcessor == null)
+                return Task.FromResult(true);
+
+            bool indexesPending = !mu.IndexBuildComplete
+                && mu.IndexingStrategy.HasValue
+                && mu.IndexingStrategy.Value != IndexingStrategy.DontIndex;
+
+            bool isOnline = Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob);
+
+            if (indexesPending)
+            {
+                // Covers both first-run and resume (e.g. paused mid-build) for offline AND online
+                // jobs: re-enter the index-build flow so monitoring restarts. The build (and the
+                // eventual change-stream queue submission for online jobs) runs in the background
+                // so it cannot block the outer migration loop from advancing to other collections.
+                bool isBlocking = GetEffectiveBlockingIndexes(mu);
+                _log.WriteLine($"Index builds not complete for {mu.DatabaseName}.{mu.CollectionName} (blocking={isBlocking}, IndexesMigrated={mu.IndexesMigrated}/{mu.IndexesExpected}) - {(isBlocking ? "deferring change stream" : "resuming monitor")} [{logCallerTag}]", LogType.Debug);
+                StartBackgroundIndexBuildAndQueue(mu);
+            }
+            else if (isOnline)
+            {
+                _migrationProcessor.AddCollectionToChangeStreamQueue(mu);
+            }
+
+            return Task.FromResult(true);
+        }
+
+        /// <summary>
+        /// Kicks off the post-copy index build (and change-stream enqueue on success) for a single
+        /// migration unit on a background task. Idempotent per unit: while a task is in flight, a
+        /// subsequent caller for the same unit will no-op. This decouples one collection's blocking
+        /// index build from the main migration loop so other collections can keep progressing.
+        /// </summary>
+        internal void StartBackgroundIndexBuildAndQueue(MigrationUnit mu)
+        {
+            if (_migrationProcessor == null)
+                return;
+
+            _pendingIndexBuildTasksByUnit.GetOrAdd(mu.Id, _ => Task.Run(async () =>
+            {
+                try
+                {
+                    var processor = _migrationProcessor;
+                    if (processor == null)
+                        return;
+                    bool canProceed = await processor.BuildNonUniqueIndexesAfterCopyAsync(mu);
+                    if (canProceed)
+                        processor.AddCollectionToChangeStreamQueue(mu);
+                }
+                catch (Exception ex)
+                {
+                    _log.WriteLine($"Background index build for {mu.DatabaseName}.{mu.CollectionName} failed: {ex.Message}", LogType.Error);
+                }
+                finally
+                {
+                    _pendingIndexBuildTasksByUnit.TryRemove(mu.Id, out Task? _);
+                    // Re-run the offline completion check now that this background task has drained.
+                    // StopOfflineOrInvokeChangeStreams may have skipped earlier because this task was
+                    // still in flight; without this nudge the job would stay InProgress forever on
+                    // offline (DumpAndRestore) jobs whose only remaining work was a resumed index build.
+                    try { _migrationProcessor?.StopOfflineOrInvokeChangeStreams(); } catch { }
+                }
+            }));
+        }
+
+        internal bool HasPendingIndexBuilds() => !_pendingIndexBuildTasksByUnit.IsEmpty;
+
+        private async Task<TaskResult> PrepareUnitForCopyAsync(MigrationUnit mu, PartitionPrepContext context, CancellationToken _cts)
+        {
+            MigrationJobContext.AddVerboseLog($"PrepareUnitForCopyAsync: mu={mu.DatabaseName}.{mu.CollectionName}");
+            _log.WriteLine($"Starting PrepareUnitForCopyAsync for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
 
             if (mu.SourceStatus == CollectionStatus.IsView)
             {
@@ -693,16 +883,9 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             // Fast-path for collections that are already fully processed.
             // Avoid expensive source metadata checks for large jobs and queue directly for change stream monitoring.
-            if (mu.DumpComplete && mu.RestoreComplete)
+            if (await TryQueueCompletedUnitForChangeStreamAsync(mu, "prepare-partition"))
             {
-                _log.WriteLine($"Bypassing collection validation for completed unit {mu.DatabaseName}.{mu.CollectionName} (DumpComplete=true, RestoreComplete=true)", LogType.Debug);
-
-                if (_migrationProcessor != null && Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
-                {
-                    _migrationProcessor.AddCollectionToChangeStreamQueue(mu);
-                    _log.WriteLine($"Added {mu.DatabaseName}.{mu.CollectionName} to change stream queue via fast-path", LogType.Debug);
-                }
-
+                _log.WriteLine($"Bypassing collection validation for completed unit {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
                 return TaskResult.Success;
             }
 
@@ -759,7 +942,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
 
             MigrationJobContext.SaveMigrationUnit(mu, false);
-            _log.WriteLine($"Completed ProcessMigrationUnitAsync for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+            _log.WriteLine($"Completed PrepareUnitForCopyAsync for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
             return TaskResult.Success;
         }
 
@@ -835,6 +1018,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             _ = Task.Run(() =>
             {
                 long count = MongoHelper.GetActualDocumentCount(coll, mu);
+                if (MigrationJobContext.StopRequested)
+                    return;
                 MigrationJobContext.MutateMigrationUnit(mu.Id, m => m.ActualDocCount = count, updateParent: false);
             }, _cts);
         }
@@ -889,7 +1074,9 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"PrepareTargetCollectionAsync: mu={mu.DatabaseName}.{mu.CollectionName}");
 
-            if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun || MigrationJobContext.CurrentlyActiveJob.AppendMode || mu.TargetCreated)
+            // Skip if simulated run, append mode (or per-unit Overwrite=false), or already created
+            var effectiveOverwrite = GetEffectiveOverwrite(mu);
+            if (MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun || !effectiveOverwrite || mu.TargetCreated)
                 return TaskResult.Success;
 
             var database = _sourceClient!.GetDatabase(mu.DatabaseName);
@@ -898,15 +1085,24 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (string.IsNullOrWhiteSpace(MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]))
                 return TaskResult.FailedAfterRetries;
             
+            var targetConnStr = MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id];
+            var skipIndexes = GetEffectiveSkipIndexes(mu);
+            // When indexing strategy requires index building, only create unique indexes
+            // before data copy. Non-unique indexes will be built after offline copy completes.
+            bool useUniqueOnly = !skipIndexes && (mu.IndexingStrategy == IndexingStrategy.SameAsSource || mu.IndexingStrategy == IndexingStrategy.SameAsSourceBlocking);
             var result = await MongoHelper.DeleteAndCopyIndexesAsync(_log, mu, 
-                MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], 
-                collection, MigrationJobContext.CurrentlyActiveJob.SkipIndexes);
+                targetConnStr, collection, skipIndexes, uniqueOnly: useUniqueOnly);
 
             if (_cts.IsCancellationRequested)
                 return TaskResult.Canceled;
 
             if (!result)
                 return TaskResult.Retry;
+
+            // Apply sharding or move collection after creation and before data copy
+            var shardingResult = await ApplyShardingStrategyAsync(mu, _cts);
+            if (shardingResult != TaskResult.Success)
+                return shardingResult;
 
             MigrationJobContext.SaveMigrationUnit(mu, false);
 
@@ -917,7 +1113,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 _log.WriteLine("SyncBack: Checking if change stream is enabled on target");
                 var retValue = await MongoHelper.IsChangeStreamEnabledAsync(_log, string.Empty, 
-                    MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], mu, true);
+                    targetConnStr, mu, true);
                 
                 context.CheckedCS = true;
                 
@@ -928,6 +1124,193 @@ namespace OnlineMongoMigrationProcessor.Workers
             return TaskResult.Success;
         }
 
+        /// <summary>
+        /// Applies sharding strategy to the target collection after creation.
+        /// SameAsSource: reads shard key from source, applies hashed shard key on target.
+        /// DontShard + MoveToShard: moves collection to specified shard using moveCollection.
+        /// </summary>
+        private async Task<TaskResult> ApplyShardingStrategyAsync(MigrationUnit mu, CancellationToken _cts)
+        {
+            var strategy = GetEffectiveShardingStrategy(mu);
+            var targetConnStr = MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob!.Id];
+            var targetClient = MongoClientFactory.Create(_log, targetConnStr);
+            var targetDatabaseName = mu.GetEffectiveTargetDatabaseName();
+            var targetCollectionName = mu.GetEffectiveTargetCollectionName();
+            var namespaceForLog = Log.FormatNamespaceForLog(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName);
+
+            if (strategy == ShardingStrategy.SameAsSource)
+            {
+                // Read shard key from source and apply on target
+                var sourceShardKey = await MongoHelper.GetShardKeyFromSourceAsync(_log, _sourceClient!, mu.DatabaseName, mu.CollectionName);
+                if (sourceShardKey != null)
+                {
+                    _log.WriteLine($"Applying shard key from source for {namespaceForLog}");
+                    var shardResult = await MongoHelper.ShardCollectionAsync(_log, targetClient, targetDatabaseName, targetCollectionName, sourceShardKey);
+                    if (!shardResult)
+                    {
+                        _log.WriteLine($"Failed to shard collection {namespaceForLog}, continuing without sharding", LogType.Warning);
+                    }
+                }
+                else
+                {
+                    _log.WriteLine($"Source collection {namespaceForLog} is not sharded, skipping shard key migration", LogType.Debug);
+                }
+            }
+            else if (strategy == ShardingStrategy.DontShard)
+            {
+                // Move collection to specified shard if MoveToShard is set
+                var moveToShard = GetEffectiveMoveToShard(mu);
+                if (!string.IsNullOrWhiteSpace(moveToShard))
+                {
+                    // Defer the moveCollection call. Calling it immediately after collection
+                    // creation can fail with a transient internal error on the server, so we
+                    // queue it here and apply it (with a min gap and retries) right before the
+                    // unit's data copy starts.
+                    _pendingMovesByUnitId[mu.Id] = (moveToShard, DateTime.UtcNow);
+                    _log.WriteLine($"Queued moveCollection for {namespaceForLog} -> {moveToShard} (will run before data copy starts)", LogType.Debug);
+                }
+            }
+
+            if (_cts.IsCancellationRequested)
+                return TaskResult.Canceled;
+
+            return TaskResult.Success;
+        }
+
+        /// <summary>
+        /// Applies any pending moveCollection request enqueued by <see cref="ApplyShardingStrategyAsync"/>
+        /// for the given unit. Enforces a minimum gap since enqueue and retries on transient failures so the
+        /// move is given time to succeed before data copy begins.
+        /// </summary>
+        private async Task EnsurePendingMoveAppliedAsync(MigrationUnit mu, CancellationToken ct)
+        {
+            if (!_pendingMovesByUnitId.TryGetValue(mu.Id, out var pending))
+                return;
+
+            const int minGapMs = 10000;
+            int[] retryDelaysMs = { 0, 5000, 15000, 30000 };
+
+            var targetConnStr = MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob!.Id];
+            var targetClient = MongoClientFactory.Create(_log, targetConnStr);
+            var targetDatabaseName = mu.GetEffectiveTargetDatabaseName();
+            var targetCollectionName = mu.GetEffectiveTargetCollectionName();
+            var namespaceForLog = Log.FormatNamespaceForLog(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName);
+
+            var elapsedMs = (int)Math.Max(0, (DateTime.UtcNow - pending.EnqueuedAtUtc).TotalMilliseconds);
+            if (elapsedMs < minGapMs)
+            {
+                var waitMs = minGapMs - elapsedMs;
+                _log.WriteLine($"Waiting {waitMs} ms before moving {namespaceForLog} -> {pending.Shard} (post-create cool-down)", LogType.Debug);
+                try { await Task.Delay(waitMs, ct); } catch (OperationCanceledException) { return; }
+            }
+
+            for (int attempt = 0; attempt < retryDelaysMs.Length; attempt++)
+            {
+                if (ct.IsCancellationRequested)
+                    return;
+
+                if (retryDelaysMs[attempt] > 0)
+                {
+                    _log.WriteLine($"Retrying moveCollection for {namespaceForLog} -> {pending.Shard} in {retryDelaysMs[attempt]} ms (attempt {attempt + 1}/{retryDelaysMs.Length})", LogType.Debug);
+                    try { await Task.Delay(retryDelaysMs[attempt], ct); } catch (OperationCanceledException) { return; }
+                }
+
+                var moveResult = await MongoHelper.MoveCollectionAsync(_log, targetClient, targetDatabaseName, targetCollectionName, pending.Shard);
+                if (moveResult)
+                {
+                    _pendingMovesByUnitId.TryRemove(mu.Id, out _);
+                    return;
+                }
+            }
+
+            _log.WriteLine($"moveCollection for {namespaceForLog} -> {pending.Shard} did not succeed after {retryDelaysMs.Length} attempts; continuing without move", LogType.Warning);
+            _pendingMovesByUnitId.TryRemove(mu.Id, out _);
+        }
+
+        /// <summary>
+        /// Resolves "Auto" MoveToShard values by distributing collections across available shards
+        /// using greedy bin-packing by source storage size (largest-first).
+        /// Collections are assigned to the shard with the least accumulated storage.
+        /// </summary>
+        private async Task ResolveAutoShardAssignmentsAsync(List<MigrationUnit> units)
+        {
+            var autoUnits = units.Where(mu =>
+                GetEffectiveShardingStrategy(mu) == ShardingStrategy.DontShard &&
+                string.Equals(mu.MoveToShard, "Auto", StringComparison.OrdinalIgnoreCase)
+            ).ToList();
+
+            if (autoUnits.Count == 0)
+                return;
+
+            _log.WriteLine($"Resolving auto-shard assignments for {autoUnits.Count} collection(s)", LogType.Debug);
+            _log.ShowInMonitor($"Resolving auto-shard assignments for {autoUnits.Count} collection(s) (fetching storage sizes from source)...");
+
+            // Get available shards/nodes from the target using the same layered probe as the UI
+            var targetConnStr = MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob!.Id];
+            var shards = await MongoHelper.GetClusterNodesAsync(targetConnStr);
+
+            if (shards.Count == 0)
+            {
+                _log.WriteLine("No shards available on target - cannot auto-distribute. Clearing MoveToShard.", LogType.Warning);
+                foreach (var mu in autoUnits)
+                    mu.MoveToShard = null;
+                return;
+            }
+
+            if (shards.Count == 1)
+            {
+                _log.WriteLine($"Only one shard available ({shards[0]}) - assigning all auto collections to it", LogType.Debug);
+                foreach (var mu in autoUnits)
+                    mu.MoveToShard = shards[0];
+                return;
+            }
+
+            // Get storage sizes from source (throttled to avoid exhausting the driver's connection wait queue)
+            using var sizeThrottle = new SemaphoreSlim(10);
+            int sizeCompleted = 0;
+            int sizeTotal = autoUnits.Count;
+            var sizeTasks = autoUnits.Select(async mu =>
+            {
+                await sizeThrottle.WaitAsync();
+                try
+                {
+                    var size = await MongoHelper.GetCollectionStorageSizeAsync(_log, _sourceClient!, mu.DatabaseName, mu.CollectionName);
+                    int done = Interlocked.Increment(ref sizeCompleted);
+                    if (done == 1 || done % 10 == 0 || done == sizeTotal)
+                    {
+                        _log.ShowInMonitor($"Auto-shard: fetched storage size {done}/{sizeTotal} (last: {mu.DatabaseName}.{mu.CollectionName})");
+                    }
+                    return (Unit: mu, Size: size);
+                }
+                finally
+                {
+                    sizeThrottle.Release();
+                }
+            });
+
+            var sizeResults = await Task.WhenAll(sizeTasks);
+            _log.ShowInMonitor($"Auto-shard: assigning {sizeTotal} collection(s) to shards (greedy bin-packing)...");
+
+            // Greedy bin-packing: sort by size descending, assign to shard with least storage
+            var sortedUnits = sizeResults.OrderByDescending(r => r.Size).ToList();
+            var shardLoad = shards.ToDictionary(s => s, _ => 0L);
+
+            foreach (var (unit, size) in sortedUnits)
+            {
+                var targetShard = shardLoad.OrderBy(kv => kv.Value).First().Key;
+                unit.MoveToShard = targetShard;
+                shardLoad[targetShard] += size;
+
+                _log.WriteLine($"Auto-shard: {unit.DatabaseName}.{unit.CollectionName} ({size / (1024 * 1024):N0} MB) -> {targetShard}", LogType.Debug);
+            }
+
+            // Log distribution summary
+            foreach (var kv in shardLoad.OrderBy(kv => kv.Key))
+            {
+                _log.WriteLine($"Shard {kv.Key} total assigned storage: {kv.Value / (1024 * 1024):N0} MB", LogType.Debug);
+            }
+        }
+
         private async Task<TaskResult> HandleMissingCollectionAsync(MigrationUnit mu, CancellationToken _cts)
         {
             MigrationJobContext.AddVerboseLog($"HandleMissingCollectionAsync: mu={mu.DatabaseName}.{mu.CollectionName}");
@@ -935,17 +1318,19 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (_cts.IsCancellationRequested)
                 return TaskResult.Canceled;
 
+            var effectiveOverwrite = GetEffectiveOverwrite(mu);
             if (!MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun && 
-                !MigrationJobContext.CurrentlyActiveJob.AppendMode && 
+                effectiveOverwrite && 
                 !mu.TargetCreated)
             {
                 try
                 {
                     var database = _sourceClient!.GetDatabase(mu.DatabaseName);
                     var collection = database.GetCollection<BsonDocument>(mu.CollectionName);
+                    var skipIndexes = GetEffectiveSkipIndexes(mu);
                     await MongoHelper.DeleteAndCopyIndexesAsync(_log, mu, 
                         MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], 
-                        collection, MigrationJobContext.CurrentlyActiveJob.SkipIndexes);
+                        collection, skipIndexes);
                 }
                 catch
                 {
@@ -982,9 +1367,179 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (MigrationJobContext.CurrentlyActiveJob == null)
                 return TaskResult.FailedAfterRetries;
 
-            List<Task> resumeTokenTasks = new List<Task>();
-            _log.WriteLine($"Processing {MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics.Count} migration units", LogType.Debug);
+            // RU jobs use the sequential pipeline: all partitions first, then copy (no background partitioning).
+            if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy)
+            {
+                return await MigrateRUOptimizedJobCollectionsAsync(syncBack, ctsToken);
+            }
 
+            return await MigrateJobCollectionsWithAsyncPartitioningAsync(syncBack, ctsToken);
+        }
+
+        private async Task<TaskResult> MigrateJobCollectionsWithAsyncPartitioningAsync(bool syncBack, CancellationToken ctsToken)
+        {
+            if (MigrationJobContext.CurrentlyActiveJob == null)
+                return TaskResult.FailedAfterRetries;
+
+            List<Task> resumeTokenTasks = new List<Task>();
+            var unitsForMigrate = Helper.GetMigrationUnitsToMigrate(MigrationJobContext.CurrentlyActiveJob);
+            _log.WriteLine($"Processing {unitsForMigrate.Count} migration units (async partitioning pipeline)", LogType.Debug);
+            _log.ShowInMonitor($"Processing {unitsForMigrate.Count} collection(s) (async partitioning pipeline)...");
+
+            // Lightweight global prerequisites only (no upfront per-collection partitioning).
+            await ResolveAutoShardAssignmentsAsync(unitsForMigrate);
+
+            var serverCtx = new PartitionPrepContext
+            {
+                CheckedCS = false,
+                ServerLevelResumeTokenSet = false,
+                UseServerLevel = MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server
+                    && MigrationJobContext.CurrentlyActiveJob.JobType != JobType.RUOptimizedCopy,
+                SkipPartitioning = true
+            };
+
+            if (serverCtx.UseServerLevel && unitsForMigrate.Count > 0)
+            {
+                await SetupServerLevelResumeTokenAsync(unitsForMigrate[0], serverCtx, ctsToken, syncBack);
+            }
+
+            // Partition in the background and start migration as each collection becomes ready.
+            int maxPartitionConcurrency = Math.Max(1, Math.Min(8, MigrationJobContext.CurrentlyActiveJob.ParallelThreads > 0
+                ? MigrationJobContext.CurrentlyActiveJob.ParallelThreads
+                : Environment.ProcessorCount));
+            var partitionGate = new SemaphoreSlim(maxPartitionConcurrency, maxPartitionConcurrency);
+
+            int partitionPrepared = 0;
+            int partitionTotal = unitsForMigrate.Count;
+            _log.ShowInMonitor($"Preparing {partitionTotal} collection(s) in background ({maxPartitionConcurrency} concurrent)...");
+
+            var partitionTasks = unitsForMigrate.ToDictionary(
+                mu => mu.Id,
+                mu => Task.Run(async () =>
+                {
+                    await partitionGate.WaitAsync(ctsToken);
+                    try
+                    {
+                        if (_migrationCancelled || ctsToken.IsCancellationRequested)
+                            return TaskResult.Canceled;
+
+                        var (exists, isCollection) = await ValidateSourceCollectionAsync(mu);
+
+                        // Order matters: a missing namespace returns (exists=false, isCollection=false).
+                        // Handle the missing case first so we don't mis-classify it as a view.
+                        if (!exists)
+                        {
+                            _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} does not exist on source. Marking as NotFound and continuing.", LogType.Warning);
+                            return await HandleMissingCollectionAsync(mu, ctsToken);
+                        }
+
+                        if (!isCollection)
+                        {
+                            mu.SourceStatus = CollectionStatus.IsView;
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} is a view. Only collections are supported for migration — skipping.", LogType.Warning);
+                            return TaskResult.Success;
+                        }
+
+                        mu.SourceStatus = CollectionStatus.OK;
+                        await UpdateDocumentCountsAsync(mu, ctsToken);
+
+                        await ValidateTargetCollectionExistsAsync(mu);
+
+                        if (mu.MigrationChunks == null || mu.MigrationChunks.Count == 0)
+                        {
+                            // Keep behavior aligned with the previous prep path.
+                            var prepContext = new PartitionPrepContext
+                            {
+                                CheckedCS = false,
+                                ServerLevelResumeTokenSet = false,
+                                UseServerLevel = false,
+                                SkipPartitioning = false
+                            };
+
+                            var prepResult = await PrepareTargetCollectionAsync(mu, prepContext, ctsToken);
+                            if (prepResult != TaskResult.Success)
+                                return prepResult;
+
+                            var partResult = await CreatePartitionsAsync(mu, ctsToken);
+                            if (partResult != TaskResult.Success)
+                                return partResult;
+                        }
+
+                        MigrationJobContext.SaveMigrationUnit(mu, false);
+                        return TaskResult.Success;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return TaskResult.Canceled;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.WriteLine($"Async partitioning failed for {mu.DatabaseName}.{mu.CollectionName}. Details: {ex}", LogType.Error);
+                        return TaskResult.Retry;
+                    }
+                    finally
+                    {
+                        partitionGate.Release();
+                        int done = Interlocked.Increment(ref partitionPrepared);
+                        if (done == 1 || done % 10 == 0 || done == partitionTotal)
+                        {
+                            _log.ShowInMonitor($"Background preparation: {done}/{partitionTotal} collection(s) ready (last: {mu.DatabaseName}.{mu.CollectionName})");
+                        }
+                    }
+                }, ctsToken));
+
+            int migrateIndex = 0;
+            foreach (var migrationUnit in unitsForMigrate)
+            {
+                if (_migrationCancelled)
+                    return TaskResult.Canceled;
+
+                if (HandleControlPause())
+                    return TaskResult.Canceled;
+
+                var prepResult = await partitionTasks[migrationUnit.Id];
+                if (prepResult != TaskResult.Success)
+                    return prepResult;
+
+                MigrationJobContext.AddVerboseLog($"Before MigrateUnitEndToEndAsync for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName}");
+
+                var result = await MigrateUnitEndToEndAsync(migrationUnit, syncBack, ctsToken, resumeTokenTasks);
+                if (result != TaskResult.Success)
+                    return result;
+
+                migrateIndex++;
+                if (migrateIndex == 1 || migrateIndex % 10 == 0 || migrateIndex == unitsForMigrate.Count)
+                {
+                    _log.ShowInMonitor($"Migration dispatch progress: {migrateIndex}/{unitsForMigrate.Count} (last: {migrationUnit.DatabaseName}.{migrationUnit.CollectionName})");
+                }
+
+                MigrationJobContext.AddVerboseLog($"Before ShouldBreakMigrationLoop, last processed {migrationUnit.DatabaseName}.{migrationUnit.CollectionName}");
+
+                if (ShouldBreakMigrationLoop())
+                {
+                    _log.WriteLine("Breaking loop: CS post-processing started and offline job completed", LogType.Debug);
+                    break;
+                }
+            }
+
+            // Every MU has been dispatched (or the loop broke after offline completion). Allow the
+            // coordinator to self-shutdown once its queues drain; without this it would block forever
+            // on the registration gate when the last MU finishes.
+            _migrationProcessor?.MarkAllUnitsDispatched();
+
+            MigrationJobContext.AddVerboseLog($"Before WaitForMigrationProcessorCompletionAsync");
+            return await WaitForMigrationProcessorCompletionAsync(ctsToken);
+        }
+
+        private async Task<TaskResult> MigrateRUOptimizedJobCollectionsAsync(bool syncBack, CancellationToken ctsToken)
+        {
+            List<Task> resumeTokenTasks = new List<Task>();
+            var totalUnits = MigrationJobContext.CurrentlyActiveJob!.MigrationUnitBasics.Count;
+            _log.WriteLine($"Processing {totalUnits} migration units", LogType.Debug);
+            _log.ShowInMonitor($"Processing {totalUnits} collection(s) (RU-optimized pipeline)...");
+
+            int ruIndex = 0;
             foreach (var mub in MigrationJobContext.CurrentlyActiveJob.MigrationUnitBasics)
             {
                 if (_migrationCancelled)
@@ -993,11 +1548,18 @@ namespace OnlineMongoMigrationProcessor.Workers
                 if (HandleControlPause())
                     return TaskResult.Canceled;
 
-                MigrationJobContext.AddVerboseLog($"Before ProcessMigrationUnitAsync for {mub.DatabaseName}.{mub.CollectionName}");
+                MigrationJobContext.AddVerboseLog($"Before MigrateUnitEndToEndAsync for {mub.DatabaseName}.{mub.CollectionName}");
 
-                var result = await ProcessMigrationUnitAsync(mub, syncBack, ctsToken, resumeTokenTasks);
+                var migrationUnit = MigrationJobContext.GetMigrationUnit(mub.Id);
+                var result = await MigrateUnitEndToEndAsync(migrationUnit, syncBack, ctsToken, resumeTokenTasks);
                 if (result != TaskResult.Success)
                     return result;
+
+                ruIndex++;
+                if (ruIndex == 1 || ruIndex % 10 == 0 || ruIndex == totalUnits)
+                {
+                    _log.ShowInMonitor($"Migration dispatch progress: {ruIndex}/{totalUnits} (last: {mub.DatabaseName}.{mub.CollectionName})");
+                }
 
                 MigrationJobContext.AddVerboseLog($"Before ShouldBreakMigrationLoop, last processed {mub.DatabaseName}.{mub.CollectionName}");
 
@@ -1008,18 +1570,19 @@ namespace OnlineMongoMigrationProcessor.Workers
                 }
             }
 
+            _migrationProcessor?.MarkAllUnitsDispatched();
+
             MigrationJobContext.AddVerboseLog($"Before WaitForMigrationProcessorCompletionAsync");
             return await WaitForMigrationProcessorCompletionAsync(ctsToken);
         }
 
-        private async Task<TaskResult> ProcessMigrationUnitAsync(
-            MigrationUnitBasic mub,
+        private async Task<TaskResult> MigrateUnitEndToEndAsync(
+            MigrationUnit migrationUnit,
             bool syncBack,
             CancellationToken ctsToken,
             List<Task> resumeTokenTasks)
         {
-            MigrationJobContext.AddVerboseLog($"ProcessMigrationUnitAsync: mub.Id={mub.Id}");
-            var migrationUnit = MigrationJobContext.GetMigrationUnit(mub.Id);
+            MigrationJobContext.AddVerboseLog($"MigrateUnitEndToEndAsync: mu.Id={migrationUnit.Id}");
             migrationUnit.ParentJob = MigrationJobContext.CurrentlyActiveJob;
 
             if (!Helper.IsMigrationUnitValid(migrationUnit))
@@ -1030,16 +1593,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             // Fast-path: if offline migration already completed for this unit,
             // skip source/target existence validation and queue directly for online processing.
-            bool offlineCompleted = (migrationUnit.DumpComplete && migrationUnit.RestoreComplete)
-                || (migrationUnit.MigrationChunks != null
-                    && migrationUnit.MigrationChunks.Count > 0
-                    && migrationUnit.MigrationChunks.TrueForAll(c => c.IsDownloaded == true && c.IsUploaded == true));
-
-            if (offlineCompleted && Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
-            {
-                _migrationProcessor?.AddCollectionToChangeStreamQueue(migrationUnit);
+            if (await TryQueueCompletedUnitForChangeStreamAsync(migrationUnit, "migrate-end-to-end"))
                 return TaskResult.Success;
-            }
 
             var (exists, isCollection) = await ValidateSourceCollectionAsync(migrationUnit);
 
@@ -1052,9 +1607,8 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             if (!exists)
             {
-                migrationUnit.SourceStatus = CollectionStatus.NotFound;
-                _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist on source. Created empty collection.", LogType.Warning);
-                return TaskResult.Abort;
+                _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} does not exist on source. Marking skipped and continuing.", LogType.Warning);
+                return await HandleMissingCollectionAsync(migrationUnit, ctsToken);
             }
 
             await ValidateTargetCollectionExistsAsync(migrationUnit);
@@ -1152,6 +1706,9 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             if (HandleControlPause())
                 return TaskResult.Canceled;
+
+            // Apply any deferred moveCollection now (with delay + retry) so data copy starts on the correct shard.
+            await EnsurePendingMoveAppliedAsync(migrationUnit, ctsToken);
 
             MigrationJobContext.AddVerboseLog($"Before StartMigrationProcessorAsync {migrationUnit.Id}");
             return await StartMigrationProcessorAsync(migrationUnit);
@@ -1258,16 +1815,32 @@ namespace OnlineMongoMigrationProcessor.Workers
                    Helper.IsOfflineJobCompleted(MigrationJobContext.CurrentlyActiveJob);
         }
 
+        private static bool IsSslFailure(Exception ex)
+        {
+            for (var cur = ex; cur != null; cur = cur.InnerException)
+            {
+                if (cur is System.Security.Authentication.AuthenticationException)
+                    return true;
+                if (cur.Message?.IndexOf("SSL", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            return false;
+        }
+
         private async Task<TaskResult> WaitForMigrationProcessorCompletionAsync(CancellationToken ctsToken)
         {
             MigrationJobContext.AddVerboseLog("Waiting for migration processor to complete all activities");
             
             // Get the web app base URL from class-level variable
-            bool useKeepAlive = !string.IsNullOrEmpty(_webAppBaseUrl);
+            bool useKeepAlive = !string.IsNullOrEmpty(_webAppBaseUrl) && !_keepAliveDisabledForProcess;
             
             if (useKeepAlive)
             {
                 _log.WriteLine($"Keep-alive mechanism enabled with base URL: {_webAppBaseUrl}", LogType.Debug);
+            }
+            else if (_keepAliveDisabledForProcess)
+            {
+                _log.WriteLine("Keep-alive disabled for this process due to repeated SSL failures; will remain off until app restart.", LogType.Info);
             }
 
             int counter = 0;
@@ -1308,6 +1881,17 @@ namespace OnlineMongoMigrationProcessor.Workers
                     catch (Exception ex)
                     {
                         _log.WriteLine($"Keep-alive call failed. Details: {ex}", LogType.Debug);
+
+                        if (IsSslFailure(ex))
+                        {
+                            int count = Interlocked.Increment(ref _keepAliveSslFailureCount);
+                            if (count >= KeepAliveSslFailureThreshold && !_keepAliveDisabledForProcess)
+                            {
+                                _keepAliveDisabledForProcess = true;
+                                useKeepAlive = false;
+                                _log.WriteLine($"Keep-alive disabled for the rest of this process after {count} SSL failures. It will re-enable only on app restart.", LogType.Warning);
+                            }
+                        }
                     }
                 }
 
@@ -1339,9 +1923,17 @@ namespace OnlineMongoMigrationProcessor.Workers
                 var unitsForMigrate = Helper.GetMigrationUnitsToMigrate(MigrationJobContext.CurrentlyActiveJob);
 
                 _log.WriteLine($"Adding {unitsForMigrate.Count} collections to change stream queue", LogType.Debug);
+                _log.ShowInMonitor($"Preparing change stream queue for {unitsForMigrate.Count} collection(s)...");
 
+                int csIndex = 0;
                 foreach (var migrationUnit in unitsForMigrate)
                 {
+                    csIndex++;
+                    if (csIndex == 1 || csIndex % 10 == 0 || csIndex == unitsForMigrate.Count)
+                    {
+                        _log.ShowInMonitor($"Queuing change stream collection {csIndex}/{unitsForMigrate.Count}: {migrationUnit.DatabaseName}.{migrationUnit.CollectionName}");
+                    }
+
                     if (_migrationCancelled)
                         return TaskResult.Canceled;
 
@@ -1351,40 +1943,35 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                     if (Helper.IsMigrationUnitValid(migrationUnit)|| IsAggrssive)
                     {
+                        // Fast-path for completed offline migration units: skip expensive source existence checks
+                        // and queue for change stream (gated on pending blocking index builds).
+                        if (await TryQueueCompletedUnitForChangeStreamAsync(migrationUnit, "start-online"))
+                        {
+                            if (clearCache)
+                            {
+                                try { MigrationJobContext.MigrationUnitsCache.RemoveMigrationUnit(migrationUnit.Id); }
+                                catch (Exception ex) { _log.WriteLine($"Error clearing cache for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName}: {ex}", LogType.Error); }
+                            }
+                            continue;
+                        }
+
                         bool valid;
-
-                        // Fast-path for completed offline migration units: skip expensive source existence checks.
-                        // This significantly reduces startup time for jobs with many collections.
-                        if (migrationUnit.DumpComplete && migrationUnit.RestoreComplete)
-                        {
-                            valid = true;
-                        }
-                        else if (MigrationJobContext.CurrentlyActiveJob.JobType== JobType.RUOptimizedCopy)
-                        {
+                        if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy)
                             valid = await MongoHelper.CheckRUCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
-                        }
                         else
-                        {
                             valid = await MongoHelper.CheckCollectionExistsAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
-                        }
 
+                        // Immediate mode requires the unit to have completed offline copy. The fast-path above
+                        // already handled completed units, so anything reaching here is not yet ready.
                         if (valid && MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode == ChangeStreamMode.Immediate)
                         {
-                            if(! (migrationUnit.DumpComplete && migrationUnit.RestoreComplete))
-                            {
-                                _log.WriteLine($"Migration unit {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} is not ready for immediate change stream", LogType.Debug);
-                                valid = false;
-                            }
-                            
-                        }                        
+                            _log.WriteLine($"Migration unit {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} is not ready for immediate change stream", LogType.Debug);
+                            valid = false;
+                        }
 
-                        if (valid)
+                        if (valid && processor.AddCollectionToChangeStreamQueue(migrationUnit))
                         {
-                            if (processor.AddCollectionToChangeStreamQueue(migrationUnit))
-                            {
-                                _log.WriteLine($"Added {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} to change stream queue", LogType.Debug);
-                            }
-                            
+                            _log.WriteLine($"Added {migrationUnit.DatabaseName}.{migrationUnit.CollectionName} to change stream queue", LogType.Debug);
                         }
                     }
 
@@ -1405,6 +1992,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                 processor.RunChangeStreamProcessorForAllCollections();
 
                 _log.WriteLine("Change stream processor started for all collections", LogType.Debug);
+                _log.ShowInMonitor($"Change stream processor started for {unitsForMigrate.Count} collection(s).");
 
                 return TaskResult.Success;
             }
@@ -1462,8 +2050,15 @@ namespace OnlineMongoMigrationProcessor.Workers
                 if (HandleControlPause())
                     return;
 
-                if (!await ExecutePreparePartitionsAsync())
-                    return;
+                // RU jobs keep the original eager partitioning behavior.
+                if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy)
+                {
+                    if (!await ExecutePreparePartitionsAsync())
+                        return;
+
+                    if (HandleControlPause())
+                        return;
+                }
 
                 if (HandleControlPause())
                     return;
@@ -1646,6 +2241,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
 
             _log.WriteLine("Starting online change stream processor in background.", LogType.Debug);
+            _log.ShowInMonitor("Starting online change stream processor in background; warming up for 30 seconds before resuming migration loop...");
 #pragma warning disable CS4014
             StartOnlineForJobCollections(_cts.Token, _migrationProcessor!, MigrationJobContext.CurrentlyActiveJob.ChangeStreamMode == ChangeStreamMode.Aggressive, true);
 #pragma warning restore CS4014
@@ -1741,6 +2337,7 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             var dummySourceClient = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id]);
             _migrationProcessor = new SyncBackProcessor(_log, dummySourceClient, _config!, this);
+            MigrationJobContext.ActiveMigrationProcessor = _migrationProcessor;
             _syncBack = true;
             _migrationProcessor.ProcessRunning = true;
             JobStarting = false;
@@ -1789,8 +2386,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                 _migrationProcessor.StopProcessing();
 
             _migrationProcessor = null;
+            MigrationJobContext.ActiveMigrationProcessor = null;
             var dummySourceClient = MongoClientFactory.Create(_log, sourceConnectionString);
             _migrationProcessor = new SyncBackProcessor(_log, dummySourceClient, _config!, this);
+            MigrationJobContext.ActiveMigrationProcessor = _migrationProcessor;
             _syncBack = true;
             _migrationProcessor.ProcessRunning = true;
             JobStarting = false;
@@ -1839,17 +2438,26 @@ namespace OnlineMongoMigrationProcessor.Workers
                 var (documentCount, totalCollectionSizeBytes, collection) = await GetCollectionInfoAsync(databaseName, collectionName, cts);
                 _log.WriteLine($"Collection info retrieved - docCount: {documentCount}, sizeBytes: {totalCollectionSizeBytes}", LogType.Debug);
 
-                _log.WriteLine($"Calculating partitioning strategy for {databaseName}.{collectionName}", LogType.Debug);
-                var (totalChunks, minDocsInChunk, targetChunkSizeBytes) = CalculatePartitioningStrategy(
-                    documentCount, totalCollectionSizeBytes, databaseName, collectionName);
+                // Phase 1: probe which _id BSON types actually exist in the source. We need
+                // this BEFORE planning because a multi-type collection forces a $type $match
+                // ahead of $sample, which pushes $sample off MongoDB's fast random-cursor
+                // path -- the planner must treat that case the same as a user filter.
+                _log.WriteLine($"Probing _id data types for {databaseName}.{collectionName}", LogType.Debug);
+                var (dataTypes, forceSkipDataTypeFilter) = DetermineDataTypesForPartitioning(collection, migrationUnit, cts);
+                migrationUnit.SkipDataTypeFilterForId = forceSkipDataTypeFilter;
+                _log.WriteLine($"Data type probe complete - types: {dataTypes.Count}, forceSkipDataTypeFilter: {forceSkipDataTypeFilter}", LogType.Debug);
 
-                _log.WriteLine($"Partitioning strategy: totalChunks={totalChunks}, minDocsInChunk={minDocsInChunk}, chunkSizeBytes={targetChunkSizeBytes}", LogType.Debug);
+                _log.WriteLine($"Calculating partitioning strategy for {databaseName}.{collectionName}", LogType.Debug);
+                var (totalChunks, minDocsInChunk) = CalculatePartitioningStrategy(
+                    documentCount, databaseName, collectionName, migrationUnit, forceSkipDataTypeFilter);
+
+                _log.WriteLine($"Partitioning strategy: totalChunks={totalChunks}, minDocsInChunk={minDocsInChunk}", LogType.Debug);
 
                 List<MigrationChunk> migrationChunks;
                 if (totalChunks > 1)
                 {
                     _log.WriteLine($"Creating multiple chunks ({totalChunks}) for {databaseName}.{collectionName}", LogType.Debug);
-                    migrationChunks = CreateMultipleChunks(collection, totalChunks, minDocsInChunk, migrationUnit, cts, databaseName, collectionName);
+                    migrationChunks = CreateMultipleChunks(collection, totalChunks, minDocsInChunk, migrationUnit, cts, databaseName, collectionName, dataTypes, forceSkipDataTypeFilter);
                     _log.WriteLine($"CreateMultipleChunks completed - returned {(migrationChunks == null ? "null" : migrationChunks.Count.ToString())} chunks", LogType.Debug);
                 }
                 else
@@ -1904,42 +2512,98 @@ namespace OnlineMongoMigrationProcessor.Workers
             return (documentCount, totalCollectionSizeBytes, collection);
         }
 
-        private (int totalChunks, long minDocsInChunk, long targetChunkSizeBytes) CalculatePartitioningStrategy(
-            long documentCount, long totalCollectionSizeBytes, string databaseName, string collectionName)
+        private (int totalChunks, long minDocsInChunk) CalculatePartitioningStrategy(
+            long documentCount, string databaseName, string collectionName, MigrationUnit migrationUnit, bool forceSkipDataTypeFilter)
         {
-            MigrationJobContext.AddVerboseLog($"CalculatePartitioningStrategy: docCount={documentCount}, totalSizeBytes={totalCollectionSizeBytes}, db={databaseName}, coll={collectionName}");
+            MigrationJobContext.AddVerboseLog($"CalculatePartitioningStrategy: docCount={documentCount}, db={databaseName}, coll={collectionName}, forceSkipDataTypeFilter={forceSkipDataTypeFilter}");
 
-            // Small collections under 1M docs: skip partitioning, process as a single chunk
-            long targetChunkSizeBytes = _config!.ChunkSizeInMb * 1024 * 1024;
+            // Small collections under 1M docs: skip partitioning, process as a single chunk.
             if (documentCount < 1_000_000)
             {
                 _log.WriteLine($"{databaseName}.{collectionName} has {documentCount} docs (< 1M). Skipping partitioning.", LogType.Debug);
-                return (1, documentCount, targetChunkSizeBytes);
+                return (1, documentCount);
             }
 
-            var totalChunksBySize = (int)Math.Ceiling((double)totalCollectionSizeBytes / targetChunkSizeBytes);
+            var userFilterDoc = MongoHelper.GetFilterDoc(migrationUnit.UserFilter);
+            bool hasUserFilter = userFilterDoc != null && userFilterDoc.ElementCount > 0;
+            // A $type predicate on _id (added when more than one _id type is present)
+            // is prepended to the $sample pipeline by SamplePartitioner, which has the
+            // same fast-path cost as a user filter -- treat both the same for cap math.
+            bool hasMatchBeforeSample = hasUserFilter || !forceSkipDataTypeFilter;
+            bool useSampleCommand = _config!.ObjectIdPartitioner == PartitionerType.UseSampleCommand;
+            bool isMongoDriver = MigrationJobContext.CurrentlyActiveJob!.JobType != JobType.DumpAndRestore;
 
-            int totalChunks;
-            long minDocsInChunk;
-
-            if (MigrationJobContext.CurrentlyActiveJob!.JobType == JobType.DumpAndRestore)
+            // Step 1: total sub-range count for DumpAndRestore (segments = 1).
+            //   Sample command  -> capped sample size (3K if a $match precedes $sample, 300K otherwise).
+            //   Non-sample      -> doc-count-driven via GetMinDocsPerChunk (same chunk floor
+            //                      the sample path bottoms out at, so all four partitioners
+            //                      produce the same chunk count for a given docCount).
+            long dumpSubRanges;
+            if (useSampleCommand)
             {
-                totalChunks = totalChunksBySize;
-                minDocsInChunk = documentCount / (totalChunks == 0 ? 1 : totalChunks);
-                _log.WriteLine($"{databaseName}.{collectionName} storage size: {totalCollectionSizeBytes}", LogType.Debug);
+                dumpSubRanges = SamplePartitioner.GetMaxSamples(hasMatchBeforeSample);
             }
             else
             {
-                _log.WriteLine($"{databaseName}.{collectionName} estimated document count: {documentCount}", LogType.Debug);
-                totalChunks = (int)Math.Min(SamplePartitioner.GetMaxSamples() / SamplePartitioner.GetMaxSegments(),
-                    documentCount / (SamplePartitioner.GetMaxSamples() == 0 ? 1 : SamplePartitioner.GetMaxSamples()));
-                totalChunks = Math.Max(1, totalChunks);
-                totalChunks = Math.Max(totalChunks, totalChunksBySize);
-                totalChunks = Math.Min(totalChunks, SamplePartitioner.GetMaxSamples());
-                minDocsInChunk = documentCount / (totalChunks == 0 ? 1 : totalChunks);
+                dumpSubRanges = Math.Max(1L, documentCount / SamplePartitioner.GetMinDocsPerChunk(documentCount));
             }
 
-            return (totalChunks, minDocsInChunk, targetChunkSizeBytes);
+            // Step 2: derive driver/dump sub-ranges per job type.
+            //   DumpAndRestore -> chunks == dumpSubRanges (segments = 1 downstream).
+            //   MongoDriver    -> 10x sub-ranges, grouped into chunks of MaxSegments segments.
+            //   Exception: useSampleCommand + ($match before $sample) caps $sample size at
+            //              MaxSamples(withFilter) = 3,000 (top-k sort bound). We can't get more
+            //              usable boundaries than that, so drop the driver multiplier when both
+            //              are true.
+            const int DriverSubRangeMultiplier = 10;
+            bool capSampleAbsolute = useSampleCommand && hasMatchBeforeSample;
+            long desiredSubRanges = (isMongoDriver && !capSampleAbsolute)
+                ? dumpSubRanges * DriverSubRangeMultiplier
+                : dumpSubRanges;
+
+            // Step 3: cap $sample size to 5% of estimated doc count (random-cursor fast path).
+            // With 10x oversampling, sampleSize = subRanges * 10, so subRanges <= docCount / 200.
+            // Only applies when the partitioner actually issues a $sample.
+            long subRangesActual = desiredSubRanges;
+            if (useSampleCommand)
+            {
+                long sampleSizeCap = Math.Max(1L, documentCount / 20);          // 5% of doc count
+                long subRangeCap = Math.Max(1L, sampleSizeCap / SamplePartitioner.SampleOversampleFactor); // /10x oversample
+                subRangesActual = Math.Min(desiredSubRanges, subRangeCap);
+            }
+
+            int totalChunks;
+            if (isMongoDriver)
+            {
+                int maxSegments = SamplePartitioner.GetMaxSegments();
+                totalChunks = (int)Math.Max(1, Math.Ceiling((double)subRangesActual / maxSegments));
+            }
+            else
+            {
+                totalChunks = (int)Math.Max(1, subRangesActual);
+            }
+
+            // Universal chunk floor: docs/chunk >= MinDocsPerChunk (tiered).
+            long perChunkFloor = SamplePartitioner.GetMinDocsPerChunk(documentCount);
+
+            // MongoDriver: never drop segment count below MaxSegments just because chunks
+            // are too small to hold MaxSegments segments. Instead, raise the per-chunk
+            // floor so every chunk can saturate MaxSegments parallel segments at the
+            // tier's MinDocsPerSegment minimum. Equivalent to:
+            //     docs/chunk >= MaxSegments * MinDocsPerSegment(docCount).
+            // DumpAndRestore keeps segments=1 by design, so this constraint doesn't apply.
+            if (isMongoDriver)
+            {
+                long perChunkFloorForFullSegments =
+                    (long)SamplePartitioner.GetMaxSegments() * SamplePartitioner.GetMinDocsPerSegment(documentCount);
+                perChunkFloor = Math.Max(perChunkFloor, perChunkFloorForFullSegments);
+            }
+
+            long maxChunksByMinDocs = Math.Max(1L, documentCount / perChunkFloor);
+            totalChunks = (int)Math.Min(totalChunks, maxChunksByMinDocs);
+
+            long minDocsInChunk = documentCount / Math.Max(1, totalChunks);
+            return (totalChunks, minDocsInChunk);
         }
 
         private List<MigrationChunk> CreateSingleChunk(string databaseName, string collectionName)
@@ -1966,25 +2630,15 @@ namespace OnlineMongoMigrationProcessor.Workers
             MigrationUnit migrationUnit,
             CancellationToken cts,
             string databaseName,
-            string collectionName)
+            string collectionName,
+            List<DataType> dataTypes,
+            bool forceSkipDataTypeFilter)
         {
             
             MigrationJobContext.AddVerboseLog($"Chunking {databaseName}.{collectionName}");
-            _log.WriteLine($"CreateMultipleChunks started for {databaseName}.{collectionName} - totalChunks: {totalChunks}, minDocsInChunk: {minDocsInChunk}", LogType.Debug);
+            _log.WriteLine($"CreateMultipleChunks started for {databaseName}.{collectionName} - totalChunks: {totalChunks}, minDocsInChunk: {minDocsInChunk}, dataTypes: {dataTypes.Count}, forceSkipDataTypeFilter: {forceSkipDataTypeFilter}", LogType.Debug);
 
-            _log.WriteLine($"Determining data types for {databaseName}.{collectionName}", LogType.Debug);
-            var dataTypes = DetermineDataTypes();
-            _log.WriteLine($"Data types determined - count: {dataTypes.Count}", LogType.Debug);
-
-            // Probe the source so we only spend partitioning effort on _id types that actually exist.
-            _log.ShowInMonitor($"Detecting _id data type(s) in use for {databaseName}.{collectionName}");
-            dataTypes = MongoHelper.PruneAbsentIdDataTypes(_log, collection, dataTypes, MongoHelper.GetFilterDoc(migrationUnit.UserFilter), cts);
-
-            // If exactly one _id type survives, downstream queries can skip the $type predicate entirely,
-            // and an ObjectId-only collection also unlocks ObjectId-specific partitioning optimizations.
-            bool forceSkipDataTypeFilter = dataTypes.Count == 1;
             bool optimizeForObjectId = forceSkipDataTypeFilter && dataTypes[0] == DataType.ObjectId;
-            migrationUnit.SkipDataTypeFilterForId = forceSkipDataTypeFilter;
             if (optimizeForObjectId)
             {
                 _log.WriteLine("ObjectId optimization enabled", LogType.Debug);
@@ -2032,6 +2686,37 @@ namespace OnlineMongoMigrationProcessor.Workers
             };
             _log.WriteLine($"Using all DataTypes for partitioning ({dataTypes.Count} types)", LogType.Debug);
             return dataTypes;
+        }
+
+        // Resolves the per-collection _id type list (user-pinned override or live probe)
+        // and the "skip $type filter" flag, returning both for downstream planning and
+        // partitioning. Runs once per collection, before CalculatePartitioningStrategy,
+        // so the planner can correctly treat a multi-type collection as "has $match
+        // before $sample" for cap purposes.
+        private (List<DataType> dataTypes, bool forceSkipDataTypeFilter) DetermineDataTypesForPartitioning(
+            IMongoCollection<BsonDocument> collection, MigrationUnit migrationUnit, CancellationToken cts)
+        {
+            List<DataType> dataTypes;
+            if (migrationUnit.DataTypeForId.HasValue)
+            {
+                // User pinned the _id type; skip probing and use it directly.
+                dataTypes = new List<DataType> { migrationUnit.DataTypeForId.Value };
+                _log.WriteLine($"User-pinned _id data type {migrationUnit.DataTypeForId.Value} for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName}", LogType.Debug);
+            }
+            else
+            {
+                _log.WriteLine($"Determining data types for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName}", LogType.Debug);
+                dataTypes = DetermineDataTypes();
+                _log.WriteLine($"Data types determined - count: {dataTypes.Count}", LogType.Debug);
+
+                // Probe the source so we only spend partitioning effort on _id types that actually exist.
+                _log.ShowInMonitor($"Detecting _id data type(s) in use for {migrationUnit.DatabaseName}.{migrationUnit.CollectionName}");
+                dataTypes = MongoHelper.PruneAbsentIdDataTypes(_log, collection, dataTypes, MongoHelper.GetFilterDoc(migrationUnit.UserFilter), cts);
+            }
+
+            // If exactly one _id type survives, downstream queries can skip the $type predicate entirely.
+            bool forceSkipDataTypeFilter = dataTypes.Count == 1;
+            return (dataTypes, forceSkipDataTypeFilter);
         }
 
         private void ProcessDataTypePartitions(

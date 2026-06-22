@@ -272,7 +272,7 @@ namespace OnlineMongoMigrationProcessor
                         return touchedMuIdsInRound;
                     }
                     SetInitialDocumentReplayedStatus(true);
-                    MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob); ;
+                    TrySaveMigrationJob(MigrationJobContext.CurrentlyActiveJob); ;
                 }
 
                 var resumeToken = BsonSerializer.Deserialize<BsonDocument>(tokenJson);
@@ -299,7 +299,7 @@ namespace OnlineMongoMigrationProcessor
                     if (_namespaceFilterApplied)
                     {
                         MigrationJobContext.CurrentlyActiveJob.UseClientSideCSFilter = true;
-                        MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                        TrySaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
                         _log.WriteLine($"{_syncBackPrefix}Namespace filter has {pipelineArray.Length} stage(s) with {_migrationUnitsToProcess.Count} collections. Switching to unfiltered server-level watch with client-side filtering.", LogType.Warning);
                     }
                     return touchedMuIdsInRound;
@@ -424,7 +424,7 @@ namespace OnlineMongoMigrationProcessor
                         if (_namespaceFilterApplied)
                         {
                             MigrationJobContext.CurrentlyActiveJob.UseClientSideCSFilter = true;
-                            MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                            TrySaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
                             _log.WriteLine($"{_syncBackPrefix}Switching to unfiltered server-level watch with client-side filtering for {_migrationUnitsToProcess.Count} collections.", LogType.Warning);
                         }
                         return touchedMuIdsInRound;
@@ -840,7 +840,7 @@ namespace OnlineMongoMigrationProcessor
             MigrationJobContext.CurrentlyActiveJob.SetCursorUtcTimestamp(_syncBack, latestTimestamp);
 
             if (persistToStore)
-                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                TrySaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
         }
 
         private void SetTouchedCollectionsCSLastChecked(HashSet<string> touchedMuIds)
@@ -854,20 +854,22 @@ namespace OnlineMongoMigrationProcessor
 
             foreach (var muId in _migrationUnitsToProcess.Keys)
             {
+                if (IsJobInactive)
+                    return;
                 var mu = MigrationJobContext.GetMigrationUnit(muId);
                 if (mu == null)
                     continue;
 
                 mu.CSLastChecked = now;
                 mu.UpdateParentJob();
-                MigrationJobContext.SaveMigrationUnit(mu, false);
+                TrySaveMigrationUnit(mu, false);
                 anyUpdated = true;
             }
 
-            if (anyUpdated)
+            if (anyUpdated && !IsJobInactive)
             {
                 MigrationJobContext.CurrentlyActiveJob.CSLastChecked = now;
-                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+                TrySaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
             }
         }
 
@@ -888,6 +890,8 @@ namespace OnlineMongoMigrationProcessor
 
             foreach (var muId in candidatesToReset)
             {
+                if (IsJobInactive)
+                    break;
                 var mu = MigrationJobContext.GetMigrationUnit(muId);
                 if (mu == null)
                     continue;
@@ -898,12 +902,12 @@ namespace OnlineMongoMigrationProcessor
                 mu.CSUpdatesInLastBatch = 0;
                 mu.CSNormalizedUpdatesInLastBatch = 0;
                 mu.UpdateParentJob();
-                MigrationJobContext.SaveMigrationUnit(mu, false);
+                TrySaveMigrationUnit(mu, false);
                 anyUpdated = true;
             }
 
-            if (anyUpdated)
-                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
+            if (anyUpdated && !IsJobInactive)
+                TrySaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
 
             await Task.CompletedTask;
         }
@@ -1181,8 +1185,11 @@ namespace OnlineMongoMigrationProcessor
                     if (forcePersist)
                     {
                         ApplyBatchStatsToMu(mu, watchState);
-                        mu.UpdateParentJob();
-                        MigrationJobContext.SaveMigrationUnit(mu, false);
+                        if (!IsJobInactive)
+                        {
+                            mu.UpdateParentJob();
+                            TrySaveMigrationUnit(mu, false);
+                        }
                     }
                 }
 
@@ -1238,8 +1245,11 @@ namespace OnlineMongoMigrationProcessor
                 mu.CSAvgReadLatencyInMS = Math.Round((double)stats.TotalReadDurationMs / stats.EventCount, 2);
                 mu.CSAvgWriteLatencyInMS = Math.Round((double)stats.TotalWriteDurationMs / stats.EventCount, 2);
 
-                mu.UpdateParentJob();
-                MigrationJobContext.SaveMigrationUnit(mu, false);
+                if (!IsJobInactive)
+                {
+                    mu.UpdateParentJob();
+                    TrySaveMigrationUnit(mu, false);
+                }
             }
 
             state.BatchStats.Clear();

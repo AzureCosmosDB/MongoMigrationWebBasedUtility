@@ -193,6 +193,46 @@ class SchemaMigration:
                     f"Schema migration failed for {len(failures)} collection(s): {failure_messages}"
                 )
 
+        # Deferred moveCollection pass: run sequentially after every collection's schema is in place.
+        # Skipped entirely in postIngestion mode (collection drop/create is also skipped there).
+        # Failures here are logged but do NOT abort the run — matches the operator script behavior
+        # where each collection's move is independent and a single failure shouldn't sink the batch.
+        if self.mode != "postIngestion":
+            move_targets = [c for c in collection_configs if getattr(c, "move_to", None)]
+            if move_targets:
+                print(f"\n-- Running deferred moveCollection for {len(move_targets)} collection(s)")
+                self._print_verbose(
+                    f"Processing {len(move_targets)} deferred moveCollection operation(s) sequentially"
+                )
+                moved_count = 0
+                already_placed_count = 0
+                move_failures = []
+                for cfg in move_targets:
+                    namespace = f"{cfg.db_name}.{cfg.collection_name}"
+                    try:
+                        result = self._move_collection(
+                            dest_client, cfg.db_name, cfg.collection_name, cfg.move_to
+                        )
+                        if result == "already-placed":
+                            already_placed_count += 1
+                        else:
+                            moved_count += 1
+                    except Exception as e:
+                        move_failures.append((namespace, str(e)))
+                        self._print_error(f"-- moveCollection failed for {namespace}: {str(e)}")
+
+                print(
+                    f"\n-- moveCollection summary: "
+                    f"{moved_count} moved, {already_placed_count} already placed, "
+                    f"{len(move_failures)} failed (out of {len(move_targets)})"
+                )
+                if move_failures:
+                    self._print_warning(
+                        f"-- {len(move_failures)} moveCollection operation(s) failed and were skipped. "
+                        f"Rerun the migration to retry, or move them manually via "
+                        f"db.adminCommand({{ moveCollection: '<db>.<coll>', toShard: '<shard>' }})."
+                    )
+
         # Report all incompatible indexes at the end
         self._report_incompatible_indexes()
         self._report_skipped_index_options()
@@ -234,7 +274,11 @@ class SchemaMigration:
             if collection_config.drop_if_exists:
                 print("-- Running drop command on target collection")
                 self._print_verbose(f"Dropping existing collection {db_name}.{collection_name} on destination")
-                dest_collection.drop()
+                self._retry_on_write_conflict(
+                    "drop",
+                    f"{db_name}.{collection_name}",
+                    lambda: dest_collection.drop()
+                )
                 self._print_verbose(f"Collection dropped successfully")
             else:
                 self._print_verbose(f"drop_if_exists=False, keeping existing collection if present")
@@ -243,7 +287,11 @@ class SchemaMigration:
             if not collection_name in dest_db.list_collection_names():
                 print("-- Creating target collection")
                 self._print_verbose(f"Collection does not exist on destination, creating new collection")
-                dest_db.create_collection(collection_name)
+                self._retry_on_write_conflict(
+                    "create_collection",
+                    f"{db_name}.{collection_name}",
+                    lambda: dest_db.create_collection(collection_name)
+                )
                 self._print_verbose(f"Collection created successfully")
             else:
                 print("-- Target collection already exists. Skipping creation.")
@@ -293,10 +341,15 @@ class SchemaMigration:
                 print("-- Skipping shard key migration for collection")
                 self._print_verbose(f"migrate_shard_key=False, skipping shard key migration")
 
-            # Optional collection placement (moveTo). Only meaningful when the collection is unsharded,
-            # i.e. when migrate_shard_key=False. JsonParser rejects moveTo + migrate_shard_key=True up front.
+            # Optional collection placement (moveTo) is deferred until after all collections have
+            # been created. Running moveCollection immediately after create can race with the
+            # routing catalog and contend with concurrent DDL on other namespaces. The deferred
+            # sequential loop runs in migrate_schema() once every collection's schema is in place.
             if collection_config.move_to:
-                self._move_collection(dest_client, db_name, collection_name, collection_config.move_to)
+                self._print_verbose(
+                    f"  Deferring moveCollection for '{db_name}.{collection_name}' -> '{collection_config.move_to}' "
+                    f"until all collections are created"
+                )
 
         # Migrate indexes
         self._print_verbose(f"Reading indexes from source collection")
@@ -959,12 +1012,37 @@ class SchemaMigration:
                 return True
         return False
 
-    def _move_collection(self, dest_client: MongoClient, db_name: str, collection_name: str, to_shard: str) -> None:
+    def _retry_on_write_conflict(self, op_label: str, namespace: str, fn):
+        """
+        Run a DDL callable and retry on transient Cosmos DB Mongo WriteConflict (code 112)
+        "Could not acquire lock for operation due to deadlock" errors. These surface when
+        multiple workers issue concurrent DDL against overlapping namespaces.
+        """
+        max_attempts = 6
+        backoff_seconds = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return fn()
+            except Exception as e:
+                code = getattr(e, "code", None)
+                msg_lower = str(e).lower()
+                is_write_conflict = code == 112 or "writeconflict" in msg_lower or "could not acquire lock" in msg_lower
+                if is_write_conflict and attempt < max_attempts:
+                    self._print_verbose(
+                        f"  {op_label} attempt {attempt}/{max_attempts} for '{namespace}' hit WriteConflict; "
+                        f"retrying in {backoff_seconds}s"
+                    )
+                    time.sleep(backoff_seconds)
+                    backoff_seconds = min(backoff_seconds * 2, 16)
+                    continue
+                raise
+
+    def _move_collection(self, dest_client: MongoClient, db_name: str, collection_name: str, to_shard: str) -> str:
         """
         Pin an unsharded collection to a specific shard via the admin `moveCollection` command.
-        Idempotent across reruns: a "cannot move shard to the same node" failure is treated as success.
-        Retries briefly when the routing catalog has not yet registered the freshly created collection
-        ("Could not find shard information for collection in metadata", code 72).
+        Returns "moved" if the command actually moved the collection, "already-placed" if the
+        collection was already on the requested shard. Raises on any other failure after retries.
+        Retries on transient errors: catalog not yet registered, WriteConflict (code 112).
         """
         namespace = f"{db_name}.{collection_name}"
         print(f"-- Moving collection '{namespace}' to shard '{to_shard}'")
@@ -979,20 +1057,28 @@ class SchemaMigration:
                     "toShard": to_shard
                 })
                 self._print_success(f"---- Successfully moved '{namespace}' to shard '{to_shard}'")
-                return
+                return "moved"
             except Exception as e:
                 msg = str(e)
                 msg_lower = msg.lower()
+                code = getattr(e, "code", None)
                 if "cannot move shard to the same node" in msg_lower:
                     self._print_verbose(f"  moveCollection no-op: '{namespace}' is already on shard '{to_shard}'")
                     print(f"-- Collection '{namespace}' is already on shard '{to_shard}', skipping move")
-                    return
-                if "could not find shard information for collection in metadata" in msg_lower and attempt < max_attempts:
+                    return "already-placed"
+                is_transient = (
+                    "could not find shard information for collection in metadata" in msg_lower
+                    or code == 112
+                    or "writeconflict" in msg_lower
+                    or "could not acquire lock" in msg_lower
+                )
+                if is_transient and attempt < max_attempts:
                     self._print_verbose(
                         f"  moveCollection attempt {attempt}/{max_attempts} for '{namespace}' failed "
-                        f"(catalog not ready); retrying in {backoff_seconds}s"
+                        f"(transient: {msg.splitlines()[0][:120]}); retrying in {backoff_seconds}s"
                     )
                     time.sleep(backoff_seconds)
+                    backoff_seconds = min(backoff_seconds * 2, 16)
                     continue
                 self._print_error(f"---- Failed to move '{namespace}' to shard '{to_shard}': {msg}")
                 raise

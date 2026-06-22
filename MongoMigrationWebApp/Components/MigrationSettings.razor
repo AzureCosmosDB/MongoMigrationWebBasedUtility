@@ -36,10 +36,6 @@
                         </div>
                     }
                     <div class="mb-3">
-                        <label for="chunk-size" class="form-label">Chunk size (in MB) for mongodump</label>
-                        <input type="number" id="chunk-size" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).ChunkSizeInMb" />
-                    </div>
-                    <div class="mb-3">
                         <label for="mongo-copy-page-size" class="form-label">Mongo driver page size</label>
                         <input type="number" id="mongo-copy-page-size" class="form-control" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).MongoCopyPageSize" />
                     </div>
@@ -302,12 +298,6 @@
     if ((_configurationBackup?.ChangeStreamMaxDocsInBatch ?? 0) < 100 || (_configurationBackup?.ChangeStreamMaxDocsInBatch ?? 0) > 10000)
         {
             errorMessage = "Maximum documents per batch should be between 100 and 10000.";
-            return;
-        }
-
-    if ((_configurationBackup?.ChunkSizeInMb ?? 0) < 2 || (_configurationBackup?.ChunkSizeInMb ?? 0) > 5120)
-        {
-            errorMessage = "Chunk size (in MB) should be between 2 and 5120.";
             return;
         }
 

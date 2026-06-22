@@ -30,8 +30,6 @@ namespace OnlineMongoMigrationProcessor
         public CDCMode CDCMode { get; set; } = CDCMode.Offline;
 
         public bool IsSimulatedRun { get; set; }
-        public bool SkipIndexes { get; set; }
-        public bool AppendMode { get; set; }
         public bool SyncBackEnabled { get; set; }
         public bool ProcessingSyncBack { get; set; }
         public bool RunComparison { get; set; }

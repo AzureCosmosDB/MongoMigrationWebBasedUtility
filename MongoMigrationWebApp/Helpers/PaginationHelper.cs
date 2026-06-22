@@ -6,7 +6,7 @@ namespace MongoMigrationWebApp.Helpers
 {
     public class PaginationHelper<T>
     {
-        private readonly List<T> _allItems;
+        private List<T> _allItems;
         private readonly Func<T, string, bool> _filterPredicate;
         private string _filterText = string.Empty;
         private int _currentPage = 1;
@@ -17,6 +17,23 @@ namespace MongoMigrationWebApp.Helpers
             _allItems = items ?? new List<T>();
             _filterPredicate = filterPredicate;
         }
+
+        public PaginationHelper(List<T> items, int pageSize, Func<T, string, bool> filterPredicate)
+            : this(items, filterPredicate)
+        {
+            _pageSize = Math.Max(1, pageSize);
+        }
+
+        public void UpdateSource(List<T> items)
+        {
+            _allItems = items ?? new List<T>();
+            if (_currentPage > GetTotalPages()) _currentPage = GetTotalPages();
+            if (_currentPage < 1) _currentPage = 1;
+        }
+
+        public int TotalPages => GetTotalPages();
+
+        public List<T> GetCurrentPageItems() => GetPagedItems();
 
         public string FilterText
         {

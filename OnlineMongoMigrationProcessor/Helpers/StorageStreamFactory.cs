@@ -619,10 +619,15 @@ namespace OnlineMongoMigrationProcessor.Helpers
             var containerClient = blobClient.GetParentBlobContainerClient();
             await containerClient.CreateIfNotExistsAsync(cancellationToken: cancellationToken);
 
-            // Open write stream with optimized settings for large files
+            // Open write stream with optimized settings for large files.
+            // BufferSize doubles as the staged-block size. Azure block blobs cap at
+            // 50,000 blocks, so this also defines the per-chunk blob ceiling:
+            //   32 MiB block × 50,000 = ~1.6 TiB max blob (one mongodump .bson file).
+            // Raised from 4 MiB (200 GiB ceiling) after hitting BlockListTooLong on
+            // skewed multi-billion-doc chunks.
             var options = new BlockBlobOpenWriteOptions
             {
-                BufferSize = 4 * 1024 * 1024, // 4MB buffer for better throughput
+                BufferSize = 32 * 1024 * 1024,
             };
 
             return await blobClient.OpenWriteAsync(overwrite: true, options, cancellationToken);

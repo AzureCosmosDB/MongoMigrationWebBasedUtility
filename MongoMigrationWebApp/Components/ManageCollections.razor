@@ -1,378 +1,768 @@
 @using OnlineMongoMigrationProcessor
-@using System.Text.RegularExpressions;
+@using OnlineMongoMigrationProcessor.Models
+@using OnlineMongoMigrationProcessor.Helpers.Mongo
+@using OnlineMongoMigrationProcessor.Context
+@using MongoMigrationWebApp.Models
 @using MongoMigrationWebApp.Helpers
+@using Microsoft.AspNetCore.Components.Forms
+@using System.Text.Json
+@using System.Text.RegularExpressions
 
-<div class="modal fade show d-block bg-dark bg-opacity-75" id="myModal" aria-modal="true" role="dialog">
-    <div class="modal-dialog bg-dark modal-lg">
+@* Main modal shell - title + [×] stay constant, body and footer swap between list and summary *@
+<div class="modal fade show d-block bg-dark bg-opacity-75" id="manageCollectionsModal" aria-modal="true" role="dialog">
+    <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
-                <h4 class="modal-title">Add/Remove Collections</h4>
-                <button type="button" class="btn-close" aria-label="Close" @onclick="@Cancel"></button>
+                <h4 class="modal-title">Manage Collections</h4>
+                <button type="button" class="btn-close" aria-label="Close" @onclick="Cancel" disabled="@(_isApplying || _isPreparingSummary)"></button>
             </div>
-            <div class="modal-body">
-                @* Filter section - only show if more than 25 collections *@
-                @if (_paginationHelper.ShowFilter())
-                {
-                    <div class="mb-3 manage-collections-filter">
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="bi bi-search"></i></span>
-                            <input type="text" class="form-control" placeholder="Filter collections (database.collection)" 
-                                   @bind="_paginationHelper.FilterText" @bind:event="oninput" @onkeyup="OnFilterChanged" />
-                            @if (!string.IsNullOrWhiteSpace(_paginationHelper.FilterText))
-                            {
-                                <button class="btn btn-outline-secondary" type="button" @onclick="ClearFilter" title="Clear filter">
-                                    <i class="bi bi-x"></i>
-                                </button>
-                            }
-                        </div>
-                        <div class="d-flex justify-content-between align-items-center mt-2">
-                            <small class="text-muted">
-                                Showing @_paginationHelper.GetDisplayedItemsInfo() of @_paginationHelper.GetFilteredItemsCount() 
-                                @(_paginationHelper.GetFilteredItemsCount() != _paginationHelper.TotalItemsCount ? $"(filtered from {_paginationHelper.TotalItemsCount} total)" : "") collections
-                            </small>
-                            <div class="page-size-selector-top">
-                                <select class="form-select form-select-sm page-size-dropdown" @bind="_paginationHelper.PageSize" @bind:after="OnPageSizeChanged" style="width: auto;" title="Items per page">
-                                    <option value="10">10 per page</option>
-                                    <option value="25">25 per page</option>
-                                    <option value="50">50 per page</option>
-                                    <option value="100">100 per page</option>
-                                </select>
+
+            @if (!_showSummary)
+            {
+                @* LIST VIEW *@
+                <div class="modal-body">
+                    @if (!string.IsNullOrWhiteSpace(_error))
+                    {
+                        <div class="alert alert-danger">@_error</div>
+                    }
+
+                    @* Search box, type filter, and Add button *@
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="d-flex align-items-center gap-2 w-75">
+                            <div class="input-group flex-grow-1">
+                                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                                <input type="text" class="form-control" placeholder="Search collections by namespace or status..."
+                                       @bind="_paginationHelper.FilterText" @bind:event="oninput" @onkeyup="OnFilterChanged" />
+                                @if (!string.IsNullOrWhiteSpace(_paginationHelper.FilterText))
+                                {
+                                    <button class="btn btn-outline-secondary" type="button" @onclick="ClearFilter" title="Clear filter">
+                                        <i class="bi bi-x"></i>
+                                    </button>
+                                }
                             </div>
+                            <select class="form-select w-auto" value="@_typeFilter" @onchange="OnTypeFilterChanged" title="Filter rows by type">
+                                <option value="all">All</option>
+                                <option value="existing">Existing</option>
+                                <option value="new">New (drafts)</option>
+                                <option value="remove">Pending removal</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <button class="btn btn-success btn-sm" @onclick="ToggleAddPanel" title="Add new collections">
+                                Add collections
+                            </button>
                         </div>
                     </div>
-                }
 
-                <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
-                    <table class="table table-borderless table-sm">
-                        <thead class="sticky-top bg-light">
-                            <tr>
-                                <th>Collection</th>
-                                <th style="width: 100px;">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @{
-                                var collectionsToShow = _paginationHelper.ShowFilter() ? _paginationHelper.GetPagedItems() : LoadUpdatedMigrationUnits();
-                            }
-                            
-                            @if (collectionsToShow.Any())
+                    @* Bulk action toolbar - only visible when items are selected *@
+                    @if (GetSelectedCount() > 0)
+                    {
+                        <div class="alert alert-info py-2 mb-3 d-flex align-items-center flex-wrap gap-2">
+                            <span class="me-2">
+                                <strong>@GetSelectedCount()</strong> selected
+                            </span>
+                            <button class="btn btn-sm btn-outline-danger" @onclick="BulkRemove" title="Queue all selected rows for removal">
+                                Remove selected
+                            </button>
+                            @if (AreAllSelectedDrafts())
                             {
-                                @foreach (var mu in collectionsToShow)
+                                <div class="vr"></div>
+                                <span class="text-muted small">Apply to drafts:</span>
+                                <button class="btn btn-sm btn-outline-primary" @onclick="@(() => BulkSetOverwrite(true))" title="Set Overwrite = TRUE on selected drafts">
+                                    Overwrite: TRUE
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="@(() => BulkSetOverwrite(false))" title="Set Overwrite = FALSE (append) on selected drafts">
+                                    Overwrite: FALSE
+                                </button>
+                                @if (!IsRuOptimizedCopyJob)
                                 {
-                                    <tr>
-                                        <td>
-                                            <span title="@($"Database: {mu.DatabaseName}, Collection: {mu.CollectionName}")">
-                                                @mu.DatabaseName.@mu.CollectionName
-                                            </span>
-                                        </td>
-                                        <td>
-                                            <button class="btn btn-danger btn-sm" @onclick="() => RemoveCollection(mu)" title="Remove collection">
-                                                <i class="bi bi-trash"></i>
+                                    <button class="btn btn-sm btn-outline-primary" @onclick="@(() => BulkSetIndexing(IndexingStrategy.SameAsSource))" disabled="@AnySelectedHasOverwriteFalse()" title="@(AnySelectedHasOverwriteFalse() ? "Locked: one or more selected drafts have Overwrite = FALSE" : "Indexing: copy indexes (non-blocking)")">
+                                        Indexing: Non-blocking
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-primary" @onclick="@(() => BulkSetIndexing(IndexingStrategy.SameAsSourceBlocking))" disabled="@AnySelectedHasOverwriteFalse()" title="@(AnySelectedHasOverwriteFalse() ? "Locked: one or more selected drafts have Overwrite = FALSE" : "Indexing: copy indexes (blocking)")">
+                                        Indexing: Blocking
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="@(() => BulkSetIndexing(IndexingStrategy.DontIndex))" disabled="@AnySelectedHasOverwriteFalse()" title="@(AnySelectedHasOverwriteFalse() ? "Locked: one or more selected drafts have Overwrite = FALSE" : "Indexing: skip indexes")">
+                                        Indexing: None
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-primary" @onclick="@(() => BulkSetSharding(ShardingStrategy.SameAsSource))" disabled="@AnySelectedHasOverwriteFalse()" title="@(AnySelectedHasOverwriteFalse() ? "Locked: one or more selected drafts have Overwrite = FALSE" : "Sharding: copy sharding from source")">
+                                        Sharding: Same as source
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="@(() => BulkSetSharding(ShardingStrategy.DontShard))" disabled="@AnySelectedHasOverwriteFalse()" title="@(AnySelectedHasOverwriteFalse() ? "Locked: one or more selected drafts have Overwrite = FALSE" : "Sharding: do not shard")">
+                                        Sharding: None
+                                    </button>
+                                    @if (AllSelectedHaveDontShard() && !AnySelectedHasOverwriteFalse() && _clusterNodes.Count > 1)
+                                    {
+                                        <div class="btn-group">
+                                            <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Place selected drafts on a specific shard">
+                                                Move to...
                                             </button>
-                                        </td>
-                                    </tr>
+                                            <ul class="dropdown-menu">
+                                                <li><a class="dropdown-item" @onclick="@(() => BulkSetMoveToAuto())">Auto (let the server choose)</a></li>
+                                                @foreach (var node in _clusterNodes)
+                                                {
+                                                    <li><a class="dropdown-item" @onclick="@(() => BulkSetMoveToShard(node))">@node</a></li>
+                                                }
+                                            </ul>
+                                        </div>
+                                    }
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="BulkClearFilter" title="Remove filter from selected drafts">
+                                        Clear filter
+                                    </button>
+                                    <div class="btn-group">
+                                        <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Pin _id BSON type for selected drafts">
+                                            _id type...
+                                        </button>
+                                        <ul class="dropdown-menu">
+                                            <li><a class="dropdown-item" @onclick="@(() => BulkSetDataTypeForId(null))">Unknown / Multiple (auto-detect)</a></li>
+                                            @foreach (var dt in IdDataTypeOptions)
+                                            {
+                                                var captured = dt;
+                                                <li><a class="dropdown-item" @onclick="@(() => BulkSetDataTypeForId(captured))">@captured</a></li>
+                                            }
+                                        </ul>
+                                    </div>
+                                    @if (AnySelectedHasOverwriteFalse())
+                                    {
+                                        <span class="text-muted small">
+                                            Indexing / Sharding / Move-to locked: one or more selected drafts have Overwrite = FALSE.
+                                        </span>
+                                    }
                                 }
                             }
-                            else if (_paginationHelper.ShowFilter() && !string.IsNullOrWhiteSpace(_paginationHelper.FilterText))
+                            else
                             {
-                                <tr>
-                                    <td colspan="2" class="text-center text-muted py-3">
-                                        <i class="bi bi-search"></i>
-                                        <div>No collections match your filter</div>
-                                        <button class="btn btn-link btn-sm p-0" @onclick="ClearFilter">Clear filter</button>
-                                    </td>
-                                </tr>
+                                <span class="text-muted small">
+                                    Existing collections cannot be edited; deselect them to view edit options.
+                                </span>
                             }
-                            else if (!LoadUpdatedMigrationUnits().Any())
-                            {
-                                <tr>
-                                    <td colspan="2" class="text-center text-muted py-3">
-                                        <i class="bi bi-collection"></i>
-                                        <div>No collections configured</div>
-                                    </td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
+                        </div>
+                    }
 
-                @* Pagination Controls *@
-                @if (_paginationHelper.ShowPagination())
-                {
-                    <div class="d-flex justify-content-between align-items-center mt-3">
-                        <div>
-                            <nav aria-label="Collections pagination">
-                                <ul class="pagination pagination-sm mb-0">
-                                    <li class="page-item @(_paginationHelper.IsFirstPage() ? "disabled" : "")">
-                                        <button class="page-link" @onclick="() => GoToPage(1)" disabled="@_paginationHelper.IsFirstPage()" title="First page">
-                                            <i class="bi bi-chevron-double-left"></i>
-                                        </button>
-                                    </li>
-                                    <li class="page-item @(_paginationHelper.IsFirstPage() ? "disabled" : "")">
-                                        <button class="page-link" @onclick="() => GoToPage(_paginationHelper.CurrentPage - 1)" disabled="@_paginationHelper.IsFirstPage()" title="Previous page">
-                                            <i class="bi bi-chevron-left"></i>
-                                        </button>
-                                    </li>
+                    @* Add panel (inline form row pinned to top) *@
+                    @if (_showAddPanel)
+                    {
+                        <div class="card mb-3 border-success">
+                            <div class="card-header bg-success text-white d-flex justify-content-between">
+                                <span>Add collections</span>
+                                <button type="button" class="btn-close btn-close-white" @onclick="ToggleAddPanel"></button>
+                            </div>
+                            <div class="card-body">
+                                @RenderAddEditForm(null)
+                            </div>
+                        </div>
+                    }
 
-                                    @for (int page = _paginationHelper.GetStartPage(); page <= _paginationHelper.GetEndPage(); page++)
+                    @* Table *@
+                    @if (_liveUnits.Count == 0 && _drafts.Count == 0)
+                    {
+                        <div class="border rounded-3 bg-light p-4 text-center">
+                            <div class="fw-semibold mb-1">No collections in this job yet</div>
+                            <div class="text-muted">
+                                Use <strong>Add collections</strong> to create the first collection entry, or close this dialog if you do not need any collections.
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                            <table class="table table-sm table-hover">
+                                <thead class="sticky-top bg-light">
+                                    <tr>
+                                        <th style="width: 40px;"><input type="checkbox" @onchange="ToggleSelectAll" checked="@IsAllSelected()" /></th>
+                                        <th style="width: 30px;"></th>
+                                        <th role="button" style="cursor: pointer; user-select: none;" @onclick='() => OnSort("namespace")' title="Sort by namespace">
+                                            Namespace <i class="bi @GetSortIcon("namespace") ms-1"></i>
+                                        </th>
+                                        <th style="width: 120px; cursor: pointer; user-select: none;" role="button" @onclick='() => OnSort("status")' title="Sort by status">
+                                            Status <i class="bi @GetSortIcon("status") ms-1"></i>
+                                        </th>
+                                        <th>Options</th>
+                                        <th style="width: 80px;">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var item in _paginationHelper.GetCurrentPageItems())
                                     {
-                                        var pageNumber = page;
-                                        <li class="page-item @(_paginationHelper.CurrentPage == pageNumber ? "active" : "")">
-                                            <button class="page-link" @onclick="() => GoToPage(pageNumber)" title="Go to page @pageNumber">
-                                                @pageNumber
-                                            </button>
-                                        </li>
+                                        @RenderRow(item)
                                     }
-
-                                    <li class="page-item @(_paginationHelper.IsLastPage() ? "disabled" : "")">
-                                        <button class="page-link" @onclick="() => GoToPage(_paginationHelper.CurrentPage + 1)" disabled="@_paginationHelper.IsLastPage()" title="Next page">
-                                            <i class="bi bi-chevron-right"></i>
-                                        </button>
-                                    </li>
-                                    <li class="page-item @(_paginationHelper.IsLastPage() ? "disabled" : "")">
-                                        <button class="page-link" @onclick="() => GoToPage(_paginationHelper.GetTotalPages())" disabled="@_paginationHelper.IsLastPage()" title="Last page">
-                                            <i class="bi bi-chevron-double-right"></i>
-                                        </button>
-                                    </li>
-                                </ul>
-                            </nav>
+                                </tbody>
+                            </table>
                         </div>
-                        
-                        <div>
+                    }
+
+                    @* Pagination Controls *@
+                    @if (_paginationHelper.GetTotalPages() > 1)
+                    {
+                        <nav aria-label="Collections pagination" class="mt-3">
+                            <ul class="pagination justify-content-center">
+                                <li class="page-item @(_paginationHelper.IsFirstPage() ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => _paginationHelper.GoToPage(1)" disabled="@_paginationHelper.IsFirstPage()" title="First page">
+                                        <i class="bi bi-chevron-double-left"></i>
+                                    </button>
+                                </li>
+                                <li class="page-item @(_paginationHelper.IsFirstPage() ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => _paginationHelper.GoToPage(_paginationHelper.CurrentPage - 1)" disabled="@_paginationHelper.IsFirstPage()" title="Previous page">
+                                        <i class="bi bi-chevron-left"></i>
+                                    </button>
+                                </li>
+
+                                @for (int page = _paginationHelper.GetStartPage(); page <= _paginationHelper.GetEndPage(); page++)
+                                {
+                                    var pageNumber = page;
+                                    <li class="page-item @(_paginationHelper.CurrentPage == pageNumber ? "active" : "")">
+                                        <button class="page-link" @onclick="() => _paginationHelper.GoToPage(pageNumber)" title="Go to page @pageNumber">
+                                            @pageNumber
+                                        </button>
+                                    </li>
+                                }
+
+                                <li class="page-item @(_paginationHelper.IsLastPage() ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => _paginationHelper.GoToPage(_paginationHelper.CurrentPage + 1)" disabled="@_paginationHelper.IsLastPage()" title="Next page">
+                                        <i class="bi bi-chevron-right"></i>
+                                    </button>
+                                </li>
+                                <li class="page-item @(_paginationHelper.IsLastPage() ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => _paginationHelper.GoToPage(_paginationHelper.GetTotalPages())" disabled="@_paginationHelper.IsLastPage()" title="Last page">
+                                        <i class="bi bi-chevron-double-right"></i>
+                                    </button>
+                                </li>
+                            </ul>
+
+                            <div class="text-center mt-2">
+                                <small class="text-muted">
+                                    Page @_paginationHelper.CurrentPage of @_paginationHelper.GetTotalPages()
+                                    (@_paginationHelper.GetFilteredItemsCount() @(_paginationHelper.GetFilteredItemsCount() == 1 ? "collection" : "collections"))
+                                </small>
+                            </div>
+                        </nav>
+                    }
+                </div>
+                <div class="modal-footer">
+                    <div class="me-auto">
+                        @if (GetPendingAddCount() > 0 || GetPendingRemoveCount() > 0)
+                        {
                             <small class="text-muted">
-                                Page @_paginationHelper.CurrentPage of @_paginationHelper.GetTotalPages()
+                                @GetPendingAddCount() draft@(GetPendingAddCount() == 1 ? "" : "s") · @GetPendingRemoveCount() to remove
                             </small>
-                        </div>
+                        }
                     </div>
-                }
+                    <button class="btn btn-secondary" @onclick="Cancel">Cancel</button>
+                    <button class="btn btn-primary" @onclick="ShowSummary" disabled="@(GetPendingAddCount() == 0 && GetPendingRemoveCount() == 0)">Next</button>
+                </div>
+            }
+            else
+            {
+                @* SUMMARY VIEW *@
+                <div class="modal-body">
+                    @if (!string.IsNullOrWhiteSpace(_error))
+                    {
+                        <div class="alert alert-danger">@_error</div>
+                    }
 
-               
+                    @if (HasConflicts())
+                    {
+                        <div class="alert alert-warning">
+                            One or more collections appear in both lists. They will be removed first and then re-added; migration and change-stream state for these collections will be lost.
+                        </div>
+                    }
 
-                <div class="mt-3">
-                    <label for="nameSpaces" class="form-label">Collections To Add</label>
-                    <textarea id="nameSpaces" @bind="newCollection" rows="4" placeholder="e.g. db1.col1,db1.col2,db2.col1,db2.col5 or use wildcards like *.collection, database.*, *.* or CollectionInfo JSON format as described in readme" class="form-control" />
+                    <div class="table-responsive" style="max-height: 55vh; overflow-y: auto;">
+                        <table class="table table-sm mb-0">
+                            <thead class="sticky-top bg-light" style="z-index: 1;">
+                                <tr>
+                                    <th>Action</th>
+                                    <th>Namespace</th>
+                                    <th>Overwrite</th>
+                                    <th>Indexing</th>
+                                    <th>Sharding</th>
+                                    <th>Move to</th>
+                                    <th>_id type</th>
+                                    <th>Filter</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @* Removals first *@
+                                @foreach (var id in _toRemoveIds)
+                                {
+                                    var unit = _liveUnits.FirstOrDefault(u => u.Id == id);
+                                    if (unit != null)
+                                    {
+                                        var ns = $"{unit.DatabaseName}.{unit.CollectionName}";
+                                        var isConflict = _drafts.Any(d => $"{d.DatabaseName}.{d.CollectionName}" == ns);
+                                        <tr class="@(isConflict ? "table-warning" : "")">
+                                            <td>− Remove</td>
+                                            <td>@ns</td>
+                                            <td>—</td>
+                                            <td>—</td>
+                                            <td>—</td>
+                                            <td>—</td>
+                                            <td>—</td>
+                                            <td>—</td>
+                                        </tr>
+                                    }
+                                }
 
-                    <button class="btn btn-primary btn-sm mt-2" @onclick="AddCollectionAsync" disabled="@isAddingCollections">
-                        @if (isAddingCollections)
+                                @* Additions *@
+                                @foreach (var draft in _drafts)
+                                {
+                                    var ns = $"{draft.DatabaseName}.{draft.CollectionName}";
+                                    var isConflict = _toRemoveIds.Any(id =>
+                                    {
+                                        var u = _liveUnits.FirstOrDefault(x => x.Id == id);
+                                        return u != null && $"{u.DatabaseName}.{u.CollectionName}" == ns;
+                                    });
+                                    <tr class="@(isConflict ? "table-warning" : "")">
+                                        <td>+ Add</td>
+                                        <td>@ns</td>
+                                        <td>@(draft.Overwrite?.ToString() ?? "—")</td>
+                                        <td>@(draft.IndexingStrategy?.ToString() ?? "—")</td>
+                                        <td>@(draft.ShardingStrategy?.ToString() ?? "—")</td>
+                                        <td>@(draft.MoveToShard ?? "—")</td>
+                                        <td>@(draft.DataTypeForId?.ToString() ?? "Unknown/Multiple")</td>
+                                        <td title="@(draft.Filter ?? string.Empty)">@(string.IsNullOrWhiteSpace(draft.Filter) ? "—" : TruncateFilter(draft.Filter))</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" @onclick="Cancel">Cancel</button>
+                    <button class="btn btn-outline-secondary" @onclick="BackToList">Back</button>
+                    <button class="btn btn-primary" @onclick="ApplyChanges" disabled="@_isApplying">
+                        @if (_isApplying)
                         {
-                            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                            <span>Adding...</span>
+                            <span class="spinner-border spinner-border-sm me-1"></span>
                         }
-                        else
-                        {
-                            <span>Add</span>
-                        }
+                        Apply changes
                     </button>
                 </div>
-
-                @if (collectionRemoved)
-                {
-                    <div class="alert alert-warning mt-2">If a collection is removed from the job, it will need to be migrated as new, and all migration and change stream details will be lost. Select Cancel if you wish to keep the collection.</div>
-                }
-
-                @if (!string.IsNullOrEmpty(errorMessage))
-                {
-                    <div class="alert alert-danger mt-2">
-                        @errorMessage
-                        <button type="button" class="btn-close btn-close-sm" aria-label="Close" @onclick="() => errorMessage = string.Empty"></button>
-                    </div>
-                }
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-primary" @onclick=@HandleSubmit>Ok</button>
-                <button type="button" class="btn btn-secondary" @onclick="@Cancel">Cancel</button>
-            </div>
+            }
         </div>
     </div>
 </div>
 
-@code
+@* Full-screen overlay shown while Apply changes is processing. Sits above the modal so it
+   is visible no matter how many rows are rendered behind it. *@
+@if (_isApplying || _isPreparingSummary)
 {
-    [Parameter]
-    public MigrationJob? MigrationJob { get; set; }
+    <div class="position-fixed top-0 start-0 w-100 h-100 d-flex flex-column justify-content-center align-items-center"
+         style="background: rgba(0,0,0,0.55); z-index: 2000;"
+         aria-live="polite" aria-busy="true" role="status">
+        <div class="spinner-border text-light" style="width: 3.5rem; height: 3.5rem;" role="status">
+            <span class="visually-hidden">@(_isApplying ? "Applying changes…" : "Preparing summary…")</span>
+        </div>
+        <div class="mt-3 text-light fs-5">
+            @(_isApplying ? "Applying changes… please wait" : "Preparing summary… please wait")
+        </div>
+        <div class="text-light-emphasis small">Processing @(_drafts?.Count ?? 0) addition(s) and @(_toRemoveIds?.Count ?? 0) removal(s).</div>
+    </div>
+}
 
-    [Parameter]
-    public List<MigrationUnit>? MigrationUnits { get; set; }
+@* Confirmation handled via browser confirm() in Cancel(); no in-modal dialog (stacking conflict with parent modal). *@
 
-    [Parameter]
-    public string? SourceConnectionString { get; set; }
+@code {
+    // === RENDER METHODS ===
 
-    [Parameter]
-    public EventCallback<List<MigrationUnit>?> OnCollectionsUpdated { get; set; }
-
-    private string errorMessage = string.Empty;
-    private string newCollection = string.Empty;
-    private List<MigrationUnit> updatedMigrationUnits = new List<MigrationUnit>();
-    private bool collectionRemoved = false;
-    private bool isAddingCollections = false;
-    
-    // Pagination helper
-    private PaginationHelper<MigrationUnit> _paginationHelper = null!;
-
-    protected override void OnInitialized()
+    private RenderFragment RenderRow(object item) => builder =>
     {
-        // Initialize pagination helper with filter predicate
-        _paginationHelper = new PaginationHelper<MigrationUnit>(
-            LoadUpdatedMigrationUnits(),
-            (mu, filterText) =>
-                $"{mu.DatabaseName}.{mu.CollectionName}".Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
-                mu.DatabaseName.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
-                mu.CollectionName.Contains(filterText, StringComparison.OrdinalIgnoreCase)
-        );
-    }
-
-    private List<MigrationUnit> LoadUpdatedMigrationUnits()
-    {
-        if (updatedMigrationUnits == null || updatedMigrationUnits.Count == 0)
+        if (item is MigrationUnit unit)
         {
-            updatedMigrationUnits = (MigrationUnits ?? new List<MigrationUnit>()).ToList();
-        }
+            var isPendingRemoval = _toRemoveIds.Contains(unit.Id);
+            var isSelected = _selectedLiveIds.Contains(unit.Id);
 
-        return updatedMigrationUnits;
-    }
+            builder.OpenElement(0, "tr");
+            builder.AddAttribute(1, "class", isPendingRemoval ? "text-decoration-line-through text-muted" : "");
 
-    private void RefreshPaginationHelper()
-    {
-        _paginationHelper = new PaginationHelper<MigrationUnit>(
-            LoadUpdatedMigrationUnits(),
-            (mu, filterText) =>
-                $"{mu.DatabaseName}.{mu.CollectionName}".Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
-                mu.DatabaseName.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
-                mu.CollectionName.Contains(filterText, StringComparison.OrdinalIgnoreCase)
-        );
-    }
-
-    private void OnFilterChanged()
-    {
-        StateHasChanged();
-    }
-
-    private void ClearFilter()
-    {
-        _paginationHelper.ClearFilter();
-        StateHasChanged();
-    }
-
-    private void OnPageSizeChanged()
-    {
-        StateHasChanged();
-    }
-
-    private void GoToPage(int pageNumber)
-    {
-        _paginationHelper.GoToPage(pageNumber);
-        StateHasChanged();
-    }
-
-    private async Task AddCollectionAsync()
-    {
-        errorMessage = string.Empty;
-        if (!string.IsNullOrWhiteSpace(newCollection))
-        {
-            if (MigrationJob == null)
+            // Checkbox
+            builder.OpenElement(2, "td");
+            if (!isPendingRemoval)
             {
-                errorMessage = "MigrationJob is not set.";
-                return;
-            }
-
-            Tuple<bool, string, string> retValue = Helper.ValidateNamespaceFormat(newCollection, MigrationJob.JobType);
-            if (!retValue.Item1)
-            {
-                errorMessage = retValue.Item3; // Use Item3 for error message
-                return;
-            }
-
-            try
-            {
-                isAddingCollections = true;
-                StateHasChanged(); // Update UI to show spinner
-
-                // Use the async method with SourceConnectionString parameter
-                var newunits = await Helper.PopulateJobCollectionsAsync(MigrationJob, newCollection, SourceConnectionString ?? string.Empty);
-                
-                foreach (var mu in newunits)
+                builder.OpenElement(3, "input");
+                builder.AddAttribute(4, "type", "checkbox");
+                builder.AddAttribute(5, "class", "form-check-input");
+                builder.AddAttribute(6, "checked", isSelected);
+                builder.AddAttribute(7, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e =>
                 {
-                    // Ensure no duplicates
-                    if (!updatedMigrationUnits.Any(x => x.DatabaseName == mu.DatabaseName && x.CollectionName == mu.CollectionName))
-                    {
-                        var hasTargetClash = updatedMigrationUnits.Any(x =>
-                            string.Equals(x.GetEffectiveTargetDatabaseName(), mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(x.GetEffectiveTargetCollectionName(), mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase) &&
-                            !(string.Equals(x.DatabaseName, mu.DatabaseName, StringComparison.OrdinalIgnoreCase) &&
-                              string.Equals(x.CollectionName, mu.CollectionName, StringComparison.OrdinalIgnoreCase)));
+                    var checked_ = (bool)(e.Value ?? false);
+                    if (checked_)
+                        _selectedLiveIds.Add(unit.Id);
+                    else
+                        _selectedLiveIds.Remove(unit.Id);
+                }));
+                builder.CloseElement();
+            }
+            builder.CloseElement();
 
-                        if (hasTargetClash)
-                        {
-                            errorMessage = $"Target namespace clash detected for {mu.GetEffectiveTargetDatabaseName()}.{mu.GetEffectiveTargetCollectionName()}.";
-                            continue;
-                        }
+            // State indicator badge
+            builder.OpenElement(8, "td");
+            if (isPendingRemoval)
+            {
+                builder.AddMarkupContent(9, "<span class=\"badge bg-danger\" title=\"Queued for removal\">Remove</span>");
+            }
+            else
+            {
+                builder.AddMarkupContent(9, "<span class=\"badge bg-secondary\" title=\"Existing collection\">Existing</span>");
+            }
+            builder.CloseElement();
 
-                        updatedMigrationUnits.Add(mu);
-                    }
+            // Namespace
+            builder.OpenElement(10, "td");
+            builder.AddContent(11, $"{unit.DatabaseName}.{unit.CollectionName}");
+            builder.CloseElement();
+
+            // Status
+            builder.OpenElement(12, "td");
+            builder.AddContent(13, isPendingRemoval ? "—" : GetUnitStatusDisplay(unit));
+            builder.CloseElement();
+
+            // Options summary
+            builder.OpenElement(14, "td");
+            if (!isPendingRemoval)
+            {
+                builder.AddMarkupContent(15, RenderOptionsBadges(unit.Overwrite, unit.IndexingStrategy, unit.ShardingStrategy, unit.MoveToShard, unit.UserFilter, unit.DataTypeForId));
+            }
+            builder.CloseElement();
+
+            // Actions — Delete on existing rows, Undo on pending-removal rows
+            builder.OpenElement(16, "td");
+            builder.AddAttribute(17, "class", "text-end");
+            if (isPendingRemoval)
+            {
+                builder.OpenElement(18, "button");
+                builder.AddAttribute(19, "class", "btn btn-sm btn-outline-secondary");
+                builder.AddAttribute(20, "title", "Undo removal");
+                builder.AddAttribute(21, "onclick", EventCallback.Factory.Create(this, () => UndoRemoval(unit.Id)));
+                builder.AddMarkupContent(22, "<i class=\"bi bi-arrow-counterclockwise\"></i>");
+                builder.CloseElement();
+            }
+            else
+            {
+                builder.OpenElement(18, "button");
+                builder.AddAttribute(19, "class", "btn btn-sm btn-outline-danger");
+                builder.AddAttribute(20, "title", "Remove this collection from the job");
+                builder.AddAttribute(21, "onclick", EventCallback.Factory.Create(this, () => QueueForRemoval(unit.Id)));
+                builder.AddMarkupContent(22, "<i class=\"bi bi-trash\"></i>");
+                builder.CloseElement();
+            }
+            builder.CloseElement();
+
+            builder.CloseElement(); // tr
+        }
+        else if (item is PendingAddition draft)
+        {
+            var isSelected = _selectedDraftIds.Contains(draft.Id);
+
+            builder.OpenElement(0, "tr");
+            builder.AddAttribute(1, "class", "table-success");
+
+            // Checkbox
+            builder.OpenElement(2, "td");
+            builder.OpenElement(3, "input");
+            builder.AddAttribute(4, "type", "checkbox");
+            builder.AddAttribute(5, "class", "form-check-input");
+            builder.AddAttribute(6, "checked", isSelected);
+            builder.AddAttribute(7, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e =>
+            {
+                var checked_ = (bool)(e.Value ?? false);
+                if (checked_)
+                    _selectedDraftIds.Add(draft.Id);
+                else
+                    _selectedDraftIds.Remove(draft.Id);
+            }));
+            builder.CloseElement();
+            builder.CloseElement();
+
+            // State indicator
+            builder.OpenElement(8, "td");
+            builder.AddMarkupContent(9, "<span class=\"badge bg-success\" title=\"Draft collection — not yet applied\">New</span>");
+            builder.CloseElement();
+
+            // Namespace
+            builder.OpenElement(10, "td");
+            builder.AddContent(11, $"{draft.DatabaseName}.{draft.CollectionName}");
+            builder.CloseElement();
+
+            // Status
+            builder.OpenElement(12, "td");
+            builder.AddMarkupContent(13, "<span class=\"badge bg-warning text-dark\">Pending</span>");
+            builder.CloseElement();
+
+            // Options summary
+            builder.OpenElement(14, "td");
+            builder.AddMarkupContent(15, RenderOptionsBadges(draft.Overwrite, draft.IndexingStrategy, draft.ShardingStrategy, draft.MoveToShard, draft.Filter, draft.DataTypeForId));
+            builder.CloseElement();
+
+            // Actions — only Edit on draft rows (delete via checkbox + bulk toolbar)
+            builder.OpenElement(16, "td");
+            builder.AddAttribute(17, "class", "text-end");
+            builder.OpenElement(18, "button");
+            builder.AddAttribute(19, "class", "btn btn-sm btn-outline-primary");
+            builder.AddAttribute(20, "title", "Edit this draft");
+            builder.AddAttribute(21, "onclick", EventCallback.Factory.Create(this, () => ToggleEditPanel(draft.Id)));
+            builder.AddMarkupContent(22, "<i class=\"bi bi-pencil-square\"></i>");
+            builder.CloseElement();
+            builder.CloseElement();
+
+            builder.CloseElement(); // tr
+
+            // Edit panel row (if expanded)
+            if (_expandedDraftId == draft.Id)
+            {
+                builder.OpenElement(28, "tr");
+                builder.AddAttribute(29, "id", $"draft-edit-{draft.Id}");
+                builder.OpenElement(30, "td");
+                builder.AddAttribute(31, "colspan", "6");
+                builder.OpenElement(32, "div");
+                builder.AddAttribute(33, "class", "card border-primary");
+                builder.OpenElement(34, "div");
+                builder.AddAttribute(35, "class", "card-header bg-primary text-white py-2");
+                builder.AddMarkupContent(36, $"Editing draft: <strong>{System.Net.WebUtility.HtmlEncode(draft.DatabaseName)}.{System.Net.WebUtility.HtmlEncode(draft.CollectionName)}</strong>");
+                builder.CloseElement();
+                builder.OpenElement(37, "div");
+                builder.AddAttribute(38, "class", "card-body");
+                builder.AddContent(39, RenderAddEditForm(draft.Id));
+                builder.CloseElement();
+                builder.CloseElement();
+                builder.CloseElement();
+                builder.CloseElement();
+            }
+        }
+    };
+
+    private string RenderOptionsBadges(bool? overwrite, IndexingStrategy? indexing, ShardingStrategy? sharding, string? moveToShard, string? filter, DataType? dataTypeForId = null)
+    {
+        // Run inputs through the central rules helper so badges never show options that are locked
+        // by the current Overwrite/Sharding/simulated-run combination.
+        var n = DraftOptionRules.Normalize(overwrite, indexing, sharding, moveToShard, MigrationJob.IsSimulatedRun);
+
+        var html = new System.Text.StringBuilder();
+        if (n.Overwrite == true)
+            html.Append("<span class=\"badge bg-warning text-dark me-1\" title=\"Target collection will be dropped before migration\">Overwrite</span>");
+        else
+            html.Append("<span class=\"badge bg-light text-dark border me-1\" title=\"Documents will be appended to the target\">Append</span>");
+
+        if (IsRuOptimizedCopyJob)
+            return html.ToString();
+
+        if (n.Indexing == IndexingStrategy.DontIndex)
+            html.Append("<span class=\"badge bg-light text-dark border me-1\" title=\"Indexes will not be migrated\">No indexes</span>");
+        else if (n.Indexing == IndexingStrategy.SameAsSourceBlocking)
+            html.Append("<span class=\"badge bg-light text-dark border me-1\" title=\"Indexes will be copied from source (blocking)\">Indexes (blocking)</span>");
+        else if (n.Indexing == IndexingStrategy.SameAsSource)
+            html.Append("<span class=\"badge bg-light text-dark border me-1\" title=\"Indexes will be copied from source (non-blocking)\">Indexes (non-blocking)</span>");
+
+        if (n.Sharding == ShardingStrategy.DontShard)
+            html.Append("<span class=\"badge bg-light text-dark border me-1\" title=\"Target collection will not be sharded\">Not sharded</span>");
+        else if (n.Sharding == ShardingStrategy.SameAsSource)
+            html.Append("<span class=\"badge bg-light text-dark border me-1\" title=\"Sharding will be copied from source\">Sharding from source</span>");
+
+        if (!string.IsNullOrWhiteSpace(n.MoveToShard))
+            html.Append($"<span class=\"badge bg-info text-dark me-1\" title=\"Place collection on shard {System.Net.WebUtility.HtmlEncode(n.MoveToShard)}\">Move to {System.Net.WebUtility.HtmlEncode(n.MoveToShard)}</span>");
+
+        if (dataTypeForId.HasValue)
+            html.Append($"<span class=\"badge bg-light text-dark border me-1\" title=\"_id BSON type pinned by user\">_id: {dataTypeForId.Value}</span>");
+
+        if (!string.IsNullOrWhiteSpace(filter))
+            html.Append("<span class=\"badge bg-info text-dark me-1\" title=\"A filter is applied to this collection\">Filtered</span>");
+
+        return html.ToString();
+    }
+
+    private RenderFragment RenderAddEditForm(Guid? draftId) => builder =>
+    {
+        var isEdit = draftId.HasValue;
+        var simulated = MigrationJob.IsSimulatedRun;
+
+        if (!isEdit)
+        {
+            // Namespace textarea + file upload
+            builder.OpenElement(0, "div");
+            builder.AddAttribute(1, "class", "mb-3");
+            builder.AddMarkupContent(2, "<label class=\"form-label fw-bold\">Namespaces</label>");
+            builder.OpenElement(3, "textarea");
+            builder.AddAttribute(4, "class", "form-control");
+            builder.AddAttribute(5, "rows", "3");
+            builder.AddAttribute(6, "placeholder", "database.collection (one per line), database.* for wildcards, or a JSON array like [{\"DatabaseName\":\"db\",\"CollectionName\":\"col\"}]");
+            builder.AddAttribute(7, "value", _formNamespaces);
+            builder.AddAttribute(8, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e => _formNamespaces = e.Value?.ToString() ?? string.Empty));
+            builder.CloseElement();
+
+            builder.OpenElement(9, "div");
+            builder.AddAttribute(10, "class", "mt-2");
+            builder.OpenComponent<InputFile>(11);
+            builder.AddAttribute(12, "class", "form-control form-control-sm");
+            builder.AddAttribute(13, "accept", ".txt,.json");
+            builder.AddAttribute(14, "OnChange", EventCallback.Factory.Create<InputFileChangeEventArgs>(this, OnUploadNamespacesFile));
+            builder.CloseComponent();
+            builder.AddMarkupContent(15, "<small class=\"form-text text-muted\">Optional: upload a .txt (comma-separated namespaces, e.g. db1.col1,db1.col2) or .json (CollectionInfo array) file. Contents are appended to the textarea above.</small>");
+            builder.CloseElement();
+            builder.CloseElement();
+        }
+
+        // Per-collection options panel (always visible — no Advanced toggle)
+        builder.OpenElement(20, "div");
+        builder.AddAttribute(21, "class", "row g-3");
+
+        // Overwrite
+        builder.OpenElement(22, "div");
+        builder.AddAttribute(23, "class", "col-md-6");
+        builder.AddMarkupContent(24, "<label class=\"form-label\">Overwrite target collection</label>");
+        builder.OpenElement(25, "select");
+        builder.AddAttribute(26, "class", "form-select form-select-sm");
+        builder.AddAttribute(27, "value", _formOverwrite?.ToString() ?? "False");
+        builder.AddAttribute(28, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e => _formOverwrite = bool.Parse(e.Value?.ToString() ?? "False")));
+        builder.AddMarkupContent(29, "<option value=\"False\">No — append documents to existing target</option><option value=\"True\">Yes — drop target first, then migrate</option>");
+        builder.CloseElement();
+        builder.CloseElement();
+
+        if (!IsRuOptimizedCopyJob)
+        {
+        // Indexing
+        var isIndexingLocked = DraftOptionRules.IsIndexingLocked(_formOverwrite, simulated);
+        builder.OpenElement(30, "div");
+        builder.AddAttribute(31, "class", "col-md-6");
+        builder.OpenElement(32, "label");
+        builder.AddAttribute(33, "class", "form-label");
+        builder.AddMarkupContent(34, "Indexing strategy");
+        if (isIndexingLocked) builder.AddMarkupContent(35, " <span class=\"badge bg-light text-muted border\">Locked (Overwrite = No)</span>");
+        builder.CloseElement();
+        builder.OpenElement(36, "select");
+        builder.AddAttribute(37, "class", "form-select form-select-sm");
+        builder.AddAttribute(38, "disabled", isIndexingLocked || simulated);
+        builder.AddAttribute(39, "value", _formIndexing?.ToString() ?? "SameAsSource");
+        builder.AddAttribute(40, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e => _formIndexing = Enum.Parse<IndexingStrategy>(e.Value?.ToString() ?? "SameAsSource")));
+        builder.AddMarkupContent(41, "<option value=\"SameAsSource\">Copy indexes from source (non-blocking)</option><option value=\"SameAsSourceBlocking\">Copy indexes from source (blocking)</option><option value=\"DontIndex\">Do not create indexes</option>");
+        builder.CloseElement();
+        if (simulated) builder.AddMarkupContent(42, "<small class=\"form-text text-muted\">Disabled in simulated run</small>");
+        builder.CloseElement();
+
+        // Sharding
+        var isShardingLocked = DraftOptionRules.IsShardingLocked(_formOverwrite, simulated);
+        builder.OpenElement(43, "div");
+        builder.AddAttribute(44, "class", "col-md-6");
+        builder.OpenElement(45, "label");
+        builder.AddAttribute(46, "class", "form-label");
+        builder.AddMarkupContent(47, "Sharding strategy");
+        if (isShardingLocked) builder.AddMarkupContent(48, " <span class=\"badge bg-light text-muted border\">Locked (Overwrite = No)</span>");
+        builder.CloseElement();
+        builder.OpenElement(49, "select");
+        builder.AddAttribute(50, "class", "form-select form-select-sm");
+        builder.AddAttribute(51, "disabled", isShardingLocked || simulated);
+        builder.AddAttribute(52, "value", _formSharding?.ToString() ?? "DontShard");
+        builder.AddAttribute(53, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, async e =>
+        {
+            _formSharding = Enum.Parse<ShardingStrategy>(e.Value?.ToString() ?? "DontShard");
+            if (_formSharding == ShardingStrategy.DontShard)
+            {
+                await EnsureClusterNodesLoaded();
+            }
+        }));
+        builder.AddMarkupContent(54, "<option value=\"SameAsSource\">Copy sharding from source</option><option value=\"DontShard\">Do not shard target collection</option>");
+        builder.CloseElement();
+        if (simulated) builder.AddMarkupContent(55, "<small class=\"form-text text-muted\">Disabled in simulated run</small>");
+        builder.CloseElement();
+
+        // Move to shard (only when Sharding = DontShard)
+        if (_formSharding == ShardingStrategy.DontShard)
+        {
+            var isMoveToLocked = DraftOptionRules.IsMoveToShardLocked(_formOverwrite, _formSharding, simulated);
+            var singleShardTarget = _clusterNodes.Count <= 1;
+            var moveToDisabled = isMoveToLocked || simulated || singleShardTarget;
+            builder.OpenElement(56, "div");
+            builder.AddAttribute(57, "class", "col-md-6");
+            builder.OpenElement(58, "label");
+            builder.AddAttribute(59, "class", "form-label");
+            builder.AddMarkupContent(60, "Place collection on shard");
+            if (isMoveToLocked) builder.AddMarkupContent(61, " <span class=\"badge bg-light text-muted border\">Locked (Overwrite = No)</span>");
+            else if (singleShardTarget) builder.AddMarkupContent(61, " <span class=\"badge bg-light text-muted border\">Locked (target has a single shard)</span>");
+            builder.CloseElement();
+            builder.OpenElement(62, "select");
+            builder.AddAttribute(63, "class", "form-select form-select-sm");
+            builder.AddAttribute(64, "disabled", moveToDisabled);
+            builder.AddAttribute(65, "value", singleShardTarget ? "" : (_formMoveToShard ?? ""));
+            builder.AddAttribute(66, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e => {
+                var val = e.Value?.ToString();
+                _formMoveToShard = string.IsNullOrEmpty(val) ? null : val;
+            }));
+            builder.AddMarkupContent(67, "<option value=\"\">Don't move</option>");
+            if (!singleShardTarget)
+            {
+                builder.AddMarkupContent(68, "<option value=\"Auto\">Auto (distribute across shards by storage)</option>");
+                foreach (var node in _clusterNodes)
+                {
+                    var encoded = System.Net.WebUtility.HtmlEncode(node);
+                    builder.AddMarkupContent(68, $"<option value=\"{encoded}\">{encoded}</option>");
                 }
-
-
-                newCollection = string.Empty;
-                
-                // Refresh pagination helper with new data
-                RefreshPaginationHelper();
             }
-            catch (Exception ex)
-            {
-                errorMessage = $"Error adding collections. Details: {ex.Message}";
-            }
-            finally
-            {
-                isAddingCollections = false;
-                StateHasChanged(); // Update UI to hide spinner
-            }
-        }
-    }
-
-    private void RemoveCollection(MigrationUnit mu)
-    {
-        errorMessage = string.Empty;
-        if (updatedMigrationUnits.Count == 1)
-        {
-            errorMessage = "At least one collection is required for migration.";
-            return;
-        }
-        updatedMigrationUnits.Remove(mu);
-        collectionRemoved = true;
-        
-        // Refresh pagination helper with updated data
-        RefreshPaginationHelper();
-        StateHasChanged();
-    }
-
-    private void HandleSubmit()
-    {
-        errorMessage = string.Empty;
-        
-        // Check if there's text in newCollection that hasn't been added
-        if (!string.IsNullOrWhiteSpace(newCollection))
-        {
-            errorMessage = "You were trying to add collections using the 'Collections To Add' field. Please click 'Add' to add them or clear the text box before submitting.";
-            return;
+            builder.CloseElement();
+            if (simulated) builder.AddMarkupContent(69, "<small class=\"form-text text-muted\">Disabled in simulated run</small>");
+            builder.CloseElement();
         }
 
-        if (!Helper.ValidateNoTargetNamespaceClashes(updatedMigrationUnits, out var clashError))
-        {
-            errorMessage = clashError;
-            return;
-        }
-        
-        if (OnCollectionsUpdated.HasDelegate)
-        {
-            OnCollectionsUpdated.InvokeAsync(updatedMigrationUnits);
-        }
-    }
+        // Filter
+        builder.OpenElement(70, "div");
+        builder.AddAttribute(71, "class", "col-12");
+        builder.AddMarkupContent(72, "<label class=\"form-label\">Filter (JSON)</label>");
+        builder.OpenElement(73, "textarea");
+        builder.AddAttribute(74, "class", "form-control");
+        builder.AddAttribute(75, "rows", "2");
+        builder.AddAttribute(76, "placeholder", "Optional. e.g. { \"status\": \"active\" } or { \"createdDateTime\": { \"$gte\": { \"$date\": \"2025-01-01T00:00:00Z\" } } } ");
+        builder.AddAttribute(77, "value", _formFilter);
+        builder.AddAttribute(78, "oninput", EventCallback.Factory.Create<ChangeEventArgs>(this, e => _formFilter = e.Value?.ToString()));
+        builder.CloseElement();
+        builder.CloseElement();
 
-    private void Cancel()
-    {
-        if (OnCollectionsUpdated.HasDelegate)
+        // _id BSON type (skips probing when pinned)
+        builder.OpenElement(110, "div");
+        builder.AddAttribute(111, "class", "col-md-6");
+        builder.AddMarkupContent(112, "<label class=\"form-label\">_id data type (optional)</label>");
+        builder.OpenElement(113, "select");
+        builder.AddAttribute(114, "class", "form-select form-select-sm");
+        builder.AddAttribute(115, "value", _formDataTypeForId?.ToString() ?? string.Empty);
+        builder.AddAttribute(116, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e =>
         {
-            OnCollectionsUpdated.InvokeAsync(null);
+            var val = e.Value?.ToString();
+            _formDataTypeForId = string.IsNullOrEmpty(val) ? (DataType?)null : Enum.Parse<DataType>(val);
+        }));
+        builder.AddMarkupContent(117, "<option value=\"\">Unknown / Multiple (auto-detect)</option>");
+        foreach (var dt in IdDataTypeOptions)
+        {
+            builder.AddMarkupContent(118, $"<option value=\"{dt}\">{dt}</option>");
         }
-    }
+        builder.CloseElement();
+        builder.AddMarkupContent(119, "<small class=\"form-text text-muted\">Identify the data type to optimize and speed up partitioning.</small>");
+        builder.CloseElement();
+        }
+
+        builder.CloseElement(); // row
+
+        // Action buttons
+        builder.OpenElement(80, "div");
+        builder.AddAttribute(81, "class", "mt-3 d-flex justify-content-end gap-2");
+        if (isEdit)
+        {
+            builder.OpenElement(82, "button");
+            builder.AddAttribute(83, "class", "btn btn-secondary btn-sm");
+            builder.AddAttribute(84, "onclick", EventCallback.Factory.Create(this, CancelEdit));
+            builder.AddMarkupContent(85, "Cancel");
+            builder.CloseElement();
+            builder.OpenElement(86, "button");
+            builder.AddAttribute(87, "class", "btn btn-primary btn-sm");
+            builder.AddAttribute(88, "onclick", EventCallback.Factory.Create(this, () => SaveEdit(draftId!.Value)));
+            builder.AddMarkupContent(89, "Save");
+            builder.CloseElement();
+        }
+        else
+        {
+            builder.OpenElement(90, "button");
+            builder.AddAttribute(91, "class", "btn btn-success btn-sm");
+            builder.AddAttribute(92, "onclick", EventCallback.Factory.Create(this, AddCollections));
+            builder.AddMarkupContent(93, "Add to drafts");
+            builder.CloseElement();
+        }
+        builder.CloseElement();
+    };
 }
