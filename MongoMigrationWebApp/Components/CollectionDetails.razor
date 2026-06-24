@@ -61,7 +61,13 @@
                                     <div><span class="lbl">Sharding:</span> @FormatSharding(MigrationUnit.ShardingStrategy)</div>
                                     @if (MigrationUnit.ShardingStrategy == ShardingStrategy.DontShard && !string.IsNullOrWhiteSpace(MigrationUnit.MoveToShard))
                                     {
-                                        <div><span class="lbl">Move To Shard:</span> @MigrationUnit.MoveToShard</div>
+                                        <div>
+                                            <span class="lbl">Move To Shard:</span> @MigrationUnit.MoveToShard
+                                            @if (MigrationUnit.BulkCopyStartedOn.HasValue && !MigrationUnit.MoveStatus)
+                                            {
+                                                <span class="text-danger">(failed)</span>
+                                            }
+                                        </div>
                                     }
                                 </td>
                             </tr>

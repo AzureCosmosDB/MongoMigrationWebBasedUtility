@@ -110,7 +110,13 @@ else
                     <div><span class="lbl">Sharding:</span> @FormatSharding(mu.ShardingStrategy)</div>
                     @if (mu.ShardingStrategy == ShardingStrategy.DontShard && !string.IsNullOrWhiteSpace(mu.MoveToShard))
                     {
-                        <div><span class="lbl">Move To Shard:</span> @mu.MoveToShard</div>
+                        <div>
+                            <span class="lbl">Move To Shard:</span> @mu.MoveToShard
+                            @if (mu.BulkCopyStartedOn.HasValue && !mu.MoveStatus)
+                            {
+                                <span class="text-danger">(failed)</span>
+                            }
+                        </div>
                     }
                 </td>
                 <td class="group-cell">

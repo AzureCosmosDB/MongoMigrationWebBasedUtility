@@ -219,7 +219,13 @@ namespace OnlineMongoMigrationProcessor
         /// Target shard/node identifier for unsharded collections. Only applies when ShardingStrategy = DontShard.
         /// </summary>
         public string? MoveToShard { get; set; }
-        
+
+        /// <summary>
+        /// True once moveCollection has succeeded for this unit. When false and <see cref="MoveToShard"/>
+        /// is set, the worker will attempt the move once before data copy begins.
+        /// </summary>
+        public bool MoveStatus { get; set; }
+
         public string? SyncBackResumeToken { get; set; }
         public string? SyncBackOriginalResumeToken { get; set; }
         public bool SyncBackInitialDocumenReplayed { get; set; } = false;
