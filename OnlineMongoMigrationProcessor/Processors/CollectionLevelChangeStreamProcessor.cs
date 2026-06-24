@@ -211,11 +211,7 @@ namespace OnlineMongoMigrationProcessor
 
         private void WriteBasicLog()
         {
-
-            bool isVCore = (_syncBack ? MigrationJobContext.CurrentlyActiveJob.TargetEndpoint : MigrationJobContext.CurrentlyActiveJob.SourceEndpoint)
-                .Contains("mongocluster.cosmos.azure.com", StringComparison.OrdinalIgnoreCase);
-
-            _log.WriteLine($"{_syncBackPrefix}Environment detection - IsVCore: {isVCore}, SyncBack: {_syncBack}", LogType.Debug);
+            _log.WriteLine($"{_syncBackPrefix}Environment detection - IsDocumentDB: {IsWatchedEndpointDocumentDB}, SyncBack: {_syncBack}", LogType.Debug);
         }
 
         private List<string> GetSortedCollectionKeys()

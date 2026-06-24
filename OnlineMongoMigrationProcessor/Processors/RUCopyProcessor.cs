@@ -504,7 +504,7 @@ namespace OnlineMongoMigrationProcessor.Processors
                     // Add new chunk
                     chunk.Id = mu.MigrationChunks.Count.ToString();
                     mu.MigrationChunks.Add(chunk);
-                    mu.ChangeStreamStartedOn = DateTime.UtcNow;
+                    mu.SetChangeStreamStartedOn(false, DateTime.UtcNow);
                     newChunksFound = true;                    
                 }
             }

@@ -517,16 +517,15 @@ namespace OnlineMongoMigrationProcessor.Workers
                 && MigrationJobContext.CurrentlyActiveJob?.JobType != JobType.RUOptimizedCopy
                 && !(MigrationJobContext.CurrentlyActiveJob?.ProcessingSyncBack ?? false);
 
-            if (useServerLevel)
+            
+            if (!MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn.HasValue)
             {
-                if (!MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn.HasValue)
-                {
-                    MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn = DateTime.UtcNow;
-                    MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
-                }
-
-                mu.ChangeStreamStartedOn = MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value;
+                MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(false, DateTime.UtcNow);
+                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
             }
+
+            mu.SetChangeStreamStartedOn(false, MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value);
+           
 
             if (mu.MigrationChunks!=null && mu.MigrationChunks.Count>0)
             {
@@ -591,8 +590,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                 
                 _log.WriteLine($"Assigning chunks to migration unit for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
                 mu.MigrationChunks = chunks!;
-                mu.ChangeStreamStartedOn = currrentTime;
-                _log.WriteLine($"Partitions created successfully - Chunks: {chunks!.Count}, ChangeStreamStartedOn: {currrentTime}", LogType.Debug);
+                mu.SetChangeStreamStartedOn(false, currrentTime);
+                _log.WriteLine($"Partitions created successfully - Chunks: {chunks!.Count}, ChangeStreamStartedOn: {mu.ChangeStreamStartedOn:O}", LogType.Debug);
                 return TaskResult.Success;
             }
             catch (Exception ex)
@@ -1717,53 +1716,56 @@ namespace OnlineMongoMigrationProcessor.Workers
 
         private async Task<TaskResult> SetSyncBackResumeTokenAsync(CancellationToken ctsToken)
         {
-            if (Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob!))
+            if (!Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob!))
+                return TaskResult.Success;
+
+            MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack = true;
+
+            // Single sync-back anchor shared by the job and every MU, regardless of whether the
+            // change stream is currently server- or collection-scoped. Later Collection<->Server
+            // transitions use SyncBackChangeStreamStartedOn (not the original job StartedOn) to
+            // replay reverse-direction changes from the moment sync-back was actually enabled.
+            // SetChangeStreamStartedOn is set-when-empty, so existing anchors are preserved.
+            var syncBackStartedOn = DateTime.UtcNow;
+            MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(true, syncBackStartedOn);
+
+            var units = Helper.GetMigrationUnitsToMigrate(MigrationJobContext.CurrentlyActiveJob);
+
+            // Seed every MU's sync-back anchor up front. Track freshly-seeded MUs so we set
+            // resume tokens only for them below (existing MUs already have one).
+            var freshlySeeded = new List<MigrationUnit>();
+            foreach (var mub in units)
             {
-
-                MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack = true;
-                if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server)
+                var mu = MigrationJobContext.GetMigrationUnit(mub.Id);
+                if (!mu.GetChangeStreamStartedOn(true).HasValue)
                 {
-                    if (!MigrationJobContext.CurrentlyActiveJob.GetChangeStreamStartedOn(true).HasValue)
-                        MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(true, DateTime.UtcNow);
-                }
-                else
-                {
-                    if (!MigrationJobContext.CurrentlyActiveJob.GetChangeStreamStartedOn(false).HasValue)
-                        MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(false, DateTime.UtcNow);
-                }
-
-                List<Task> resumeTokenTasks = new List<Task>();
-
-                var units = Helper.GetMigrationUnitsToMigrate(MigrationJobContext.CurrentlyActiveJob);
-
-                // Setup server-level resume token if applicable
-                if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && units.Count > 0)
-                {
-                    PartitionPrepContext ctx= new PartitionPrepContext();
-                    ctx.UseServerLevel = true;
-                    ctx.ServerLevelResumeTokenSet = false;
-
-                    await SetupServerLevelResumeTokenAsync(units[0], ctx, ctsToken, MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack);
-                    return TaskResult.Success;
-                }
-
-
-
-                foreach (var mub in units)
-                {
-                    var mu= MigrationJobContext.GetMigrationUnit(mub.Id);
-
-                    if (!mu.GetChangeStreamStartedOn(true).HasValue)
-                    {
-                        mu.SetChangeStreamStartedOn(true, DateTime.UtcNow);
-                        mu.CSLastChecked = DateTime.MinValue;
-                        MigrationJobContext.SaveMigrationUnit(mu, true);
-                        var setResumeResult = await SetCollectionResumeToken(mu, true, ctsToken, resumeTokenTasks);
-                        if (setResumeResult != TaskResult.Success)
-                            return setResumeResult;
-                    }                    
+                    mu.SetChangeStreamStartedOn(true, syncBackStartedOn);
+                    mu.CSLastChecked = DateTime.MinValue;
+                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                    freshlySeeded.Add(mu);
                 }
             }
+
+            List<Task> resumeTokenTasks = new List<Task>();
+
+            // Setup server-level resume token if applicable
+            if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && units.Count > 0)
+            {
+                PartitionPrepContext ctx = new PartitionPrepContext();
+                ctx.UseServerLevel = true;
+                ctx.ServerLevelResumeTokenSet = false;
+
+                await SetupServerLevelResumeTokenAsync(units[0], ctx, ctsToken, MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack);
+                return TaskResult.Success;
+            }
+
+            foreach (var mu in freshlySeeded)
+            {
+                var setResumeResult = await SetCollectionResumeToken(mu, true, ctsToken, resumeTokenTasks);
+                if (setResumeResult != TaskResult.Success)
+                    return setResumeResult;
+            }
+
             return TaskResult.Success;
         }
 

@@ -129,8 +129,12 @@ namespace OnlineMongoMigrationProcessor
         public DateTime? GetChangeStreamStartedOn(bool syncBack)
             => syncBack ? SyncBackChangeStreamStartedOn : ChangeStreamStartedOn;
 
+        // Set-when-empty only: never overwrite or clear an existing ChangeStreamStartedOn.
+        // For explicit user-initiated resets, assign the underlying field directly.
         public void SetChangeStreamStartedOn(bool syncBack, DateTime? value)
         {
+            var current = syncBack ? SyncBackChangeStreamStartedOn : ChangeStreamStartedOn;
+            if (current.HasValue) return;
             if (syncBack) SyncBackChangeStreamStartedOn = value;
             else ChangeStreamStartedOn = value;
         }
