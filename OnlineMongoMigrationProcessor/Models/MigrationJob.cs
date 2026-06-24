@@ -43,6 +43,15 @@ namespace OnlineMongoMigrationProcessor
         public ChangeStreamLevel ChangeStreamLevel { get; set; }
 
         /// <summary>
+        /// Records the most recent action that affected change-stream state
+        /// (scope transition, sync-back/forward flip). Used by
+        /// <see cref="Helpers.ChangeStreamTransitionHelper"/> to log accurate
+        /// bootstrap context and suppress misleading "scope transition" messages
+        /// when the bootstrap is actually a post-flip re-init.
+        /// </summary>
+        public ChangeStreamAction CSLastAction { get; set; } = ChangeStreamAction.None;
+
+        /// <summary>
         /// When true, server-level change stream skips the $match pipeline and uses
         /// client-side namespace filtering. Set automatically when cursor creation
         /// times out with a server-side filter.

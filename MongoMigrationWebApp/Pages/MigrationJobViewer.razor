@@ -25,6 +25,12 @@
             <i class="bi bi-arrow-left"></i>
         </button>
         @CurrentlyLoadedMigrationJob?.Name - Job Status
+        @if (IsFlipCooldownActive())
+        {
+            <span class="badge bg-warning text-dark ms-2" title="Cooling period before starting @_flipCooldownTargetLabel">
+                <i class="bi bi-hourglass-split"></i> Cooling for @GetFlipCooldownSecondsRemaining()s before @_flipCooldownTargetLabel
+            </span>
+        }
     </h3>
     <div class="d-flex align-items-center mb-3">
 
@@ -110,7 +116,8 @@
             }
             else if (CurrentlyLoadedMigrationJob != null && Helper.IsOnline(CurrentlyLoadedMigrationJob) && CurrentlyLoadedMigrationJob.SyncBackEnabled && CurrentlyLoadedMigrationJob.ProcessingSyncBack)
             {
-                <button class="btn btn-warning" title="Complete Job" @onclick="CompleteJob">Complete Job</button>
+                <button class="btn btn-warning mx-1" title="Complete Job" @onclick="CompleteJob">Complete Job</button>
+                <button class="btn btn-warning mx-1" title="Stop sync-back and restart the forward change stream from the current time" @onclick="InitRestartForwardCS">Restart Forward Sync</button>
             }
             else if (CurrentlyLoadedMigrationJob != null && Helper.IsOnline(CurrentlyLoadedMigrationJob) && !CurrentlyLoadedMigrationJob.SyncBackEnabled)
             {
@@ -616,6 +623,12 @@ else if (@_showLogBackupFile)
     // Pause cooldown: 10-second cooling period before resume is allowed
     private DateTime? _pauseCooldownUntil;
     private Timer? _pauseCooldownTimer;
+
+    // Flip cooldown: 30-second cooling period when flipping forward <-> sync-back
+    // so the in-flight direction's cursors can close before the new direction opens.
+    private DateTime? _flipCooldownUntil;
+    private string _flipCooldownTargetLabel = string.Empty;
+    private Timer? _flipCooldownTimer;
 
     // Pagination and filtering properties (kept for UI binding compatibility)
     private string _filterText = string.Empty;
@@ -1408,6 +1421,10 @@ else if (@_showLogBackupFile)
             CurrentlyLoadedMigrationJob.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Server &&
             job.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Collection;
 
+        bool isCollectionToServerTransition =
+            CurrentlyLoadedMigrationJob.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Collection &&
+            job.ChangeStreamLevel == OnlineMongoMigrationProcessor.Models.ChangeStreamLevel.Server;
+
         ApplySubmittedJobSettings(CurrentlyLoadedMigrationJob, job);
 
         if (isServerToCollectionTransition)
@@ -1419,6 +1436,13 @@ else if (@_showLogBackupFile)
                     null,
                     CurrentlyLoadedMigrationJob,
                     CurrentlyLoadedMigrationJob.ProcessingSyncBack);
+        }
+        else if (isCollectionToServerTransition)
+        {
+            // No state reset needed here - TryTransitionCollectionToServerResumeCheckpoint
+            // performs the actual bootstrap when the worker starts. Just record the action
+            // so the bootstrap log accurately reflects what triggered it.
+            CurrentlyLoadedMigrationJob.CSLastAction = OnlineMongoMigrationProcessor.Models.ChangeStreamAction.CollectionToServer;
         }
 
         if (!string.IsNullOrEmpty(sourceConnectionString))
@@ -1634,6 +1658,13 @@ else if (@_showLogBackupFile)
         _yesNoDialogOpen = true;      
     }
 
+    private void InitRestartForwardCS()
+    {
+        _message = "This will stop sync-back and restart the forward change stream from the current time. Change Stream StartedOn for the job and all collections will be reset to now, and existing forward resume tokens will be cleared. Source-to-target replication will resume as a regular online migration. Are you sure?";
+        _yesNoDiaLogType = YesNoDialog.Category.RestartForwardCSNot;
+        _yesNoDialogOpen = true;
+    }
+
     private void CompleteJob()
     {
         if (CurrentlyLoadedMigrationJob?.ProcessingSyncBack ?? false)
@@ -1787,13 +1818,56 @@ else if (@_showLogBackupFile)
                 //fire and forget
                 if (CurrentlyLoadedMigrationJob != null)
                 {
+                    // Flip forward -> sync-back: reset sync-back trackers at the flip moment so
+                    // the new cycle replays from now, regardless of any stale state from a
+                    // previous sync-back session. The regular SyncBackToSource path then runs
+                    // unchanged.
+                    ChangeStreamTransitionHelper.ResetSyncBackChangeStreamForReEnable(null, CurrentlyLoadedMigrationJob);
+
+                    // Surface the cooldown in the page title so the user can see why the new
+                    // direction has not started yet. The 30s window lets in-flight forward
+                    // cursors close before the reverse cursor opens.
+                    StartFlipCooldown(30, "sync-back");
+
                      _ = Task.Run(async () =>
                     {
+                        await Task.Delay(TimeSpan.FromSeconds(30));
                         await JobManager.SyncBackToSource(MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], MigrationJobContext.CurrentlyActiveJob);
                     });
                 }
                 if (MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob))
                     return;
+            }
+            else if (result.DiaLogType == YesNoDialog.Category.RestartForwardCSNot)
+            {
+                MigrationJobContext.AddVerboseLog($"YesNoDialogSubmit {result.DiaLogType}");
+                if (CurrentlyLoadedMigrationJob != null)
+                {
+                    var sourceCs = MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id] ?? string.Empty;
+                    var targetCs = MigrationJobContext.TargetConnectionString[CurrentlyLoadedMigrationJob.Id] ?? string.Empty;
+                    var job = CurrentlyLoadedMigrationJob;
+
+                    // Flip sync-back -> forward: stop the running sync-back worker, reset
+                    // forward trackers at the flip moment, flip the direction flag, then
+                    // call the regular forward start path.
+                    JobManager.StopMigration();
+                    ChangeStreamTransitionHelper.ResetForwardChangeStreamForReEnable(null, job);
+                    job.ProcessingSyncBack = false;
+                    MigrationJobContext.SaveMigrationJob(job);
+
+                    // Surface the cooldown in the page title so the user can see why the new
+                    // direction has not started yet. The 30s window lets in-flight sync-back
+                    // cursors close before the forward cursor opens.
+                    StartFlipCooldown(30, "forward sync");
+
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(30));
+                        await JobManager.StartMigration(
+                            job, sourceCs, targetCs, job.NameSpaces ?? string.Empty, job.JobType, Helper.IsOnline(job));
+                    });
+                }
+                return;
             }
             else if( result.DiaLogType == YesNoDialog.Category.RunComparisonNot)
             {
@@ -1985,12 +2059,41 @@ else if (@_showLogBackupFile)
         return Math.Max(0, (int)Math.Ceiling((_pauseCooldownUntil.Value - DateTime.UtcNow).TotalSeconds));
     }
 
+    private void StartFlipCooldown(int seconds, string targetLabel)
+    {
+        _flipCooldownUntil = DateTime.UtcNow.AddSeconds(seconds);
+        _flipCooldownTargetLabel = targetLabel ?? string.Empty;
+        _flipCooldownTimer?.Dispose();
+        _flipCooldownTimer = new Timer(async _ =>
+        {
+            if (_flipCooldownUntil.HasValue && DateTime.UtcNow >= _flipCooldownUntil.Value)
+            {
+                _flipCooldownUntil = null;
+                _flipCooldownTargetLabel = string.Empty;
+                _flipCooldownTimer?.Dispose();
+                _flipCooldownTimer = null;
+            }
+            await InvokeAsync(StateHasChanged);
+        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
+    }
+
+    private bool IsFlipCooldownActive()
+        => _flipCooldownUntil.HasValue && DateTime.UtcNow < _flipCooldownUntil.Value;
+
+    private int GetFlipCooldownSecondsRemaining()
+    {
+        if (!_flipCooldownUntil.HasValue) return 0;
+        return Math.Max(0, (int)Math.Ceiling((_flipCooldownUntil.Value - DateTime.UtcNow).TotalSeconds));
+    }
+
     public void Dispose()
     {
         _refreshTimer?.Dispose();
         _refreshTimer = null;
         _pauseCooldownTimer?.Dispose();
         _pauseCooldownTimer = null;
+        _flipCooldownTimer?.Dispose();
+        _flipCooldownTimer = null;
     }
 
     // Response model for log count API

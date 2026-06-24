@@ -26,6 +26,10 @@
                         <button type="button" class="btn btn-primary" @onclick=@Ok>Start Sync Back</button>
                         <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Cutover</button>
                         break;
+                    case Category.RestartForwardCSNot:
+                        <button type="button" class="btn btn-primary" @onclick=@Ok>Restart Forward Sync</button>
+                        <button type="button" class="btn btn-secondary" @onclick="@Cancel">Cancel</button>
+                        break;
                     case Category.DeleteNot:
                         <button type="button" class="btn btn-primary" @onclick=@Ok>Delete</button>
                         <button type="button" class="btn btn-secondary" @onclick="@Cancel">Don't Delete</button>
@@ -68,6 +72,7 @@
         CutoverNot,
         CompleteNot,
         SyncBackNot,
+        RestartForwardCSNot,
         DeleteNot,
         RecoverNot,
         RunComparisonNot
