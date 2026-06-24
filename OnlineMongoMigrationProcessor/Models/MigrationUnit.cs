@@ -62,8 +62,16 @@ namespace OnlineMongoMigrationProcessor
         public bool RestoreComplete { get; set; }
         /// <summary>
         /// Set to true when all non-unique index builds have completed on the target.
+        /// Also reported true when there are no indexes to build (IndexesExpected == 0
+        /// and IndexesFailed == 0) and the dump + restore for the collection are done.
         /// </summary>
-        public bool IndexBuildComplete { get; set; }
+        public bool IndexBuildComplete
+        {
+            get => _indexBuildComplete
+                || (IndexesExpected == 0 && IndexesFailed == 0 && DumpComplete && RestoreComplete);
+            set => _indexBuildComplete = value;
+        }
+        private bool _indexBuildComplete;
         /// <summary>
         /// Count of non-unique indexes that have been created on the target collection.
         /// </summary>
