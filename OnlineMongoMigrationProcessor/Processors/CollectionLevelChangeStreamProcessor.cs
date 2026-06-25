@@ -36,22 +36,17 @@ namespace OnlineMongoMigrationProcessor
         private readonly ConcurrentDictionary<string, DateTime> _lastPerMuPersistUtc = new ConcurrentDictionary<string, DateTime>();
         private static readonly TimeSpan PerMuPersistInterval = TimeSpan.FromMinutes(5);
 
-        // Self-healing for cursors that go silent: when an idle batch returns a
-        // postBatchResumeToken identical to the one we sent in AND that token's
-        // embedded clusterTime is more than StuckCursorAgeThreshold behind wall
-        // clock, we rewind ChangeStreamStartedOn to UtcNow - StuckCursorRewindOffset
-        // and clear the resume token so the next batch opens a fresh cursor.
-        private static readonly TimeSpan StuckCursorAgeThreshold = TimeSpan.FromHours(24);
-        private static readonly TimeSpan StuckCursorRewindOffset = TimeSpan.FromHours(6);
-
         // Per-MU count of consecutive idle rounds where postBatchResumeToken did
-        // not advance. TryRecoverStuckCursor is only invoked once the streak
-        // reaches PbrtStuckRoundsThreshold; any round that produces events or
-        // advances the token resets the count to 0. The streak is also cleared
-        // after each invocation so recovery is rate-limited to once per window
-        // even when the rewind condition inside TryRecoverStuckCursor is not met.
+        // not advance. The MU is enqueued for cluster-watch unblocking once the
+        // streak reaches PbrtStuckRoundsThreshold; any round that produces events
+        // or advances the token resets the count to 0. The streak is also cleared
+        // after enqueue so we don't re-enqueue every subsequent idle round.
         private readonly ConcurrentDictionary<string, int> _consecutiveStuckRounds = new ConcurrentDictionary<string, int>();
-        private const int PbrtStuckRoundsThreshold = 10;
+        private const int PbrtStuckRoundsThreshold = 4;
+
+        // Resolves MUs whose own per-collection cursor has gone silent by walking
+        // a single cluster-wide change stream between rounds. See StuckCursorUnblocker.
+        private readonly StuckCursorUnblocker _stuckCursorUnblocker;
 
         private bool ShouldPersistMu(string muId, bool force)
         {
@@ -84,6 +79,14 @@ namespace OnlineMongoMigrationProcessor
                 connectionString,
                 false,
                 _syncBack ? null : _config.CACertContentsForSourceServer);
+
+            _stuckCursorUnblocker = new StuckCursorUnblocker(
+                _log,
+                _changeStreamMongoClient,
+                _syncBack,
+                _syncBackPrefix,
+                GetBatchDurationInSeconds,
+                (mu, updateParent) => TrySaveMigrationUnit(mu, updateParent));
         }
 
         public override void RemoveMigrationUnit(string migrationUnitId)
@@ -111,7 +114,10 @@ namespace OnlineMongoMigrationProcessor
             _lastPerMuPersistUtc.TryRemove(migrationUnitId, out _);
 
             if (!string.IsNullOrEmpty(collectionKey))
+            {
                 _consecutiveStuckRounds.TryRemove(collectionKey, out _);
+                _stuckCursorUnblocker.Remove(collectionKey);
+            }
         }
 
         protected override async Task ProcessChangeStreamsAsync(CancellationToken token)
@@ -220,6 +226,11 @@ namespace OnlineMongoMigrationProcessor
                 
                 loops++;
                 LogRoundCompletion(loops, totalKeys);
+
+                // Advance any MUs whose own cursor went silent this round by piggy-
+                // backing on a single cluster-wide change stream. This replaces the
+                // earlier rewind-based recovery, which could silently skip events.
+                await _stuckCursorUnblocker.ResolveAsync(token);
 
                 // Process any pending ResetChangeStream flags so collections aren't stuck
                 await ProcessPendingChangeStreamResetsAsync();
@@ -898,10 +909,10 @@ namespace OnlineMongoMigrationProcessor
             // [PBRT] Entry snapshot: token short-hash + decoded ts, MU error state, last-change ts. Lets us confirm what we are resuming from and verify the manual reset took effect.
             {
                 string tokIn = mu.GetResumeToken(_syncBack) ?? string.Empty;
-                string tokInHash = ShortHash(tokIn);
-                string tokInTs = TryDecodeResumeTokenTimestamp(tokIn);
+                string tokInHash = ResumeTokenInspector.ShortHash(tokIn);
+                string tokInTs = ResumeTokenInspector.DecodeUtcString(tokIn);
                 string csLastTok = mu.GetCSLastResumeTokenWithChange(_syncBack) ?? string.Empty;
-                string csLastHash = ShortHash(csLastTok);
+                string csLastHash = ResumeTokenInspector.ShortHash(csLastTok);
                 _log.WriteLine(
                     $"{_syncBackPrefix}[PBRT] WatchCollection entry {collectionKey} opLogError={mu.OpLogError} resetFlag={mu.ResetChangeStream} resumeToken[hash={tokInHash} ts={tokInTs}] csLastTokenHash={csLastHash} csLastChange={mu.GetCSLastChangeUTCTime(_syncBack):o} cursorUtc={mu.GetCursorUtcTimestamp(_syncBack):o}",
                     LogType.Debug);
@@ -978,7 +989,7 @@ namespace OnlineMongoMigrationProcessor
 
                     // [PBRT] Cursor created — confirm timing and which resume strategy is in effect (ResumeAfter vs StartAtOperationTime).
                     string strat = options.ResumeAfter != null
-                        ? $"ResumeAfter[hash={ShortHash(options.ResumeAfter.ToJson())}]"
+                        ? $"ResumeAfter[hash={ResumeTokenInspector.ShortHash(options.ResumeAfter.ToJson())}]"
                         : options.StartAtOperationTime != null
                             ? $"StartAtOperationTime[{options.StartAtOperationTime}]"
                             : "None";
@@ -1349,7 +1360,7 @@ namespace OnlineMongoMigrationProcessor
                             {
                                 tmpFirstEventLogged = true;
                                 _log.WriteLine(
-                                    $"{_syncBackPrefix}[PBRT] First event {collectionKey} op={change.OperationType} docKey={change.DocumentKey?.ToJson() ?? "<null>"} eventTokenHash={ShortHash(change.ResumeToken.ToJson())} eventTs={GetChangeTimestampUtc(change):o}",
+                                    $"{_syncBackPrefix}[PBRT] First event {collectionKey} op={change.OperationType} docKey={change.DocumentKey?.ToJson() ?? "<null>"} eventTokenHash={ResumeTokenInspector.ShortHash(change.ResumeToken.ToJson())} eventTs={GetChangeTimestampUtc(change):o}",
                                     LogType.Debug);
                             }
 
@@ -1455,10 +1466,18 @@ namespace OnlineMongoMigrationProcessor
                             string? tokenJson = postBatchToken?.ToJson();
                             var (_, currentResumeToken, _, _) = GetResumeParameters(mu);
 
+                            // TEMP-STUCK-EMULATION: force the "PBRT did not advance" branch
+                            // for collection_0001 to exercise the StuckCursorUnblocker path.
+                            // REMOVE BEFORE MERGE.
+                            //if (string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal))
+                            //{
+                            //    tokenJson = currentResumeToken;
+                            //}
+
                             // [PBRT] Idle-round summary: did cursor produce anything? did postBatchResumeToken advance vs what we sent in?
-                            string inHash = ShortHash(currentResumeToken);
-                            string outHash = ShortHash(tokenJson ?? string.Empty);
-                            string outTs = TryDecodeResumeTokenTimestamp(tokenJson ?? string.Empty);
+                            string inHash = ResumeTokenInspector.ShortHash(currentResumeToken);
+                            string outHash = ResumeTokenInspector.ShortHash(tokenJson ?? string.Empty);
+                            string outTs = ResumeTokenInspector.DecodeUtcString(tokenJson ?? string.Empty);
                             bool willSaveToken = !string.IsNullOrEmpty(tokenJson) && tokenJson != currentResumeToken;
                             _log.WriteLine(
                                 $"{_syncBackPrefix}[PBRT] idleRound {collectionKey} moveNext={tmpMoveNextCalls} withBatch={tmpMoveNextWithBatch} rawEvents={tmpRawEventsRead} postBatchToken[hash={outHash} ts={outTs}] in[hash={inHash}] advanced={(inHash != outHash)} willSaveToken={willSaveToken} postBatchNull={(postBatchToken == null)}",
@@ -1472,7 +1491,10 @@ namespace OnlineMongoMigrationProcessor
                             // ChangeStreamStartedOn for hours.
                             if (!string.IsNullOrEmpty(tokenJson) && tokenJson != currentResumeToken)
                             {
-                                SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
+                                DateTime stampTs = ResumeTokenInspector.TryDecodeUtc(tokenJson!, out DateTime decodedTs)
+                                    ? decodedTs
+                                    : DateTime.UtcNow;
+                                SetResumeParameters(mu, stampTs, tokenJson, _syncBack);
                                 _consecutiveStuckRounds[collectionKey] = 0;
                             }
                             else
@@ -1482,16 +1504,14 @@ namespace OnlineMongoMigrationProcessor
                                 if (stuck >= PbrtStuckRoundsThreshold)
                                 {
                                     // PBRT did not advance for {stuck} consecutive idle rounds — cursor
-                                    // may be wedged. If PBRT clusterTime lags wall clock by more than
-                                    // StuckCursorAgeThreshold, rewind ChangeStreamStartedOn so the next
-                                    // batch opens a fresh cursor.
+                                    // may be wedged. Enqueue for cluster-watch-based unblock at the end
+                                    // of the round; do NOT rewind here (rewinding could skip events).
                                     _log.WriteLine(
-                                        $"{_syncBackPrefix}[PBRT] {collectionKey} PBRT stuck for {stuck} consecutive idle rounds; invoking TryRecoverStuckCursor.",
+                                        $"{_syncBackPrefix}[PBRT] {collectionKey} PBRT stuck for {stuck} consecutive idle rounds; enqueueing for cluster-watch unblock.",
                                         LogType.Info);
-                                    TryRecoverStuckCursor(mu, collectionKey, tokenJson);
-                                    // Reset regardless of whether the rewind condition (age > threshold)
-                                    // was met inside TryRecoverStuckCursor, so we don't re-invoke and
-                                    // re-log every subsequent idle round when the cursor isn't ancient.
+                                    _stuckCursorUnblocker.Enqueue(mu, collectionKey, tokenJson);
+                                    // Reset so we don't keep enqueueing every subsequent idle round
+                                    // while the entry is still pending resolution.
                                     _consecutiveStuckRounds[collectionKey] = 0;
                                 }
                             }
@@ -1510,7 +1530,7 @@ namespace OnlineMongoMigrationProcessor
                         _consecutiveStuckRounds[collectionKey] = 0;
                         var (_, savedTok, _, _) = GetResumeParameters(mu);
                         _log.WriteLine(
-                            $"{_syncBackPrefix}[PBRT] eventsRound {collectionKey} moveNext={tmpMoveNextCalls} withBatch={tmpMoveNextWithBatch} rawEvents={tmpRawEventsRead} totalEventCount={accumulatedChangesInColl.TotalEventCount} savedTokenAfterFlush[hash={ShortHash(savedTok)} ts={TryDecodeResumeTokenTimestamp(savedTok)}]",
+                            $"{_syncBackPrefix}[PBRT] eventsRound {collectionKey} moveNext={tmpMoveNextCalls} withBatch={tmpMoveNextWithBatch} rawEvents={tmpRawEventsRead} totalEventCount={accumulatedChangesInColl.TotalEventCount} savedTokenAfterFlush[hash={ResumeTokenInspector.ShortHash(savedTok)} ts={ResumeTokenInspector.DecodeUtcString(savedTok)}]",
                             LogType.Debug);
                     }
                 }
@@ -1645,7 +1665,7 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Replace:
                         if (result == null || result.IsBsonNull)
                         {
-                            _log.WriteLine($"{_syncBackPrefix}Processing {opType} operation for {sourceCollection.CollectionNamespace} with document key {documentKey}. No document found on source, deleting it from target.", LogType.Info);
+                            _log.WriteLine($"{_syncBackPrefix}Processing {opType} operation for {sourceCollection.CollectionNamespace} with document key {documentKey}. No document found on source, deleting it from target.", LogType.Debug);
                             try
                             {
                                 // Use DocumentKey-based filter for sharded collections
@@ -1809,74 +1829,6 @@ namespace OnlineMongoMigrationProcessor
             var renderArgs = new RenderArgs<BsonDocument>(documentSerializer, serializerRegistry);
             return filter.Render(renderArgs);
 #endif
-        }
-
-        // [PBRT] Short stable identifier for a resume token (last 12 chars) so we can compare tokens across rounds without dumping the full BSON.
-        private static string ShortHash(string token)
-        {
-            if (string.IsNullOrEmpty(token)) return "<empty>";
-            int len = token.Length;
-            return len <= 12 ? token : token.Substring(len - 12);
-        }
-
-        // Detect a wedged collection.watch cursor and rewind it. Called from the
-        // idle-round finally block when the postBatchResumeToken is byte-identical
-        // to the one we sent in (i.e. the server reported no progress at all).
-        // If the PBRT's embedded clusterTime is more than StuckCursorAgeThreshold
-        // behind UtcNow we treat the cursor as stuck and:
-        //   - back up ChangeStreamStartedOn into OriginalChangeStreamStartedOn (once)
-        //   - set ChangeStreamStartedOn = UtcNow - StuckCursorRewindOffset (direct
-        //     field assignment because SetChangeStreamStartedOn is now write-once)
-        //   - clear ResumeToken and CSLast* so the next batch falls through to the
-        //     StartAtOperationTime branch of DetermineResumeStrategy
-        //   - reset CursorUtcTimestamp to MinValue so the timeStamp-based path 1
-        //     in DetermineResumeStrategy does not preempt the StartedOn-based
-        //     path 4 we want to fire next batch.
-        private void TryRecoverStuckCursor(MigrationUnit mu, string collectionKey, string? postBatchTokenJson)
-        {
-            if (string.IsNullOrEmpty(postBatchTokenJson)) return;
-
-            string tsStr = TryDecodeResumeTokenTimestamp(postBatchTokenJson);
-            if (!DateTime.TryParse(
-                    tsStr,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
-                    out DateTime pbrtTs))
-            {
-                return;
-            }
-
-            DateTime now = DateTime.UtcNow;
-            TimeSpan age = now - pbrtTs;
-            if (age <= StuckCursorAgeThreshold) return;
-
-            DateTime newStartedOn = now - StuckCursorRewindOffset;
-            mu.ForceResetChangeStreamStartedOn(_syncBack, newStartedOn);
-            mu.SetCSLastChange(_syncBack, null, null);
-            mu.SetCursorUtcTimestamp(_syncBack, DateTime.MinValue);
-
-            _log.WriteLine(
-                $"{_syncBackPrefix}[recover] Stuck cursor detected for {collectionKey}: PBRT clusterTime={pbrtTs:o} is {age.TotalHours:F1}h behind wall clock. Forward ChangeStreamStartedOn to {newStartedOn:o}; resume token cleared. OriginalChangeStreamStartedOn={(mu.GetOriginalChangeStreamStartedOn(_syncBack)?.ToString("o") ?? "<null>")}",
-                LogType.Warning);
-        }
-
-        // [PBRT] Decode the leading 4-byte unix timestamp embedded in a v1 resume token (_data hex starts with type byte 0x82 then 4 bytes BE seconds). Returns "?" if not parseable.
-        private static string TryDecodeResumeTokenTimestamp(string tokenJson)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(tokenJson)) return "?";
-                var doc = BsonDocument.Parse(tokenJson);
-                if (!doc.Contains("_data")) return "?";
-                string hex = doc["_data"].AsString;
-                if (hex.Length < 10) return "?";
-                uint seconds = Convert.ToUInt32(hex.Substring(2, 8), 16);
-                return DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime.ToString("o");
-            }
-            catch
-            {
-                return "?";
-            }
         }
 
     }

@@ -416,7 +416,9 @@ namespace OnlineMongoMigrationProcessor
                                 if (postBatchToken != null)
                                 {
                                     state.LatestResumeToken = postBatchToken.ToJson();
-                                    state.LatestTimestamp = DateTime.UtcNow;
+                                    state.LatestTimestamp = ResumeTokenInspector.TryDecodeUtc(state.LatestResumeToken, out DateTime decodedTs)
+                                        ? decodedTs
+                                        : DateTime.UtcNow;
 
                                     // [PBRT] Idle-round postBatchResumeToken: did the server advance the token beyond what we sent in?
                                     string inHash = ShortHash(tokenJson);
@@ -539,7 +541,9 @@ namespace OnlineMongoMigrationProcessor
                                     if (postBatchToken != null)
                                     {
                                         state.LatestResumeToken = postBatchToken.ToJson();
-                                        state.LatestTimestamp = DateTime.UtcNow;
+                                        state.LatestTimestamp = ResumeTokenInspector.TryDecodeUtc(state.LatestResumeToken, out DateTime decodedTs)
+                                            ? decodedTs
+                                            : DateTime.UtcNow;
                                     }
                                 }
                                 catch (Exception ex)
