@@ -13,16 +13,20 @@ namespace OnlineMongoMigrationProcessor.Models
     }
 
     /// <summary>
-    /// Records the most recent user / system action that affected change stream state.
-    /// Consumed by <see cref="Helpers.ChangeStreamTransitionHelper"/> to produce accurate
-    /// bootstrap log messages and avoid claiming a scope transition when none occurred.
+    /// Records a user / system action affecting change-stream state that is queued for the
+    /// next change-stream worker bootstrap. Set at the user-action site (UI handlers,
+    /// scope-transition save) or by <see cref="Helpers.ChangeStreamTransitionHelper"/>
+    /// reset helpers, and cleared once the new worker has bootstrapped and emitted the
+    /// contextual warning. Persisted on <see cref="MigrationJob"/> so the queued action
+    /// survives an application restart and can be resumed automatically.
     /// </summary>
-    public enum ChangeStreamAction
+    public enum PendingChangeStreamAction
     {
         None = 0,
         CollectionToServer = 1,
         ServerToCollection = 2,
         SyncBackEnabled = 3,
-        ForwardSyncEnabled = 4
+        ForwardSyncEnabled = 4,
+        Cutover = 5
     }
 }

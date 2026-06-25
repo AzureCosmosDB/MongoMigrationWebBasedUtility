@@ -605,6 +605,10 @@ namespace OnlineMongoMigrationProcessor
                 _isCSProcessing = true;
             }
 
+            // Surface "processor is in its main loop" to the UI so flip handlers can poll
+            // for the graceful auto-close to complete before dispatching the next direction.
+            MigrationJobContext.IsChangeStreamProcessorRunning = true;
+
             _log.WriteLine($"{_syncBackPrefix} RunChangeStreamProcessorForAllCollections invoked", LogType.Debug);
             try
             {
@@ -631,6 +635,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     _isCSProcessing = false;
                 }
+                MigrationJobContext.IsChangeStreamProcessorRunning = false;
             }
         }
 

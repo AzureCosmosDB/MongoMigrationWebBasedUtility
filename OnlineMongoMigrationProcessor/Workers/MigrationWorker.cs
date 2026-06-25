@@ -2225,7 +2225,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 _log.WriteLine($"Error in reading log. Orginal log backed up as {logfile}", LogType.Error);
             }
-            _log.WriteLine($"Job {MigrationJobContext.CurrentlyActiveJob.Id} - JobType: {MigrationJobContext.CurrentlyActiveJob.JobType} started on {MigrationJobContext.CurrentlyActiveJob.StartedOn} (UTC)", LogType.Warning);
+            _log.WriteLine($"Processing Job {MigrationJobContext.CurrentlyActiveJob.Id} (started on {MigrationJobContext.CurrentlyActiveJob.StartedOn} (UTC)) - JobType: {MigrationJobContext.CurrentlyActiveJob.JobType} ", LogType.Warning);
             _log.SetJob(MigrationJobContext.CurrentlyActiveJob);
             _log.WriteLine($"Working folder is {Environment.GetEnvironmentVariable("ResourceDrive")}");
             MigrationJobContext.InitializeLog(_log);
@@ -2470,7 +2470,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             
             string logfile = _log.Init(MigrationJobContext.CurrentlyActiveJob.Id);
             _log.SetJob(MigrationJobContext.CurrentlyActiveJob); // Set job reference for log level filtering
-            _log.WriteLine($"SyncBack: {MigrationJobContext.CurrentlyActiveJob.Id} started on {MigrationJobContext.CurrentlyActiveJob.StartedOn} (UTC)");
+
 
             MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack = true;
             MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);

@@ -25,39 +25,44 @@
             <i class="bi bi-arrow-left"></i>
         </button>
         @CurrentlyLoadedMigrationJob?.Name - Job Status
-        @if (IsFlipCooldownActive())
-        {
-            <span class="badge bg-warning text-dark ms-2" title="Cooling period before starting @_flipCooldownTargetLabel">
-                <i class="bi bi-hourglass-split"></i> Cooling for @GetFlipCooldownSecondsRemaining()s before @_flipCooldownTargetLabel
-            </span>
-        }
     </h3>
     <div class="d-flex align-items-center mb-3">
 
-        @if (IsPauseCooldownActive() && !JobManager.IsControlledPauseRequested())
+        @if (IsFlipCooldownActive() || (IsPauseCooldownActive() && !JobManager.IsControlledPauseRequested()))
         {
-            <span class="badge bg-warning text-dark mx-2" title="Cooling down after pause.">
-                <i class="bi bi-hourglass-split"></i> Cooling for @GetPauseCooldownSecondsRemaining()s
+            <span class="badge bg-warning text-dark mx-2"
+                  title="@(IsFlipCooldownActive() ? $"Cooling period before starting {_flipCooldownTargetLabel}" : "Cooling down after pause.")">
+                <i class="bi bi-hourglass-split"></i>
+                @if (IsFlipCooldownActive())
+                {
+                    <text> Cooling for @GetFlipCooldownSecondsRemaining()s before @_flipCooldownTargetLabel</text>
+                }
+                else
+                {
+                    <text> Cooling for @GetPauseCooldownSecondsRemaining()s</text>
+                }
             </span>
         }
-        else if (IsResumeEnabled())
+        else
         {
-            <div class="btn-group mx-2">
-                <button class="btn btn-primary dropdown-toggle" type="button" id="resumeJobDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-                    Resume Job
-                </button>
-                <ul class="dropdown-menu" aria-labelledby="resumeJobDropdown">
-                    <li><a class="dropdown-item" @onclick="ResumeJobWithNewConnectionString">With Updated Connection Strings</a></li>
-                    @if (CurrentlyLoadedMigrationJob != null && !string.IsNullOrEmpty(MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id]) && !string.IsNullOrEmpty(MigrationJobContext.TargetConnectionString[CurrentlyLoadedMigrationJob.Id]))
-                    {
-                        <li><a class="dropdown-item" @onclick="ResumeJobWithExistingConnectionString">With Existing Connection Strings</a></li>
-                    }
-                </ul>
-            </div>
-        }
+            @if (IsResumeEnabled())
+            {
+                <div class="btn-group mx-2">
+                    <button class="btn btn-primary dropdown-toggle" type="button" id="resumeJobDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                        Resume Job
+                    </button>
+                    <ul class="dropdown-menu" aria-labelledby="resumeJobDropdown">
+                        <li><a class="dropdown-item" @onclick="ResumeJobWithNewConnectionString">With Updated Connection Strings</a></li>
+                        @if (CurrentlyLoadedMigrationJob != null && !string.IsNullOrEmpty(MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id]) && !string.IsNullOrEmpty(MigrationJobContext.TargetConnectionString[CurrentlyLoadedMigrationJob.Id]))
+                        {
+                            <li><a class="dropdown-item" @onclick="ResumeJobWithExistingConnectionString">With Existing Connection Strings</a></li>
+                        }
+                    </ul>
+                </div>
+            }
 
-        @if (IsPauseEnabled())
-        {
+            @if (IsPauseEnabled())
+            {
             @* Pause Job - with dropdown for controlled pause if applicable *@
             @if (CurrentlyLoadedMigrationJob != null && JobManager.IsControlledPauseApplicable(CurrentlyLoadedMigrationJob.JobType, CurrentlyLoadedMigrationJob))
             {
@@ -76,11 +81,25 @@
                 <button class="btn btn-primary mx-2" title="Pause Job" @onclick="PauseJobImmediate">Pause Job</button>
             }
             
-            @* Display controlled pause status *@
-            @if (JobManager.IsControlledPauseRequested() && IsJobRunning())
+            @* Display drain status - context-aware: shows the pending post-drain action
+               (Cut Over / Sync Back / Forward Sync) when one was queued by the UI, otherwise
+               the generic "Pausing..." label for a plain controlled pause. Surfaced for both
+               the abrupt controlled-pause path and the graceful change-stream auto-close path
+               (Cutover / SyncBack / RestartForwardCS flip handlers), since both leave the
+               worker briefly winding down a batch and the user otherwise sees no progress. *@
+            @if ((JobManager.IsControlledPauseRequested() || JobManager.IsChangeStreamAutoCloseRequested()) && IsJobRunning())
             {
-                <span class="badge bg-warning text-dark mx-2" title="Controlled pause in progress - waiting for active chunks to complete">
-                    <i class="bi bi-hourglass-split"></i> Pausing...
+                var isGraceful = JobManager.IsChangeStreamAutoCloseRequested();
+                var verb = isGraceful ? "Finishing batch before" : "Pausing for";
+                var pendingLabel = CurrentlyLoadedMigrationJob?.PendingAction switch
+                {
+                    OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.Cutover => $"{verb} Cut Over...",
+                    OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.SyncBackEnabled => $"{verb} Sync Back...",
+                    OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.ForwardSyncEnabled => $"{verb} Forward Sync...",
+                    _ => isGraceful ? "Finishing batch..." : "Pausing..."
+                };
+                <span class="badge bg-warning text-dark mx-2" title="Waiting for the in-flight change-stream batch to complete before applying the switch-over.">
+                    <i class="bi bi-hourglass-split"></i> @pendingLabel
                 </span>
             }
             
@@ -134,6 +153,7 @@
                     style="border: 1px solid;">
                 <i class="bi @((CurrentlyLoadedMigrationJob?.AutoRefreshEnabled ?? true) ? "bi-pause-fill" : "bi-play-fill")"></i>
             </button>
+        }
         }
 
     </div>
@@ -448,7 +468,8 @@
     </nav>
 }
 
-@if(CurrentlyLoadedMigrationJob.MigrationUnitBasics != null && CurrentlyLoadedMigrationJob.MigrationUnitBasics.Any() && (IsPauseEnabled() || IsResumeEnabled()))
+@if(CurrentlyLoadedMigrationJob.MigrationUnitBasics != null && CurrentlyLoadedMigrationJob.MigrationUnitBasics.Any() && (IsPauseEnabled() || IsResumeEnabled())
+    && !IsFlipCooldownActive() && !(IsPauseCooldownActive() && !JobManager.IsControlledPauseRequested()))
 {
     <div class="d-flex align-items-center mb-3 mt-4">
         <button class="btn btn-primary mx-2" title="Add or remove collections with per-collection options. Be sure to pause the job before doing so." @onclick="OpenManageCollections">Manage Collections</button>
@@ -1442,7 +1463,7 @@ else if (@_showLogBackupFile)
             // No state reset needed here - TryTransitionCollectionToServerResumeCheckpoint
             // performs the actual bootstrap when the worker starts. Just record the action
             // so the bootstrap log accurately reflects what triggered it.
-            CurrentlyLoadedMigrationJob.CSLastAction = OnlineMongoMigrationProcessor.Models.ChangeStreamAction.CollectionToServer;
+            CurrentlyLoadedMigrationJob.PendingAction = OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.CollectionToServer;
         }
 
         if (!string.IsNullOrEmpty(sourceConnectionString))
@@ -1653,14 +1674,14 @@ else if (@_showLogBackupFile)
 
     private void InitSyncBackJob()
     {
-        _message = "You are about to initiate cutover and begin syncing data back to the source. Proceed only if all changes from the source have already been replicated to the target. This action is irreversible. Are you sure you want to cutover?";
+        _message = "You are about to initiate cutover and begin syncing data back to the source. Proceed only if all changes from the source have already been replicated to the target. A minimum of 2 consecutive change-stream batches with Last Batch Total Changes = 0 is required to be confident the forward sync has fully drained; if that condition is not met, please reconsider this decision. This action is irreversible. Are you sure you want to cutover?";
         _yesNoDiaLogType = YesNoDialog.Category.SyncBackNot;
         _yesNoDialogOpen = true;      
     }
 
     private void InitRestartForwardCS()
     {
-        _message = "This will stop sync-back and restart the forward change stream from the current time. Change Stream StartedOn for the job and all collections will be reset to now, and existing forward resume tokens will be cleared. Source-to-target replication will resume as a regular online migration. Are you sure?";
+        _message = "This will stop sync-back and restart the forward change stream from the current time. Change Stream StartedOn for the job and all collections will be reset to now, and existing forward resume tokens will be cleared. Source-to-target replication will resume as a regular online migration. A minimum of 2 consecutive sync-back batches with Last Batch Total Changes = 0 is required to be confident the reverse sync has fully drained; if that condition is not met, please reconsider this decision. Are you sure?";
         _yesNoDiaLogType = YesNoDialog.Category.RestartForwardCSNot;
         _yesNoDialogOpen = true;
     }
@@ -1669,12 +1690,12 @@ else if (@_showLogBackupFile)
     {
         if (CurrentlyLoadedMigrationJob?.ProcessingSyncBack ?? false)
         {
-            _message = "You can't resume a job after its completed. Are you sure you want to complete the job?";
+            _message = "You can't resume a job after its completed. A minimum of 2 consecutive sync-back batches with Last Batch Total Changes = 0 is required to be confident the reverse sync has fully drained; if that condition is not met, please reconsider this decision. Are you sure you want to complete the job?";
             _yesNoDiaLogType = YesNoDialog.Category.CompleteNot;
         }
         else
         {
-            _message = "You can't resume a job after its cutover. Are you sure you want to cutover?";
+            _message = "You can't resume a job after its cutover. A minimum of 2 consecutive change-stream batches with Last Batch Total Changes = 0 is required to be confident the forward sync has fully drained; if that condition is not met, please reconsider this decision. Are you sure you want to cutover?";
             _yesNoDiaLogType = YesNoDialog.Category.CutoverNot;
         }
         _yesNoDialogOpen = true;
@@ -1792,7 +1813,7 @@ else if (@_showLogBackupFile)
 
 
 
-    private void YesNoDialogSubmit(YesNoDialog.YesNoDialogResult result)
+    private async Task YesNoDialogSubmit(YesNoDialog.YesNoDialogResult result)
     {
         _yesNoDialogOpen = false;
 
@@ -1801,42 +1822,82 @@ else if (@_showLogBackupFile)
             if (result.DiaLogType == YesNoDialog.Category.CutoverNot || result.DiaLogType == YesNoDialog.Category.CompleteNot)
             {
                 MigrationJobContext.AddVerboseLog($"YesNoDialogSubmit {result.DiaLogType}");
-                JobManager.StopMigration();                
+
+                // Graceful drain: request change-stream auto-close (no cts.Cancel), wait
+                // for the in-flight batch/round to complete and the processor's outer loop
+                // to exit, then mark the job terminal. We deliberately do NOT call
+                // StopMigration here — that path is abrupt (cts.Cancel) and kills the
+                // in-flight Task.WhenAll. PendingAction is persisted so a mid-drain app
+                // restart can resume the cutover.
                 if (CurrentlyLoadedMigrationJob != null)
                 {
-                    CurrentlyLoadedMigrationJob.IsCancelled = true;
-                    CurrentlyLoadedMigrationJob.IsCompleted = true;
+                    CurrentlyLoadedMigrationJob.PendingAction = OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.Cutover;
+                    MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob);
                 }
+                MigrationJobContext.RequestChangeStreamAutoClose("UI: Cut Over");
+                await InvokeAsync(StateHasChanged);
 
-                if (MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob))
-                    return;
+                try
+                {
+                    await WaitForChangeStreamProcessorExitAsync();
+                    MigrationJobContext.ResetChangeStreamAutoClose();
 
-                _refreshTimer = null;
+                    if (CurrentlyLoadedMigrationJob != null)
+                    {
+                        CurrentlyLoadedMigrationJob.IsCancelled = true;
+                        CurrentlyLoadedMigrationJob.IsCompleted = true;
+                        CurrentlyLoadedMigrationJob.PendingAction = OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.None;
+                        MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob);
+                    }
+                    _refreshTimer = null;
+                }
+                finally
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+                return;
             }
             else if (result.DiaLogType == YesNoDialog.Category.SyncBackNot)
             {
-                //fire and forget
                 if (CurrentlyLoadedMigrationJob != null)
                 {
-                    // Flip forward -> sync-back: reset sync-back trackers at the flip moment so
-                    // the new cycle replays from now, regardless of any stale state from a
-                    // previous sync-back session. The regular SyncBackToSource path then runs
-                    // unchanged.
-                    ChangeStreamTransitionHelper.ResetSyncBackChangeStreamForReEnable(null, CurrentlyLoadedMigrationJob);
+                    // Graceful flip (forward -> sync-back): request change-stream auto-close
+                    // (no cts.Cancel), wait for the in-flight forward batch to complete and
+                    // the processor's outer loop to exit, then open the sync-back cursor.
+                    // The switch-over time captured AFTER the wait is the actual moment
+                    // between cursors and is used as the new SyncBackChangeStreamStartedOn.
+                    // PendingAction is persisted so a mid-drain app restart can resume the
+                    // flip via JobManager auto-resume. We do NOT call StopMigration here —
+                    // SyncBackToSource calls it internally once the worker is already idle.
+                    var job = CurrentlyLoadedMigrationJob;
+                    job.PendingAction = OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.SyncBackEnabled;
+                    MigrationJobContext.SaveMigrationJob(job);
+                    MigrationJobContext.RequestChangeStreamAutoClose("UI: Sync Back");
+                    await InvokeAsync(StateHasChanged);
 
-                    // Surface the cooldown in the page title so the user can see why the new
-                    // direction has not started yet. The 30s window lets in-flight forward
-                    // cursors close before the reverse cursor opens.
+                    await WaitForChangeStreamProcessorExitAsync();
+                    MigrationJobContext.ResetChangeStreamAutoClose();
+
+                    var switchOverAt = DateTime.UtcNow;
+                    ChangeStreamTransitionHelper.ResetSyncBackChangeStreamForReEnable(null, job, switchOverAt);
+
+                    // 30s safety buffer after drain to let any Atlas-side cursor state
+                    // for the closed forward cursor settle before the reverse opens.
                     StartFlipCooldown(30, "sync-back");
+                    await InvokeAsync(StateHasChanged);
 
-                     _ = Task.Run(async () =>
+                    _ = Task.Run(async () =>
                     {
                         await Task.Delay(TimeSpan.FromSeconds(30));
                         await JobManager.SyncBackToSource(MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], MigrationJobContext.CurrentlyActiveJob);
+
+                        // The Refresh timer disposed itself when the previous worker's log
+                        // bucket flipped to backup-file mode. Re-arm it now that a new worker
+                        // is running so the UI keeps streaming sync-back logs without F5.
+                        await InvokeAsync(StartAutoRefresh);
                     });
                 }
-                if (MigrationJobContext.SaveMigrationJob(CurrentlyLoadedMigrationJob))
-                    return;
+                return;
             }
             else if (result.DiaLogType == YesNoDialog.Category.RestartForwardCSNot)
             {
@@ -1847,24 +1908,39 @@ else if (@_showLogBackupFile)
                     var targetCs = MigrationJobContext.TargetConnectionString[CurrentlyLoadedMigrationJob.Id] ?? string.Empty;
                     var job = CurrentlyLoadedMigrationJob;
 
-                    // Flip sync-back -> forward: stop the running sync-back worker, reset
-                    // forward trackers at the flip moment, flip the direction flag, then
-                    // call the regular forward start path.
-                    JobManager.StopMigration();
-                    ChangeStreamTransitionHelper.ResetForwardChangeStreamForReEnable(null, job);
+                    // Graceful flip (sync-back -> forward): request change-stream auto-close
+                    // (no cts.Cancel), wait for the in-flight sync-back batch to complete
+                    // and the processor's outer loop to exit, then open the forward cursor.
+                    // switchOverAt captured AFTER the wait drives the new ChangeStreamStartedOn.
+                    // PendingAction is persisted so a mid-drain app restart can resume the
+                    // flip via JobManager auto-resume. StartMigration internally calls
+                    // StopMigration once the worker is already idle.
+                    job.PendingAction = OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.ForwardSyncEnabled;
+                    MigrationJobContext.SaveMigrationJob(job);
+                    MigrationJobContext.RequestChangeStreamAutoClose("UI: Restart Forward Sync");
+                    await InvokeAsync(StateHasChanged);
+
+                    await WaitForChangeStreamProcessorExitAsync();
+                    MigrationJobContext.ResetChangeStreamAutoClose();
+
+                    var switchOverAt = DateTime.UtcNow;
+                    ChangeStreamTransitionHelper.ResetForwardChangeStreamForReEnable(null, job, switchOverAt);
                     job.ProcessingSyncBack = false;
                     MigrationJobContext.SaveMigrationJob(job);
 
-                    // Surface the cooldown in the page title so the user can see why the new
-                    // direction has not started yet. The 30s window lets in-flight sync-back
-                    // cursors close before the forward cursor opens.
                     StartFlipCooldown(30, "forward sync");
+                    await InvokeAsync(StateHasChanged);
 
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(TimeSpan.FromSeconds(30));
                         await JobManager.StartMigration(
                             job, sourceCs, targetCs, job.NameSpaces ?? string.Empty, job.JobType, Helper.IsOnline(job));
+
+                        // The Refresh timer disposed itself when the previous worker's log
+                        // bucket flipped to backup-file mode. Re-arm it now that a new worker
+                        // is running so the UI keeps streaming forward-sync logs without F5.
+                        await InvokeAsync(StartAutoRefresh);
                     });
                 }
                 return;
@@ -2084,6 +2160,35 @@ else if (@_showLogBackupFile)
     {
         if (!_flipCooldownUntil.HasValue) return 0;
         return Math.Max(0, (int)Math.Ceiling((_flipCooldownUntil.Value - DateTime.UtcNow).TotalSeconds));
+    }
+
+    // Poll-wait for the change-stream processor's outer loop to exit after a graceful
+    // auto-close was requested. Returns when IsChangeStreamProcessorRunning flips false
+    // or when the timeout elapses. Deliberately a tight 500ms tick so flip UI feels
+    // responsive once the in-flight batch ends.
+    //
+    // Timeout is derived from config: ChangeStreamBatchDuration (max per-batch duration,
+    // default 120s) + a 60s buffer for post-batch unwind (Task.WhenAll, drain logs, the
+    // 5s inter-batch sleep that may run if the safe-point check just missed, and the
+    // finally that clears IsChangeStreamProcessorRunning). If config can't be loaded
+    // we fall back to 3 min, which matches the historical conservative default.
+    private async Task WaitForChangeStreamProcessorExitAsync()
+    {
+        int batchDurationSec = 120;
+        try
+        {
+            var cfg = new OnlineMongoMigrationProcessor.MigrationSettings();
+            cfg.Load();
+            if (cfg.ChangeStreamBatchDuration > 0) batchDurationSec = cfg.ChangeStreamBatchDuration;
+        }
+        catch { }
+
+        var timeout = TimeSpan.FromSeconds((batchDurationSec *2) + 60);
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline && MigrationJobContext.IsChangeStreamProcessorRunning)
+        {
+            await Task.Delay(500);
+        }
     }
 
     public void Dispose()

@@ -62,8 +62,21 @@ namespace MongoMigrationWebApp.Service
                     var mj= GetMigrationJobById(migrationJobIds[0]);
                     if (mj == null)
                         return;
-                        
-                    Helper.LogToFile($"Step1 : {mj.IsStarted}-{mj.IsCompleted} -{string.IsNullOrEmpty(MigrationJobContext.SourceConnectionString[mj.Id])} - {string.IsNullOrEmpty(MigrationJobContext.TargetConnectionString[mj.Id])} ");
+
+                    Helper.LogToFile($"Step1 : {mj.IsStarted}-{mj.IsCompleted} -{string.IsNullOrEmpty(MigrationJobContext.SourceConnectionString[mj.Id])} - {string.IsNullOrEmpty(MigrationJobContext.TargetConnectionString[mj.Id])} - pending={mj.PendingAction}");
+
+                    // Cutover finalization does not need connection strings or a running worker;
+                    // if the app died after the user confirmed Cut Over but before the job was
+                    // marked terminal, complete it now.
+                    if (mj.IsStarted && !mj.IsCompleted && mj.PendingAction == OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.Cutover)
+                    {
+                        Helper.LogToFile("Resuming Cutover after restart: marking job complete.");
+                        mj.IsCancelled = true;
+                        mj.IsCompleted = true;
+                        mj.PendingAction = OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.None;
+                        MigrationJobContext.SaveMigrationJob(mj);
+                        return;
+                    }
 
                     if (mj.IsStarted && !mj.IsCompleted && string.IsNullOrEmpty(MigrationJobContext.SourceConnectionString[mj.Id]) && string.IsNullOrEmpty(MigrationJobContext.TargetConnectionString[mj.Id]))
                     {
@@ -85,9 +98,29 @@ namespace MongoMigrationWebApp.Service
                                     MigrationJobContext.SourceConnectionString[mj.Id] = sourceConnectionString;
                                     MigrationJobContext.TargetConnectionString[mj.Id] = targetConnectionString;
 
-                                    Helper.LogToFile("Job Starting");
-
-                                    StartMigration(mj, sourceConnectionString, targetConnectionString, mj.NameSpaces ?? string.Empty, mj.JobType, Helper.IsOnline(mj));
+                                    // Route based on persisted PendingAction so a flip queued
+                                    // before the restart resumes in the right direction with
+                                    // a fresh switch-over timestamp. The bootstrap warning
+                                    // emitted by the worker's change-stream processor (via
+                                    // PendingAction) provides the user-visible "resumed"
+                                    // message; no extra log call is needed here.
+                                    switch (mj.PendingAction)
+                                    {
+                                        case OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.SyncBackEnabled:
+                                            OnlineMongoMigrationProcessor.Helpers.ChangeStreamTransitionHelper.ResetSyncBackChangeStreamForReEnable(null, mj, DateTime.UtcNow);
+                                            SyncBackToSource(sourceConnectionString, targetConnectionString, mj);
+                                            break;
+                                        case OnlineMongoMigrationProcessor.Models.PendingChangeStreamAction.ForwardSyncEnabled:
+                                            OnlineMongoMigrationProcessor.Helpers.ChangeStreamTransitionHelper.ResetForwardChangeStreamForReEnable(null, mj, DateTime.UtcNow);
+                                            mj.ProcessingSyncBack = false;
+                                            MigrationJobContext.SaveMigrationJob(mj);
+                                            StartMigration(mj, sourceConnectionString, targetConnectionString, mj.NameSpaces ?? string.Empty, mj.JobType, Helper.IsOnline(mj));
+                                            break;
+                                        default:
+                                            Helper.LogToFile("Job Starting");
+                                            StartMigration(mj, sourceConnectionString, targetConnectionString, mj.NameSpaces ?? string.Empty, mj.JobType, Helper.IsOnline(mj));
+                                            break;
+                                    }
 
                                     Helper.LogToFile("Job Started");
                                 }
@@ -314,6 +347,15 @@ namespace MongoMigrationWebApp.Service
         public bool IsControlledPauseRequested()
         {
             return MigrationJobContext.ControlledPauseRequested;
+        }
+
+        /// <summary>
+        /// Gets whether graceful change-stream auto-close is currently requested
+        /// (set by UI flip handlers — Cutover / SyncBack / RestartForwardCS).
+        /// </summary>
+        public bool IsChangeStreamAutoCloseRequested()
+        {
+            return MigrationJobContext.ChangeStreamAutoCloseRequested;
         }
 
         public Task CancelMigration(string id)

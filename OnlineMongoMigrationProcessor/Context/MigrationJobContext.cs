@@ -52,6 +52,25 @@ namespace OnlineMongoMigrationProcessor.Context
 
         public static bool ControlledPauseRequested { get; private set; } = false;
 
+        /// <summary>
+        /// Set by the UI for the graceful transition scenarios (Cutover, Sync Back,
+        /// Restart Forward Sync) where the in-flight change-stream batch must be allowed
+        /// to complete naturally before the next direction is opened. Distinct from
+        /// <see cref="ControlledPauseRequested"/> because graceful close does NOT trigger
+        /// a hard cts.Cancel() in <c>MigrationWorker.StopMigration</c>; the change-stream
+        /// processors observe this flag at the same safe-point checkpoints, finish the
+        /// in-flight batch, and exit their main loop. The UI polls
+        /// <see cref="IsChangeStreamProcessorRunning"/> to know when the loop has exited.
+        /// </summary>
+        public static volatile bool ChangeStreamAutoCloseRequested = false;
+
+        /// <summary>
+        /// True while a change-stream processor's outer loop is executing. Set by
+        /// <c>ChangeStreamProcessor.RunChangeStreamProcessorForAllCollections</c> on entry
+        /// and cleared on exit (finally). The UI polls this to wait for graceful close.
+        /// </summary>
+        public static volatile bool IsChangeStreamProcessorRunning = false;
+
         // Set true by MigrationProcessor.SignalStop(); cleared by MigrationWorker when a new
         // processor (re)starts. In-flight async continuations
         // (DocumentCopyWorker.UpdateProgress, CopyProcessor.ProcessSegmentAsync,
@@ -89,6 +108,22 @@ namespace OnlineMongoMigrationProcessor.Context
             _log.WriteLine($"{location} caused controlled pause - processing will stop after at logical point.", LogType.Warning);
 
             ControlledPauseRequested = true;
+        }
+
+        public static void ResetChangeStreamAutoClose()
+        {
+            AddVerboseLog($"Resetting change-stream auto-close request.");
+            ChangeStreamAutoCloseRequested = false;
+        }
+
+        public static void RequestChangeStreamAutoClose(string location)
+        {
+            if (_log == null)
+                throw new Exception("Log not initialized.");
+
+            _log.WriteLine($"{location} requested graceful change-stream close - in-flight batch will complete, then the processor exits at its safe point.", LogType.Warning);
+
+            ChangeStreamAutoCloseRequested = true;
         }
 
         public static void UpdateLogLevel(LogType level, MigrationJob job)

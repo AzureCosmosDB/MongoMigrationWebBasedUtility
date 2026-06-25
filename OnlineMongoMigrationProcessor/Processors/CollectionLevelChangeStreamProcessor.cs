@@ -104,6 +104,42 @@ namespace OnlineMongoMigrationProcessor
             MigrationJobContext.AddVerboseLog("CollectionLevelChangeStreamProcessor.ProcessChangeStreamsAsync: starting");
             WriteBasicLog();
 
+            // Surface bootstrap context as a warning at processor start, mirroring the
+            // server-level path (ChangeStreamTransitionHelper). PendingAction selects the
+            // contextual message (user-initiated forward<->sync-back flip) and falls back
+            // to a neutral "initialized" message when nothing is queued. Transient lifecycle:
+            // PendingAction is cleared after the warning so reconnects do not re-log and
+            // the field is ready to carry the next user action.
+            var activeJob = MigrationJobContext.CurrentlyActiveJob;
+            if (activeJob != null)
+            {
+                string contextMsg;
+                switch (activeJob.PendingAction)
+                {
+                    case PendingChangeStreamAction.ForwardSyncEnabled:
+                        contextMsg = "Forward sync re-enabled by user.";
+                        break;
+                    case PendingChangeStreamAction.SyncBackEnabled:
+                        contextMsg = "Sync-back enabled by user.";
+                        break;
+                    default:
+                        contextMsg = "Collection-level change stream initialized.";
+                        break;
+                }
+
+                var startedOn = activeJob.GetChangeStreamStartedOn(_syncBack);
+                string startedOnStr = startedOn.HasValue ? startedOn.Value.ToString("O") : "<unset>";
+                _log.WriteLine(
+                    $"{_syncBackPrefix}{contextMsg} Collection-level change stream processor starting from {startedOnStr}.",
+                    LogType.Warning);
+
+                if (activeJob.PendingAction != PendingChangeStreamAction.None)
+                {
+                    activeJob.PendingAction = PendingChangeStreamAction.None;
+                    MigrationJobContext.SaveMigrationJob(activeJob);
+                }
+            }
+
             int index = 0;
             var sortedKeys = GetSortedCollectionKeys();
 
@@ -112,8 +148,9 @@ namespace OnlineMongoMigrationProcessor
             long loops = 0;
             long emptyLoops = 0;
             DateTime lastResumeTokenCheck = DateTime.MinValue;
+            bool batchWasInFlightAtPause = false;
 
-            while (!token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
+            while (!token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested && !MigrationJobContext.ChangeStreamAutoCloseRequested)
             {
                 var totalKeys = sortedKeys.Count;
 
@@ -135,7 +172,7 @@ namespace OnlineMongoMigrationProcessor
                 // Reset empty loops counter when we have collections to process
                 emptyLoops = ResetEmptyLoopsCounterIfNeeded(emptyLoops, totalKeys);
 
-                while (index < totalKeys && !token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
+                while (index < totalKeys && !token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested && !MigrationJobContext.ChangeStreamAutoCloseRequested)
                 {
                     var batchKeys = sortedKeys.Skip(index).Take(_concurrentProcessors).ToList();
                     int seconds = CalculateBatchDuration(batchKeys);
@@ -145,6 +182,20 @@ namespace OnlineMongoMigrationProcessor
                     await ExecuteBatchTasks(tasks, collectionProcessed, seconds);
 
                     index += _concurrentProcessors;
+
+                    // If a pause or graceful auto-close arrived during the batch we just
+                    // completed, surface that explicitly so the drain trail is unambiguous.
+                    if (MigrationJobContext.ControlledPauseRequested || MigrationJobContext.ChangeStreamAutoCloseRequested)
+                    {
+                        batchWasInFlightAtPause = true;
+                        string trigger = MigrationJobContext.ChangeStreamAutoCloseRequested
+                            ? "Graceful auto-close"
+                            : "Controlled pause";
+                        _log.WriteLine(
+                            $"{_syncBackPrefix}{trigger} observed after in-flight batch ({collectionProcessed.Count} collection(s)) completed. Exiting at safe point; no further batches will start.",
+                            LogType.Warning);
+                        break;
+                    }
 
                     // Pause between batches to allow memory recovery and reduce CPU spikes
                     // Increased to 5000ms to address OOM issues and server CPU spikes
@@ -173,6 +224,29 @@ namespace OnlineMongoMigrationProcessor
                 index = 0;
                 sortedKeys = GetSortedCollectionKeys();
             }
+
+            // Single drain-exit log so the trail in the UI is unambiguous: it states the
+            // reason for exit (pause / graceful close / cancellation / token) and whether
+            // a batch was mid-flight at the moment the trigger fired.
+            string exitReason;
+            if (MigrationJobContext.ChangeStreamAutoCloseRequested)
+                exitReason = batchWasInFlightAtPause
+                    ? "graceful auto-close (in-flight batch completed at safe point)"
+                    : "graceful auto-close (idle between batches; no batch was in flight)";
+            else if (MigrationJobContext.ControlledPauseRequested)
+                exitReason = batchWasInFlightAtPause
+                    ? "controlled pause (in-flight batch completed at safe point)"
+                    : "controlled pause (idle between batches; no batch was in flight)";
+            else if (ExecutionCancelled)
+                exitReason = "execution cancelled";
+            else if (token.IsCancellationRequested)
+                exitReason = "cancellation token signalled";
+            else
+                exitReason = "loop ended";
+
+            _log.WriteLine(
+                $"{_syncBackPrefix}Collection-level change stream processor exited: {exitReason}.",
+                LogType.Warning);
         }
 
         private async Task<(List<string> sortedKeys, long emptyLoops, DateTime lastResumeTokenCheck)> HandleEmptyCollectionKeys(long emptyLoops, DateTime lastResumeTokenCheck, CancellationToken token)
