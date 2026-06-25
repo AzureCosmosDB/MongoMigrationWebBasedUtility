@@ -1,5 +1,6 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
+using OnlineMongoMigrationProcessor.Context;
 using OnlineMongoMigrationProcessor.Models;
 using System;
 using System.Collections.Concurrent;
@@ -27,7 +28,15 @@ namespace OnlineMongoMigrationProcessor
     {
         public sealed class UnblockEntry
         {
-            public MigrationUnit Mu { get; init; } = null!;
+            // Identity only -- never hold a MigrationUnit reference. Background tasks
+            // that captured the old instance would otherwise have their writes silently
+            // rejected by MigrationJobContext.SaveMigrationUnit (stale-instance guard)
+            // when the cache rebuilds the MU (e.g. on add/remove). At advance time we
+            // re-fetch the canonical instance via MigrationJobContext.GetMigrationUnit.
+            public string MuId { get; init; } = string.Empty;
+            public string JobId { get; init; } = string.Empty;
+            public string DatabaseName { get; init; } = string.Empty;
+            public string CollectionName { get; init; } = string.Empty;
             public string ResumeToken { get; init; } = string.Empty;
             public DateTime AddedUtc { get; init; }
             public DateTime PbrtClusterTimeUtc { get; init; }
@@ -78,7 +87,10 @@ namespace OnlineMongoMigrationProcessor
 
             _entries[collectionKey] = new UnblockEntry
             {
-                Mu = mu,
+                MuId = mu.Id ?? string.Empty,
+                JobId = mu.JobId ?? string.Empty,
+                DatabaseName = mu.DatabaseName ?? string.Empty,
+                CollectionName = mu.CollectionName ?? string.Empty,
                 ResumeToken = postBatchTokenJson!,
                 AddedUtc = DateTime.UtcNow,
                 PbrtClusterTimeUtc = pbrtTs,
@@ -113,7 +125,7 @@ namespace OnlineMongoMigrationProcessor
             UnblockEntry oldest = PickOldest(working.Values);
 
             _log.WriteLine(
-                $"{_syncBackPrefix}[PBRT Unblock] resolving {working.Count} stuck MU(s) via cluster-watch; oldestKey={oldest.Mu.DatabaseName}.{oldest.Mu.CollectionName} pbrtTs={FormatTs(oldest.PbrtClusterTimeUtc)} tokenHash={ResumeTokenInspector.ShortHash(oldest.ResumeToken)}",
+                $"{_syncBackPrefix}[PBRT Unblock] resolving {working.Count} stuck MU(s) via cluster-watch; oldestKey={oldest.DatabaseName}.{oldest.CollectionName} pbrtTs={FormatTs(oldest.PbrtClusterTimeUtc)} tokenHash={ResumeTokenInspector.ShortHash(oldest.ResumeToken)}",
                 LogType.Info);
 
             int batchSeconds = _getBatchDurationInSeconds(1.0f);
@@ -155,8 +167,9 @@ namespace OnlineMongoMigrationProcessor
 
         private BsonDocument[] BuildPipeline()
         {
-            // $project keeps only ns / _id (resume token) + the metadata the driver
-            // needs to deserialize a ChangeStreamDocument. Namespace filtering is
+            // $project keeps only ns / _id (resume token) + documentKey (small,
+            // used for skip-event audit logging) + the metadata the driver needs
+            // to deserialize a ChangeStreamDocument. Namespace filtering is
             // performed client-side after MoveNextAsync.
             var stages = new List<BsonDocument>
             {
@@ -165,6 +178,7 @@ namespace OnlineMongoMigrationProcessor
                     { "operationType", 1 },
                     { "_id", 1 },
                     { "ns", 1 },
+                    { "documentKey", 1 },
                     { "clusterTime", 1 }
                 })
             };
@@ -467,8 +481,20 @@ namespace OnlineMongoMigrationProcessor
                 return;
             }
 
-            SetResumeParameters(entry.Mu, ts, tokenJson, _syncBack);
-            _trySaveMigrationUnit(entry.Mu, true);
+            // Always resolve the canonical MU from the cache. Holding a stored MU
+            // reference is unsafe: if the cache rebuilds (collection removed/re-added),
+            // SaveMigrationUnit silently rejects writes from non-canonical instances.
+            MigrationUnit mu = MigrationJobContext.GetMigrationUnit(entry.MuId, entry.JobId);
+            if (mu == null)
+            {
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[PBRT Unblock] could not resolve canonical MU {entry.DatabaseName}.{entry.CollectionName} (muId={entry.MuId} jobId={entry.JobId}); skipping advance.",
+                    LogType.Warning);
+                return;
+            }
+
+            SetResumeParameters(mu, ts, tokenJson, _syncBack);
+            _trySaveMigrationUnit(mu, true);
         }
 
         private static string FormatTs(DateTime ts) => ts == DateTime.MinValue ? "?" : ts.ToString("o");
