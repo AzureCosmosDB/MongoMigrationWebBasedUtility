@@ -47,7 +47,6 @@ namespace OnlineMongoMigrationProcessor
         private readonly bool _syncBack;
         private readonly string _syncBackPrefix;
         private readonly Func<float, int> _getBatchDurationInSeconds;
-        private readonly Action<MigrationUnit, bool> _trySaveMigrationUnit;
         private readonly Func<bool> _shouldSplitLargeEvents;
         private readonly ConcurrentDictionary<string, UnblockEntry> _entries =
             new ConcurrentDictionary<string, UnblockEntry>(StringComparer.Ordinal);
@@ -58,7 +57,6 @@ namespace OnlineMongoMigrationProcessor
             bool syncBack,
             string syncBackPrefix,
             Func<float, int> getBatchDurationInSeconds,
-            Action<MigrationUnit, bool> trySaveMigrationUnit,
             Func<bool> shouldSplitLargeEvents)
         {
             _log = log;
@@ -66,7 +64,6 @@ namespace OnlineMongoMigrationProcessor
             _syncBack = syncBack;
             _syncBackPrefix = syncBackPrefix ?? string.Empty;
             _getBatchDurationInSeconds = getBatchDurationInSeconds;
-            _trySaveMigrationUnit = trySaveMigrationUnit;
             _shouldSplitLargeEvents = shouldSplitLargeEvents ?? (() => false);
         }
 
@@ -494,8 +491,15 @@ namespace OnlineMongoMigrationProcessor
                 return;
             }
 
+            string preTokenHash = ResumeTokenInspector.ShortHash(mu.GetResumeToken(_syncBack) ?? string.Empty);
             SetResumeParameters(mu, ts, tokenJson, _syncBack);
-            _trySaveMigrationUnit(mu, true);
+            string postSetTokenHash = ResumeTokenInspector.ShortHash(mu.GetResumeToken(_syncBack) ?? string.Empty);
+            bool saved = MigrationJobContext.SaveMigrationUnit(mu, true);
+            string postSaveTokenHash = ResumeTokenInspector.ShortHash(mu.GetResumeToken(_syncBack) ?? string.Empty);
+
+            _log.WriteLine(
+                $"{_syncBackPrefix}[PBRT Unblock] AdvanceMu {entry.DatabaseName}.{entry.CollectionName} muId={entry.MuId} jobId={entry.JobId} preHash={preTokenHash} postSetHash={postSetTokenHash} postSaveHash={postSaveTokenHash} saved={saved}",
+                LogType.Info);
         }
 
         private static string FormatTs(DateTime ts) => ts == DateTime.MinValue ? "?" : ts.ToString("o");
