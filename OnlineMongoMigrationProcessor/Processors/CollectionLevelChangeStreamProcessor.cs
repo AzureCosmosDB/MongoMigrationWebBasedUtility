@@ -1499,8 +1499,11 @@ namespace OnlineMongoMigrationProcessor
                             }
                             else
                             {
-                                //mu.SetCursorUtcTimestamp(_syncBack, DateTime.UtcNow);
                                 int stuck = _consecutiveStuckRounds.AddOrUpdate(collectionKey, 1, (_, v) => v + 1);
+                                _log.WriteLine(
+                                        $"{_syncBackPrefix}PBRT for {collectionKey} stuck. Attempt {stuck}", LogType.Info);
+                                //mu.SetCursorUtcTimestamp(_syncBack, DateTime.UtcNow);
+                                
                                 if (stuck >= PbrtStuckRoundsThreshold)
                                 {
                                     // PBRT did not advance for {stuck} consecutive idle rounds — cursor
