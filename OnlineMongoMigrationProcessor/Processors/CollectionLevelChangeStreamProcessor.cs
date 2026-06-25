@@ -47,9 +47,11 @@ namespace OnlineMongoMigrationProcessor
         // Per-MU count of consecutive idle rounds where postBatchResumeToken did
         // not advance. TryRecoverStuckCursor is only invoked once the streak
         // reaches PbrtStuckRoundsThreshold; any round that produces events or
-        // advances the token resets the count to 0.
+        // advances the token resets the count to 0. The streak is also cleared
+        // after each invocation so recovery is rate-limited to once per window
+        // even when the rewind condition inside TryRecoverStuckCursor is not met.
         private readonly ConcurrentDictionary<string, int> _consecutiveStuckRounds = new ConcurrentDictionary<string, int>();
-        private const int PbrtStuckRoundsThreshold = 5;
+        private const int PbrtStuckRoundsThreshold = 10;
 
         private bool ShouldPersistMu(string muId, bool force)
         {
@@ -86,6 +88,16 @@ namespace OnlineMongoMigrationProcessor
 
         public override void RemoveMigrationUnit(string migrationUnitId)
         {
+            // Capture collectionKey before base removes the MU from the context
+            // so we can clean the _consecutiveStuckRounds entry (keyed by collectionKey).
+            string? collectionKey = null;
+            if (!string.IsNullOrEmpty(migrationUnitId))
+            {
+                var mu = MigrationJobContext.GetMigrationUnit(migrationUnitId);
+                if (mu != null)
+                    collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
+            }
+
             base.RemoveMigrationUnit(migrationUnitId);
 
             if (string.IsNullOrEmpty(migrationUnitId))
@@ -97,6 +109,9 @@ namespace OnlineMongoMigrationProcessor
             }
 
             _lastPerMuPersistUtc.TryRemove(migrationUnitId, out _);
+
+            if (!string.IsNullOrEmpty(collectionKey))
+                _consecutiveStuckRounds.TryRemove(collectionKey, out _);
         }
 
         protected override async Task ProcessChangeStreamsAsync(CancellationToken token)
@@ -1474,6 +1489,10 @@ namespace OnlineMongoMigrationProcessor
                                         $"{_syncBackPrefix}[PBRT] {collectionKey} PBRT stuck for {stuck} consecutive idle rounds; invoking TryRecoverStuckCursor.",
                                         LogType.Info);
                                     TryRecoverStuckCursor(mu, collectionKey, tokenJson);
+                                    // Reset regardless of whether the rewind condition (age > threshold)
+                                    // was met inside TryRecoverStuckCursor, so we don't re-invoke and
+                                    // re-log every subsequent idle round when the cursor isn't ancient.
+                                    _consecutiveStuckRounds[collectionKey] = 0;
                                 }
                             }
                             // Persist every idle cycle — payload is tiny (token + timestamp)

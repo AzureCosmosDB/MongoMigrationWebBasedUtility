@@ -35,8 +35,10 @@ namespace OnlineMongoMigrationProcessor
         // postBatchResumeToken did not advance. Once it reaches PbrtStuckRoundsThreshold
         // we flip UseClientSideCSFilter so the next cursor opens without a server-side
         // $match (large $or filters were observed to freeze PBRT on Atlas sharded clusters).
+        // The streak is reset to 0 after each invocation so the counter doesn't climb
+        // unboundedly when the flip has already happened.
         private int _consecutiveStuckRounds = 0;
-        private const int PbrtStuckRoundsThreshold = 5;
+        private const int PbrtStuckRoundsThreshold = 10;
 
         private sealed class ServerWatchState
         {
@@ -209,6 +211,10 @@ namespace OnlineMongoMigrationProcessor
                         _log.WriteLine(
                             $"{_syncBackPrefix}[PBRT] PBRT stuck for {_consecutiveStuckRounds} consecutive rounds (tokenHash={curTokenHash} ts={curTokenTs}). Disabling server-side namespace $match and switching to client-side filtering for {_migrationUnitsToProcess.Count} collection(s).",
                             LogType.Warning);
+                        // Reset after invoking so the counter doesn't climb unboundedly
+                        // on subsequent stuck rounds (the inner condition would block
+                        // re-flipping anyway, but the streak number stays meaningful).
+                        _consecutiveStuckRounds = 0;
                     }
                 }
                 else
