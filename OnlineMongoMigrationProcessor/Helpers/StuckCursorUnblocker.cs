@@ -324,15 +324,60 @@ namespace OnlineMongoMigrationProcessor
 
                 if (working.TryGetValue(ns, out var entry))
                 {
-                    DateTime stampTs = prevAnchorTs != DateTime.MinValue ? prevAnchorTs : DateTime.UtcNow;
-                    AdvanceMu(entry, stampTs, prevAnchorToken);
+                    // Default: rewind to "just before this event" (replay-safe).
+                    string advanceToken = prevAnchorToken;
+                    DateTime advanceTs = prevAnchorTs;
+                    bool skippedEvent = false;
+
+                    // If the rewind position equals (or is older than) the MU's
+                    // own enqueued PBRT, the AdvanceMu guard would no-op and the
+                    // MU would never move. In that case fall back to the matched
+                    // event's own resume token -- this SKIPS this single event for
+                    // the MU's own watch but actually unsticks the cursor.
+                    bool wouldBeNoOp =
+                        entry.PbrtClusterTimeUtc != DateTime.MinValue &&
+                        advanceTs != DateTime.MinValue &&
+                        advanceTs <= entry.PbrtClusterTimeUtc;
+
+                    if (wouldBeNoOp)
+                    {
+                        try
+                        {
+                            var changeRt = change.ResumeToken;
+                            if (changeRt != null)
+                            {
+                                string changeRtJson = changeRt.ToJson();
+                                if (!string.IsNullOrEmpty(changeRtJson))
+                                {
+                                    advanceToken = changeRtJson;
+                                    if (ResumeTokenInspector.TryDecodeUtc(changeRtJson, out DateTime ts2))
+                                        advanceTs = ts2;
+                                    skippedEvent = true;
+                                }
+                            }
+                        }
+                        catch { /* keep prev anchor */ }
+                    }
+
+                    DateTime stampTs = advanceTs != DateTime.MinValue ? advanceTs : DateTime.UtcNow;
+                    AdvanceMu(entry, stampTs, advanceToken);
                     working.Remove(ns);
                     _entries.TryRemove(ns, out _);
                     matched++;
 
-                    _log.WriteLine(
-                        $"{_syncBackPrefix}[PBRT Unblock] unstuck {ns} via cluster-watch event op={change.OperationType} tokenHash={ResumeTokenInspector.ShortHash(prevAnchorToken)} ts={stampTs:o}; remaining={working.Count}",
-                        LogType.Info);
+                    string docKeyJson = SafeToJson(change.DocumentKey);
+                    if (skippedEvent)
+                    {
+                        _log.WriteLine(
+                            $"{_syncBackPrefix}[PBRT Unblock] WARNING skipped 1 event for {ns} (no safe rewind position) op={change.OperationType} documentKey={docKeyJson} tokenHash={ResumeTokenInspector.ShortHash(advanceToken)} ts={stampTs:o}; remaining={working.Count}",
+                            LogType.Warning);
+                    }
+                    else
+                    {
+                        _log.WriteLine(
+                            $"{_syncBackPrefix}[PBRT Unblock] unstuck {ns} via cluster-watch event op={change.OperationType} documentKey={docKeyJson} tokenHash={ResumeTokenInspector.ShortHash(advanceToken)} ts={stampTs:o}; remaining={working.Count}",
+                            LogType.Info);
+                    }
 
                     if (working.Count == 0) break;
                 }
@@ -357,6 +402,13 @@ namespace OnlineMongoMigrationProcessor
                 catch { /* best-effort */ }
             }
             return matched;
+        }
+
+        private static string SafeToJson(BsonDocument? doc)
+        {
+            if (doc == null) return "<none>";
+            try { return doc.ToJson(); }
+            catch { return "<unserializable>"; }
         }
 
         private void FastForwardLeftovers(
