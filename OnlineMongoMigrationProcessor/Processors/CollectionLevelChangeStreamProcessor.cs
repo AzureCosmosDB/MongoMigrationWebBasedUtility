@@ -86,7 +86,8 @@ namespace OnlineMongoMigrationProcessor
                 _syncBack,
                 _syncBackPrefix,
                 GetBatchDurationInSeconds,
-                (mu, updateParent) => TrySaveMigrationUnit(mu, updateParent));
+                (mu, updateParent) => TrySaveMigrationUnit(mu, updateParent),
+                () => IsOptimizeForLargeDocsEnabled && IsSplitLargeEventSupported);
         }
 
         public override void RemoveMigrationUnit(string migrationUnitId)

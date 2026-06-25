@@ -39,6 +39,7 @@ namespace OnlineMongoMigrationProcessor
         private readonly string _syncBackPrefix;
         private readonly Func<float, int> _getBatchDurationInSeconds;
         private readonly Action<MigrationUnit, bool> _trySaveMigrationUnit;
+        private readonly Func<bool> _shouldSplitLargeEvents;
         private readonly ConcurrentDictionary<string, UnblockEntry> _entries =
             new ConcurrentDictionary<string, UnblockEntry>(StringComparer.Ordinal);
 
@@ -48,7 +49,8 @@ namespace OnlineMongoMigrationProcessor
             bool syncBack,
             string syncBackPrefix,
             Func<float, int> getBatchDurationInSeconds,
-            Action<MigrationUnit, bool> trySaveMigrationUnit)
+            Action<MigrationUnit, bool> trySaveMigrationUnit,
+            Func<bool> shouldSplitLargeEvents)
         {
             _log = log;
             _changeStreamMongoClient = changeStreamMongoClient;
@@ -56,6 +58,7 @@ namespace OnlineMongoMigrationProcessor
             _syncBackPrefix = syncBackPrefix ?? string.Empty;
             _getBatchDurationInSeconds = getBatchDurationInSeconds;
             _trySaveMigrationUnit = trySaveMigrationUnit;
+            _shouldSplitLargeEvents = shouldSplitLargeEvents ?? (() => false);
         }
 
         public int Count => _entries.Count;
@@ -150,12 +153,12 @@ namespace OnlineMongoMigrationProcessor
                 .First();
         }
 
-        private static BsonDocument[] BuildPipeline()
+        private BsonDocument[] BuildPipeline()
         {
             // $project keeps only ns / _id (resume token) + the metadata the driver
             // needs to deserialize a ChangeStreamDocument. Namespace filtering is
             // performed client-side after MoveNextAsync.
-            return new[]
+            var stages = new List<BsonDocument>
             {
                 new BsonDocument("$project", new BsonDocument
                 {
@@ -165,6 +168,17 @@ namespace OnlineMongoMigrationProcessor
                     { "clusterTime", 1 }
                 })
             };
+
+            // When OptimizeForLargeDocs is enabled and the server supports it,
+            // append $changeStreamSplitLargeEvent so a single >16 MB oplog event is
+            // fragmented at the shard rather than killing the cursor with a
+            // BSONObjectTooLarge. Must be the last stage in the pipeline.
+            if (_shouldSplitLargeEvents())
+            {
+                stages.Add(new BsonDocument("$changeStreamSplitLargeEvent", new BsonDocument()));
+            }
+
+            return stages.ToArray();
         }
 
         private static ChangeStreamOptions BuildOptions(BsonDocument resumeAfter, int maxAwaitSeconds)
@@ -289,27 +303,58 @@ namespace OnlineMongoMigrationProcessor
         private int ProcessBatchEvents(
             IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor,
             IDictionary<string, UnblockEntry> working,
-            string effectiveResumeToken,
-            DateTime effectiveTs)
+            string preBatchToken,
+            DateTime preBatchTs)
         {
             int matched = 0;
+
+            // "Just before the current event" anchor. Starts at the pre-MoveNext
+            // PBRT (== end of previous batch / cursor's ResumeAfter on iter 1).
+            // After each event we advance the anchor to that event's own resume
+            // token, which is exactly the "resume after this event" position --
+            // i.e. the "just before the next event" position the MU should rewind
+            // to in order to re-emit the next matching event without loss.
+            string prevAnchorToken = preBatchToken;
+            DateTime prevAnchorTs = preBatchTs;
+
             foreach (var change in cursor.Current ?? Enumerable.Empty<ChangeStreamDocument<BsonDocument>>())
             {
                 if (change?.CollectionNamespace == null) continue;
                 string ns = $"{change.CollectionNamespace.DatabaseNamespace.DatabaseName}.{change.CollectionNamespace.CollectionName}";
-                if (!working.TryGetValue(ns, out var entry)) continue;
 
-                DateTime stampTs = effectiveTs != DateTime.MinValue ? effectiveTs : DateTime.UtcNow;
-                AdvanceMu(entry, stampTs, effectiveResumeToken);
-                working.Remove(ns);
-                _entries.TryRemove(ns, out _);
-                matched++;
+                if (working.TryGetValue(ns, out var entry))
+                {
+                    DateTime stampTs = prevAnchorTs != DateTime.MinValue ? prevAnchorTs : DateTime.UtcNow;
+                    AdvanceMu(entry, stampTs, prevAnchorToken);
+                    working.Remove(ns);
+                    _entries.TryRemove(ns, out _);
+                    matched++;
 
-                _log.WriteLine(
-                    $"{_syncBackPrefix}[PBRT Unblock] unstuck {ns} via cluster-watch event op={change.OperationType} tokenHash={ResumeTokenInspector.ShortHash(effectiveResumeToken)} ts={stampTs:o}; remaining={working.Count}",
-                    LogType.Info);
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[PBRT Unblock] unstuck {ns} via cluster-watch event op={change.OperationType} tokenHash={ResumeTokenInspector.ShortHash(prevAnchorToken)} ts={stampTs:o}; remaining={working.Count}",
+                        LogType.Info);
 
-                if (working.Count == 0) break;
+                    if (working.Count == 0) break;
+                }
+
+                // Advance the anchor to this event's resume token regardless of
+                // whether it matched, so a later matched event in the same batch
+                // rewinds to the position immediately preceding it.
+                try
+                {
+                    var rt = change.ResumeToken;
+                    if (rt != null)
+                    {
+                        string rtJson = rt.ToJson();
+                        if (!string.IsNullOrEmpty(rtJson))
+                        {
+                            prevAnchorToken = rtJson;
+                            if (ResumeTokenInspector.TryDecodeUtc(rtJson, out DateTime curTs))
+                                prevAnchorTs = curTs;
+                        }
+                    }
+                }
+                catch { /* best-effort */ }
             }
             return matched;
         }
