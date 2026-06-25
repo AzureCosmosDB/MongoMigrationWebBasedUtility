@@ -272,10 +272,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
             var now = DateTime.UtcNow;
 
-            // Direct field assignment bypasses SetChangeStreamStartedOn's set-when-empty
-            // guard - this is the explicit user-initiated override the gate.
-            job.ChangeStreamStartedOn = now;
-            job.SetResumeToken(false, null);
+            job.ForceResetChangeStreamStartedOn(false, now);
             job.SetOriginalResumeToken(false, null);
             job.SetInitialDocumenReplayed(false, false);
 #pragma warning disable CS0618 // ResumeDocumentId is obsolete but may still hold legacy stored data
@@ -292,8 +289,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
             foreach (var unit in units)
             {
-                unit.ChangeStreamStartedOn = now;
-                unit.SetResumeToken(false, null);
+                unit.ForceResetChangeStreamStartedOn(false, now);
                 unit.SetOriginalResumeToken(false, null);
                 unit.SetCursorUtcTimestamp(false, DateTime.MinValue);
                 unit.SetCSLastChange(false, null, null);
@@ -336,10 +332,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
             var now = DateTime.UtcNow;
 
-            // Direct field assignment bypasses SetChangeStreamStartedOn's set-when-empty
-            // guard - this is the explicit user-initiated override the gate.
-            job.SyncBackChangeStreamStartedOn = now;
-            job.SetResumeToken(true, null);
+            job.ForceResetChangeStreamStartedOn(true, now);
             job.SetOriginalResumeToken(true, null);
             job.SetInitialDocumenReplayed(true, false);
 #pragma warning disable CS0618 // SyncBackResumeDocumentId is obsolete but may still hold legacy stored data
@@ -354,8 +347,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
             foreach (var unit in units)
             {
-                unit.SyncBackChangeStreamStartedOn = now;
-                unit.SetResumeToken(true, null);
+                unit.ForceResetChangeStreamStartedOn(true, now);
                 unit.SetOriginalResumeToken(true, null);
                 unit.SetCursorUtcTimestamp(true, DateTime.MinValue);
                 unit.SetCSLastChange(true, null, null);

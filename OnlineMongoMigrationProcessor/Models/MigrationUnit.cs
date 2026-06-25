@@ -237,13 +237,49 @@ namespace OnlineMongoMigrationProcessor
             => syncBack ? SyncBackChangeStreamStartedOn : ChangeStreamStartedOn;
 
         // Set-when-empty only: never overwrite or clear an existing ChangeStreamStartedOn.
-        // For explicit user-initiated resets, assign the underlying field directly.
+        // For explicit user-initiated resets, use ForceResetChangeStreamStartedOn.
         public void SetChangeStreamStartedOn(bool syncBack, DateTime? value)
         {
             var current = syncBack ? SyncBackChangeStreamStartedOn : ChangeStreamStartedOn;
             if (current.HasValue) return;
             if (syncBack) SyncBackChangeStreamStartedOn = value;
             else ChangeStreamStartedOn = value;
+        }
+
+        // Forces a forward/rewind of ChangeStreamStartedOn, bypassing the set-when-empty guard
+        // on SetChangeStreamStartedOn, and clears the matching resume token so the next
+        // watch opens a fresh cursor. Also backs up the prior value into
+        // OriginalChangeStreamStartedOn (one-shot: only when the backup is empty) so the
+        // original user-intended start time is preserved across recovery rewinds.
+        // Use only for explicit recovery/reset scenarios.
+        public void ForceResetChangeStreamStartedOn(bool syncBack, DateTime newStartedOn)
+        {
+            var currentStartedOn = syncBack ? SyncBackChangeStreamStartedOn : ChangeStreamStartedOn;
+            var originalBackup = syncBack ? SyncBackOriginalChangeStreamStartedOn : OriginalChangeStreamStartedOn;
+            if (currentStartedOn.HasValue && !originalBackup.HasValue)
+            {
+                if (syncBack) SyncBackOriginalChangeStreamStartedOn = currentStartedOn;
+                else OriginalChangeStreamStartedOn = currentStartedOn;
+            }
+
+            if (syncBack) SyncBackChangeStreamStartedOn = newStartedOn;
+            else ChangeStreamStartedOn = newStartedOn;
+            SetResumeToken(syncBack, null);
+        }
+
+        // Captures the ChangeStreamStartedOn value that was in effect before the
+        // stuck-cursor self-healing path rewound it. Written once, on the first
+        // rewind, so the original boot value is preserved for audit/diagnostics.
+        public DateTime? OriginalChangeStreamStartedOn { get; set; }
+        public DateTime? SyncBackOriginalChangeStreamStartedOn { get; set; }
+
+        public DateTime? GetOriginalChangeStreamStartedOn(bool syncBack)
+            => syncBack ? SyncBackOriginalChangeStreamStartedOn : OriginalChangeStreamStartedOn;
+
+        public void SetOriginalChangeStreamStartedOn(bool syncBack, DateTime? value)
+        {
+            if (syncBack) SyncBackOriginalChangeStreamStartedOn = value;
+            else OriginalChangeStreamStartedOn = value;
         }
 
         public long EstimatedDocCount { get; set; }
