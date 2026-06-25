@@ -600,7 +600,7 @@ namespace OnlineMongoMigrationProcessor
                         $"idle={state.CursorIdleMs}ms ({idlePct:F0}%, {state.CursorIdleCalls} calls) " +
                         $"flush={state.FlushMs}ms ({state.FlushCalls} calls, {flushPerEventMs:F2}ms/ev) " +
                         $"avgRead={avgReadMs:F2}ms/ev avgWrite={avgWriteMs:F2}ms/ev",
-                        LogType.Info);
+                        LogType.Debug);
 
                     if (state.CursorEventsRead == 0)
                     {
