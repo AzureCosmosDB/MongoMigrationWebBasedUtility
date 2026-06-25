@@ -396,6 +396,7 @@ namespace OnlineMongoMigrationProcessor
                     if (working.Count == 0) break;
                 }
 
+
                 // Advance the anchor to this event's resume token regardless of
                 // whether it matched, so a later matched event in the same batch
                 // rewinds to the position immediately preceding it.
