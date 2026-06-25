@@ -421,6 +421,10 @@ The job processes collections in the order they are added. Since larger collecti
    - **Pause Job**: Visible if the current job is running. Select this to pause the current job. You can resume it later.  
    - **Update Collections**: Opens **Manage Collections** to add or remove collections in the current job. Only available on a paused job. Removing a collection that is partially or fully migrated discards its migration and change stream state, and the collection must be remigrated from the start.  
    - **Cut Over**: Select this to cut over an online job when the source and target are completely synced. Before cutting over, ensure to stop write traffic to the source and wait for the Time Since Last Change to become zero for all collections. Once cut over is performed, there is no rollback.  
+   - **Sync Back**: Visible after a successful Cut Over on online jobs with **Post Migration Sync Back** enabled. Reverses the change-stream direction so writes on the new target replicate back to the original source, giving you a rollback path while the application runs against the target. The forward change-stream processor first drains its in-flight batch gracefully (no abrupt cancel), then the reverse cursor opens.
+   - **Restart Forward Sync**: Visible while Sync Back is active. Stops sync-back and restarts the forward (source → target) change stream from the moment of the switch, so any writes made on the source after Sync Back began are replayed to the target. Use this when you need to roll back the application to the source. As with Sync Back, the sync-back batch drains gracefully before the forward cursor opens.
+     - **Readiness for Sync Back / Restart Forward Sync**: a minimum of 2 consecutive change-stream batches with **Last Batch Total Changes = 0** is required to be confident the current direction has fully drained. The confirmation dialog repeats this; if the condition isn't met, reconsider before proceeding.
+     - **Graceful drain & cooldown**: clicking either action sets a graceful-close flag observed by the change-stream processor at its safe point; the in-flight batch finishes (you'll see the badge "Finishing batch before …" and a final log line "… exited: graceful auto-close (in-flight batch completed at safe point)"). A 30 s cooldown then runs before the new direction starts to let cursor state settle on the source side.
 1. The **Monitor** section lists the current actions being performed.  
 1. The **Logs** section displays system-generated logs for debugging. You can download the logs by selecting the **download icon** next to the header. For very large log files the app prompts you with a **Download in Pages** dialog so you can fetch the log a page at a time (each page is the size configured under *Log page size* in Settings) and resume if the browser drops a download.  
 
@@ -443,6 +447,24 @@ Initially, you may not see updates here until the application cutover is complet
 - Confirm that the target account is live and actively receiving traffic.
 - Ensure the Sync Back process is running and not paused.
 - Monitor for incoming changes on the target. If no new writes are occurring, the lag may grow, which is expected in the absence of new data.
+
+#### Restart Forward Sync (rollback to source)
+
+While Sync Back is active you can flip the change-stream direction back to forward (source → target) using the **Restart Forward Sync** action. This is the rollback path if you decide to point the application back at the original source after cutover.
+
+- **When to use**: you want to revert the application to the source and need any writes accumulated on the source during Sync Back to flow to the target before switching traffic back.
+- **Readiness check**: wait until **Last Batch Total Changes = 0** for at least 2 consecutive sync-back batches before clicking. The confirm dialog repeats this guidance.
+- **What happens internally**:
+  1. `PendingAction` is persisted as `ForwardSyncEnabled` so a mid-flip app restart can resume the flip.
+  2. The sync-back change-stream processor receives a graceful auto-close request; it finishes the in-flight batch, then exits at its safe point (no `cts.Cancel`, no killed cursor read).
+  3. `ChangeStreamStartedOn` is reset to the moment after the drain completes and existing forward resume tokens are cleared, so the forward cursor starts from that instant.
+  4. A 30 s cooldown runs while Atlas-side cursor state for the closed sync-back cursor settles.
+  5. The forward worker starts, the UI auto-refresh re-arms, and the log stream resumes against the new worker without a manual refresh.
+- **Logs you'll see** (in order):
+  - `UI: Restart Forward Sync requested graceful change-stream close …`
+  - `SyncBack: Collection-level change stream processor exited: graceful auto-close (…)`
+  - `Forward sync re-enabled by user. Collection-level change stream processor starting from <timestamp>.`
+- **Reversible**: yes — you can return to Sync Back later via the same Sync Back button.
 
 #### Time Since Last Batch (CS Last Checked)
 
@@ -556,6 +578,8 @@ You can use different versions of `mongodump` and `mongorestore` when source com
 - **Resume Job**: Resume with updated or existing connection strings.
 - **Pause Job**: Safely pause the running job.
 - **Cut Over**: For online jobs, enabled when change stream lag reaches zero for all collections **and** all background index builds have completed. You can choose Cut Over with or without Sync Back.
+- **Sync Back**: Available after Cut Over on online jobs that enabled **Post Migration Sync Back**. Reverses the change-stream direction (target → source). Drains the forward batch gracefully before the reverse cursor opens. Requires 2 consecutive forward batches with **Last Batch Total Changes = 0** as the readiness signal.
+- **Restart Forward Sync**: Available while Sync Back is running. Flips the direction back to forward (source → target). Used as the rollback path to point the application back at the source. Drains the sync-back batch gracefully and resets `ChangeStreamStartedOn` to the moment of the switch so source writes made during sync-back replay to the target. Requires 2 consecutive sync-back batches with **Last Batch Total Changes = 0**.
 - **Manage Collections**: Add or remove collections on a paused job; edit per-collection Overwrite, Indexing, Sharding, Move-to-shard, Filter, and `_id` type options for drafts. See [Manage Collections](#manage-collections). Removing a collection discards its migration and change stream state.
 - **Reset Change Stream**: For selected collections, reset the checkpoint to reprocess from the beginning. Useful if you suspect missed events.
 - **Run Hash Check**: Randomly samples documents and compares hashes between source and target to detect mismatches. Controlled by the Settings sample size.
