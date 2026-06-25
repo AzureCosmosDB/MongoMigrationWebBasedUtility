@@ -16,6 +16,17 @@ namespace OnlineMongoMigrationProcessor.Helpers
             if (!string.IsNullOrEmpty(job.GetResumeToken(syncBack)))
                 return false;
 
+            // If a previous invocation already performed the bootstrap reset and we are
+            // still waiting for the first event (no resume token yet), skip the reset
+            // and the log. The retry loop in InitializeResumeTokensAsync would otherwise
+            // re-run this every 60s and spam identical messages.
+            // Exception: a pending server-level reset (ResetServerLevelChangeStream) must
+            // still be honored on first call so its specific log is emitted; the pending
+            // bit is cleared in that branch below.
+            if (job.GetTransitionBootstrapPending(syncBack)
+                && !job.GetServerLevelChangeStreamResetPending(syncBack))
+                return false;
+
             var units = Helper.GetMigrationUnitsToMigrate(job)
                 .Where(Helper.IsMigrationUnitValid)
                 .ToList();
@@ -23,7 +34,17 @@ namespace OnlineMongoMigrationProcessor.Helpers
             if (units.Count == 0)
                 return false;
 
-            var transitionStartedOn = job.StartedOn?.ToUniversalTime() ?? DateTime.UtcNow;
+            // Prefer the explicit ChangeStreamStartedOn anchor when present (e.g. when the
+            // user flips forward <-> sync-back, ResetForwardChangeStreamForReEnable /
+            // ResetSyncBackChangeStreamForReEnable directly assign UtcNow and we must honor
+            // that). Fall back to job.StartedOn (forward) or UtcNow (sync-back) for the
+            // original Collection -> Server transition at job start where the anchor was
+            // not pre-set. Never use job.StartedOn for sync-back - that would replay
+            // forward-direction history into the source.
+            var transitionStartedOn = job.GetChangeStreamStartedOn(syncBack)?.ToUniversalTime()
+                ?? (syncBack
+                    ? DateTime.UtcNow
+                    : (job.StartedOn?.ToUniversalTime() ?? DateTime.UtcNow));
 
             job.SetResumeToken(syncBack, null);
             job.SetOriginalResumeToken(syncBack, null);
@@ -36,7 +57,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 unit.SetResumeToken(syncBack, null);
                 unit.SetOriginalResumeToken(syncBack, null);
                 unit.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
-                unit.SetChangeStreamStartedOn(syncBack, null);
+                // Per-unit ChangeStreamStartedOn is preserved across this transition - the
+                // SetChangeStreamStartedOn helper is set-when-empty, so any seed call would
+                // be a no-op once a value exists.
                 unit.SetCSLastChange(syncBack, null, null);
                 unit.ClearResumeDocumentInfo(syncBack);
                 unit.ResetChangeStreamCounters(syncBack);
@@ -51,14 +74,15 @@ namespace OnlineMongoMigrationProcessor.Helpers
             var syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
             bool wasReset = job.GetServerLevelChangeStreamResetPending(syncBack);
 
+            var anchorLabel = syncBack ? "sync-back change stream start time" : "change stream start time";
             if (wasReset)
             {
                 log.WriteLine(
                     $"{syncBackPrefix}Server-level change stream reset is being applied. " +
-                    $"Server-level change stream start time set to job StartedOn at {transitionStartedOn:O}.",
+                    $"Server-level change stream start time set to {anchorLabel} at {transitionStartedOn:O}.",
                     LogType.Warning);
                 log.WriteLine(
-                    $"{syncBackPrefix}Server-level change stream will replay from job StartedOn ({transitionStartedOn:O}) following the reset.",
+                    $"{syncBackPrefix}Server-level change stream will replay from {anchorLabel} ({transitionStartedOn:O}) following the reset.",
                     LogType.Warning);
 
                 job.SetServerLevelChangeStreamResetPending(syncBack, false);
@@ -66,13 +90,39 @@ namespace OnlineMongoMigrationProcessor.Helpers
             }
             else
             {
+                // Bootstrap context comes from PendingAction, set at the actual user/system
+                // action site (DraftOption save, forward<->sync-back flip). Falls back to
+                // a neutral "initialized" message for the original at-job-start path where
+                // no explicit action was recorded.
+                string contextMsg;
+                switch (job.PendingAction)
+                {
+                    case PendingChangeStreamAction.CollectionToServer:
+                        contextMsg = "Change stream scope transitioned from Collection to Server.";
+                        break;
+                    case PendingChangeStreamAction.ForwardSyncEnabled:
+                        contextMsg = "Forward sync re-enabled by user.";
+                        break;
+                    case PendingChangeStreamAction.SyncBackEnabled:
+                        contextMsg = "Sync-back enabled by user.";
+                        break;
+                    default:
+                        contextMsg = "Server-level change stream initialized.";
+                        break;
+                }
+
                 log.WriteLine(
-                    $"{syncBackPrefix} Change stream scope transition detected (Collection -> Server). " +
-                    $"Resetting server-level change stream start time to job StartedOn at {transitionStartedOn:O}.",
+                    $"{syncBackPrefix}{contextMsg} Bootstrapping from {anchorLabel} at {transitionStartedOn:O}.",
                     LogType.Warning);
-                log.WriteLine(
-                    $"{syncBackPrefix}Change stream transitioned to server-level and was pushed back to earliest change since job creation ({transitionStartedOn:O}).",
-                    LogType.Warning);
+
+                // Transient lifecycle: once the contextual warning has been emitted, clear
+                // PendingAction so reconnects do not re-log and the field is ready to carry
+                // the next user action.
+                if (job.PendingAction != PendingChangeStreamAction.None)
+                {
+                    job.PendingAction = PendingChangeStreamAction.None;
+                    MigrationJobContext.SaveMigrationJob(job);
+                }
             }
 
             return true;
@@ -94,12 +144,16 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 .Where(Helper.IsMigrationUnitValid)
                 .ToList();
 
-            var resetStartedOn = job.StartedOn?.ToUniversalTime() ?? DateTime.UtcNow;
+            // For sync-back the anchor is when sync-back was enabled (never job.StartedOn).
+            var resetStartedOn = syncBack
+                ? (job.SyncBackChangeStreamStartedOn?.ToUniversalTime() ?? DateTime.UtcNow)
+                : (job.StartedOn?.ToUniversalTime() ?? DateTime.UtcNow);
 
             job.SetResumeToken(syncBack, null);
             job.SetOriginalResumeToken(syncBack, null);
             job.SetInitialDocumenReplayed(syncBack, false);
-            job.SetChangeStreamStartedOn(syncBack, resetStartedOn);
+            // Route through SetChangeStreamStartedOn so the set-when-empty guard preserves any
+            // existing anchor. A reset must not update ChangeStreamStartedOn when one is already
             job.SetTransitionBootstrapPending(syncBack, true);
             job.SetServerLevelChangeStreamResetPending(syncBack, true);
 
@@ -122,9 +176,10 @@ namespace OnlineMongoMigrationProcessor.Helpers
             if (log != null)
             {
                 var syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
+                var effectiveStartedOn = job.GetChangeStreamStartedOn(syncBack);
                 log.WriteLine(
                     $"{syncBackPrefix}Server-level change stream reset requested. " +
-                    $"Server-level change stream start time set to job StartedOn at {resetStartedOn:O}.",
+                    $"Server-level change stream start time preserved at {effectiveStartedOn:O} (reset does not update ChangeStreamStartedOn).",
                     LogType.Warning);
             }
 
@@ -147,31 +202,36 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 .Where(Helper.IsMigrationUnitValid)
                 .ToList();
 
-            var transitionStartedOn = job.StartedOn?.ToUniversalTime() ?? DateTime.UtcNow;
+            // Sync-back uses the time sync-back was enabled as the per-unit anchor; there is no
+            // forward bulk copy in the reverse direction. Forward direction handles its anchor
+            // per-unit below (prefer unit.ChangeStreamStartedOn, fall back to BulkCopyStartedOn - 4h),
+            // so no job-wide value is needed there.
+            DateTime? syncBackAnchor = syncBack
+                ? (job.SyncBackChangeStreamStartedOn?.ToUniversalTime() ?? DateTime.UtcNow)
+                : (DateTime?)null;
 
             // Clear job-level (server-level) change stream state - it no longer applies.
             job.SetResumeToken(syncBack, null);
             job.SetOriginalResumeToken(syncBack, null);
             job.SetInitialDocumenReplayed(syncBack, false);
-            job.SetChangeStreamStartedOn(syncBack, null);
             job.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
             job.SetTransitionBootstrapPending(syncBack, false);
             job.SetServerLevelChangeStreamResetPending(syncBack, false);
+            job.PendingAction = PendingChangeStreamAction.ServerToCollection;
             if (!syncBack)
                 job.CSLastChecked = DateTime.MinValue;
 
             // Reset change stream for each collection (equivalent to MongoHelper.ResetCS per unit).
-            // Pin each unit's ChangeStreamStartedOn to its own BulkCopyStartedOn - 4h so the
-            // collection-level bootstrap opens the change stream just before this collection's
-            // bulk copy began. If left null (the typical state under server-level), the
-            // bootstrap falls back to DateTime.UtcNow, stamps CursorUtcTimestamp to "now",
-            // and later real changes (older than now) trigger the
-            // "Timestamp mismatch: Old is newer than New" guard.
+            // SetChangeStreamStartedOn is set-when-empty, so existing per-unit anchors are
+            // preserved unconditionally. The calls below only seed an anchor for legacy MUs
             foreach (var unit in units)
             {
                 unit.SetResumeToken(syncBack, null);
                 unit.SetOriginalResumeToken(syncBack, null);
                 unit.SetCursorUtcTimestamp(syncBack, DateTime.MinValue);
+                //when ChangeStreamStartedOn is empty seed with BulkCopyStartedOn - 4h so the bootstrap opens just before
+                //    this collection's bulk copy began (avoids the "Timestamp mismatch: Old is
+                //    newer than New" guard that a UtcNow fallback would cause).
                 if (unit.BulkCopyStartedOn.HasValue && unit.BulkCopyStartedOn.Value != DateTime.MinValue)
                 {
                     unit.SetChangeStreamStartedOn(syncBack, unit.BulkCopyStartedOn.Value.ToUniversalTime().AddHours(-4));
@@ -190,12 +250,136 @@ namespace OnlineMongoMigrationProcessor.Helpers
             if (log != null)
             {
                 var syncBackPrefix = syncBack ? "SyncBack: " : string.Empty;
+                var anchorLabel = syncBack
+                    ? $"sync-back enabled time ({syncBackAnchor:O})"
+                    : "its existing ChangeStreamStartedOn (or BulkCopyStartedOn - 4h fallback)";
                 log.WriteLine(
                     $"{syncBackPrefix}Change stream scope transition detected (Server -> Collection). " +
                     $"Cleared server-level change stream state and reset change stream for {units.Count} collection(s). " +
-                    $"Each collection-level change stream will resume from its own BulkCopyStartedOn - 4h.",
+                    $"Each collection-level change stream will resume from {anchorLabel}.",
                     LogType.Warning);
             }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Forces a re-enable of the forward change stream after sync-back was running.
+        /// Overrides the set-when-empty guard on ChangeStreamStartedOn (direct field
+        /// assignment) and clears all forward-direction resume tokens / cursor state on
+        /// the job and every valid migration unit so the forward change stream restarts
+        /// from <paramref name="newStartedOn"/> (defaults to <see cref="DateTime.UtcNow"/>).
+        /// Sync-back state is left intact. Callers performing a drain-then-flip should pass
+        /// the exact post-drain UtcNow so ChangeStreamStartedOn reflects the true moment
+        /// the new cursor is about to open.
+        /// </summary>
+        public static bool ResetForwardChangeStreamForReEnable(Log log, MigrationJob job, DateTime? newStartedOn = null)
+        {
+            if (job == null)
+                return false;
+
+            var units = Helper.GetMigrationUnitsToMigrate(job)
+                .Where(Helper.IsMigrationUnitValid)
+                .ToList();
+
+            var now = newStartedOn ?? DateTime.UtcNow;
+
+            job.ForceResetChangeStreamStartedOn(false, now);
+            job.SetOriginalResumeToken(false, null);
+            job.SetInitialDocumenReplayed(false, false);
+#pragma warning disable CS0618 // ResumeDocumentId is obsolete but may still hold legacy stored data
+            job.ResumeDocumentId = null;
+#pragma warning restore CS0618
+            job.ResumeDocumentKey = null;
+            job.ResumeCollectionKey = null;
+            job.SetCursorUtcTimestamp(false, DateTime.MinValue);
+            job.SetTransitionBootstrapPending(false, false);
+            job.SetServerLevelChangeStreamResetPending(false, false);
+            job.CSPostProcessingStarted = false;
+            job.CSLastChecked = DateTime.MinValue;
+            job.PendingAction = PendingChangeStreamAction.ForwardSyncEnabled;
+
+            foreach (var unit in units)
+            {
+                unit.ForceResetChangeStreamStartedOn(false, now);
+                unit.SetOriginalResumeToken(false, null);
+                unit.SetCursorUtcTimestamp(false, DateTime.MinValue);
+                unit.SetCSLastChange(false, null, null);
+                unit.ClearResumeDocumentInfo(false);
+                unit.ResetChangeStreamCounters(false);
+                unit.CSLastChecked = DateTime.MinValue;
+                unit.ResetChangeStream = false;
+
+                MigrationJobContext.SaveMigrationUnit(unit, false);
+            }
+
+            MigrationJobContext.SaveMigrationJob(job);
+
+            log?.WriteLine(
+                $"Forward change stream re-enabled by user request. " +
+                $"ChangeStreamStartedOn forced to {now:O} for job and {units.Count} collection(s); " +
+                $"forward resume tokens cleared.",
+                LogType.Warning);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Forces a re-initialization of the sync-back change stream when the user
+        /// flips forward -> sync-back. Overrides the set-when-empty guard on
+        /// SyncBackChangeStreamStartedOn (direct field assignment) and clears all
+        /// sync-back-direction resume tokens / cursor state on the job and every
+        /// valid migration unit so sync-back replays from <paramref name="newStartedOn"/>
+        /// (defaults to <see cref="DateTime.UtcNow"/>). Forward state is left intact.
+        /// Do NOT call from the resume-after-restart path - that path must preserve
+        /// existing sync-back resume tokens. Callers performing a drain-then-flip should
+        /// pass the exact post-drain UtcNow so SyncBackChangeStreamStartedOn reflects
+        /// the true moment the new cursor is about to open.
+        /// </summary>
+        public static bool ResetSyncBackChangeStreamForReEnable(Log log, MigrationJob job, DateTime? newStartedOn = null)
+        {
+            if (job == null)
+                return false;
+
+            var units = Helper.GetMigrationUnitsToMigrate(job)
+                .Where(Helper.IsMigrationUnitValid)
+                .ToList();
+
+            var now = newStartedOn ?? DateTime.UtcNow;
+
+            job.ForceResetChangeStreamStartedOn(true, now);
+            job.SetOriginalResumeToken(true, null);
+            job.SetInitialDocumenReplayed(true, false);
+#pragma warning disable CS0618 // SyncBackResumeDocumentId is obsolete but may still hold legacy stored data
+            job.SyncBackResumeDocumentId = null;
+#pragma warning restore CS0618
+            job.SyncBackResumeDocumentKey = null;
+            job.SyncBackResumeCollectionKey = null;
+            job.SetCursorUtcTimestamp(true, DateTime.MinValue);
+            job.SetTransitionBootstrapPending(true, false);
+            job.SetServerLevelChangeStreamResetPending(true, false);
+            job.PendingAction = PendingChangeStreamAction.SyncBackEnabled;
+
+            foreach (var unit in units)
+            {
+                unit.ForceResetChangeStreamStartedOn(true, now);
+                unit.SetOriginalResumeToken(true, null);
+                unit.SetCursorUtcTimestamp(true, DateTime.MinValue);
+                unit.SetCSLastChange(true, null, null);
+                unit.ClearResumeDocumentInfo(true);
+                unit.ResetChangeStreamCounters(true);
+                unit.CSLastChecked = DateTime.MinValue;
+
+                MigrationJobContext.SaveMigrationUnit(unit, false);
+            }
+
+            MigrationJobContext.SaveMigrationJob(job);
+
+            log?.WriteLine(
+                $"SyncBack: change stream re-initialized by user request. " +
+                $"SyncBackChangeStreamStartedOn forced to {now:O} for job and {units.Count} collection(s); " +
+                $"sync-back resume tokens cleared.",
+                LogType.Warning);
 
             return true;
         }

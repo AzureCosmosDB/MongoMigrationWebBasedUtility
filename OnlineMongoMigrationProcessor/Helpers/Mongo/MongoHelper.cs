@@ -1410,8 +1410,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
         /// <summary>
         /// Moves an unsharded collection to a specific shard using the moveCollection admin command.
+        /// Returns (true, null) on success (including when the collection is already on the target shard).
+        /// On failure returns (false, errorMessage) so the caller can include the detail in its own log.
         /// </summary>
-        public static async Task<bool> MoveCollectionAsync(Log log, MongoClient targetClient, string databaseName, string collectionName, string toShard)
+        public static async Task<(bool Ok, string? Error)> MoveCollectionAsync(Log log, MongoClient targetClient, string databaseName, string collectionName, string toShard)
         {
             var ns = $"{databaseName}.{collectionName}";
             try
@@ -1427,7 +1429,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                 await adminDb.RunCommandAsync<BsonDocument>(command);
                 log.WriteLine($"Successfully moved collection {ns} to shard {toShard}");
-                return true;
+                return (true, null);
             }
             catch (Exception ex)
             {
@@ -1435,11 +1437,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 if (ex.Message.Contains("cannot move shard to the same node", StringComparison.OrdinalIgnoreCase))
                 {
                     log.WriteLine($"Collection {ns} is already on shard {toShard}, skipping move", LogType.Debug);
-                    return true;
+                    return (true, null);
                 }
 
-                log.WriteLine($"Error moving collection {ns} to shard {toShard}: {ex.Message}", LogType.Error);
-                return false;
+                return (false, ex.Message);
             }
         }
 

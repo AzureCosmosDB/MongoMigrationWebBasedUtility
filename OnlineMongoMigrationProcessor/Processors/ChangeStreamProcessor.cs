@@ -198,11 +198,35 @@ namespace OnlineMongoMigrationProcessor
         {
             get
             {
+                // Azure Cosmos DB for MongoDB vCore (DocumentDB) reports a Mongo-compatible
+                // version >= 6 but rejects $changeStreamSplitLargeEvent with
+                // "Stage $changeStreamSplitLargeEvent is not permitted in a $changeStream pipeline".
+                // Skip it for that endpoint regardless of reported server version.
+                if (IsWatchedEndpointDocumentDB) return false;
+
                 var v = MigrationJobContext.CurrentlyActiveJob?.SourceServerVersion;
                 if (string.IsNullOrEmpty(v)) return false;
                 var dot = v.IndexOf('.');
                 var head = dot > 0 ? v.Substring(0, dot) : v;
                 return int.TryParse(head, out var major) && major >= 6;
+            }
+        }
+
+        // True when the endpoint the change-stream is opened against is Azure Cosmos DB for
+        // MongoDB vCore (DocumentDB). For sync-back the watched endpoint is the target;
+        // otherwise it's the source. Detected from the active connection string because
+        // job.SourceEndpoint / job.TargetEndpoint are never populated.
+        protected bool IsWatchedEndpointDocumentDB
+        {
+            get
+            {
+                var job = MigrationJobContext.CurrentlyActiveJob;
+                if (job == null) return false;
+                string? connStr = _syncBack
+                    ? MigrationJobContext.TargetConnectionString.TryGetValue(job.Id, out var t) ? t : null
+                    : MigrationJobContext.SourceConnectionString.TryGetValue(job.Id, out var s) ? s : null;
+                return !string.IsNullOrEmpty(connStr)
+                    && connStr.Contains("mongocluster.cosmos.azure.com", StringComparison.OrdinalIgnoreCase);
             }
         }
 
@@ -581,6 +605,10 @@ namespace OnlineMongoMigrationProcessor
                 _isCSProcessing = true;
             }
 
+            // Surface "processor is in its main loop" to the UI so flip handlers can poll
+            // for the graceful auto-close to complete before dispatching the next direction.
+            MigrationJobContext.IsChangeStreamProcessorRunning = true;
+
             _log.WriteLine($"{_syncBackPrefix} RunChangeStreamProcessorForAllCollections invoked", LogType.Debug);
             try
             {
@@ -607,6 +635,7 @@ namespace OnlineMongoMigrationProcessor
                 {
                     _isCSProcessing = false;
                 }
+                MigrationJobContext.IsChangeStreamProcessorRunning = false;
             }
         }
 

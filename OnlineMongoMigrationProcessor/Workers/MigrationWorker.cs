@@ -52,6 +52,11 @@ namespace OnlineMongoMigrationProcessor.Workers
         private static int _keepAliveSslFailureCount = 0;
         private static bool _keepAliveDisabledForProcess = false;
 
+        // Serialize moveCollection admin commands across all MUs in the process. The partition-prep
+        // pipeline runs up to 8 MUs concurrently; firing 8 simultaneous moveCollection + dropDatabase
+        // calls against the target makes the server return transient internal errors and deadlocks.
+        private static readonly SemaphoreSlim _moveCollectionGate = new SemaphoreSlim(1, 1);
+
         private CancellationTokenSource? _compare_cts;
         private CancellationTokenSource? _cts;
 
@@ -65,12 +70,6 @@ namespace OnlineMongoMigrationProcessor.Workers
         // collection's indexes to finish. Entry is removed once the task completes.
         private readonly ConcurrentDictionary<string, Task> _pendingIndexBuildTasksByUnit = new ConcurrentDictionary<string, Task>();
 
-        // Pending moveCollection requests captured during prep. Drained per-unit just before data
-        // copy starts so we (a) create all collections first and (b) leave a gap between create
-        // and moveCollection (the server returns a transient internal error if moveCollection is
-        // called immediately after collection creation).
-        private readonly ConcurrentDictionary<string, (string Shard, DateTime EnqueuedAtUtc)> _pendingMovesByUnitId = new ConcurrentDictionary<string, (string, DateTime)>();
-        
         public MigrationWorker()
         {            
             _log = new Log();          
@@ -517,16 +516,15 @@ namespace OnlineMongoMigrationProcessor.Workers
                 && MigrationJobContext.CurrentlyActiveJob?.JobType != JobType.RUOptimizedCopy
                 && !(MigrationJobContext.CurrentlyActiveJob?.ProcessingSyncBack ?? false);
 
-            if (useServerLevel)
+            
+            if (!MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn.HasValue)
             {
-                if (!MigrationJobContext.CurrentlyActiveJob!.ChangeStreamStartedOn.HasValue)
-                {
-                    MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn = DateTime.UtcNow;
-                    MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
-                }
-
-                mu.ChangeStreamStartedOn = MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value;
+                MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(false, DateTime.UtcNow);
+                MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
             }
+
+            mu.SetChangeStreamStartedOn(false, MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value);
+           
 
             if (mu.MigrationChunks!=null && mu.MigrationChunks.Count>0)
             {
@@ -591,8 +589,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                 
                 _log.WriteLine($"Assigning chunks to migration unit for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
                 mu.MigrationChunks = chunks!;
-                mu.ChangeStreamStartedOn = currrentTime;
-                _log.WriteLine($"Partitions created successfully - Chunks: {chunks!.Count}, ChangeStreamStartedOn: {currrentTime}", LogType.Debug);
+                mu.SetChangeStreamStartedOn(false, currrentTime);
+                _log.WriteLine($"Partitions created successfully - Chunks: {chunks!.Count}, ChangeStreamStartedOn: {mu.ChangeStreamStartedOn:O}", LogType.Debug);
                 return TaskResult.Success;
             }
             catch (Exception ex)
@@ -795,13 +793,35 @@ namespace OnlineMongoMigrationProcessor.Workers
         /// </summary>
         private Task<bool> TryQueueCompletedUnitForChangeStreamAsync(MigrationUnit mu, string logCallerTag)
         {
-            bool offlineCompleted = (mu.DumpComplete && mu.RestoreComplete)
-                || (mu.MigrationChunks != null
-                    && mu.MigrationChunks.Count > 0
-                    && mu.MigrationChunks.TrueForAll(c => c.IsDownloaded == true && c.IsUploaded == true));
+            bool allChunksComplete = mu.MigrationChunks != null
+                && mu.MigrationChunks.Count > 0
+                && mu.MigrationChunks.TrueForAll(c => c.IsDownloaded == true && c.IsUploaded == true);
+
+            bool offlineCompleted = (mu.DumpComplete && mu.RestoreComplete) || allChunksComplete;
 
             if (!offlineCompleted)
                 return Task.FromResult(false);
+
+            // Resume repair: workers can finish flipping chunk flags right before a pause/restart,
+            // leaving the coordinator's timer-driven aggregation (CheckForCompletedMigrationUnits)
+            // unable to run. On resume the chunks say "done" but the MU-level fields are still at
+            // their last-persisted values (0% / Complete=false), so the UI shows stale progress
+            // forever. Promote the chunk-level truth to the MU now.
+            if (allChunksComplete && (!mu.DumpComplete || !mu.RestoreComplete))
+            {
+                MigrationJobContext.MutateMigrationUnit(mu.Id, m =>
+                {
+                    if (!m.DumpComplete) { m.DumpComplete = true; m.DumpPercent = 100; }
+                    if (!m.RestoreComplete) { m.RestoreComplete = true; m.RestorePercent = 100; }
+                    if (!m.BulkCopyEndedOn.HasValue || m.BulkCopyEndedOn.Value == DateTime.MinValue)
+                    {
+                        m.BulkCopyEndedOn = DateTime.UtcNow;
+                    }
+                    m.UpdateParentJob();
+                }, updateParent: true);
+
+                _log.WriteLine($"Resume: aggregated chunk-complete state to MU-level for {mu.DatabaseName}.{mu.CollectionName} [{logCallerTag}]", LogType.Debug);
+            }
 
             if (_migrationProcessor == null)
                 return Task.FromResult(true);
@@ -1106,21 +1126,6 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             MigrationJobContext.SaveMigrationUnit(mu, false);
 
-            if (MigrationJobContext.CurrentlyActiveJob.SyncBackEnabled && 
-                !MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun && 
-                Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob) && 
-                !context.CheckedCS)
-            {
-                _log.WriteLine("SyncBack: Checking if change stream is enabled on target");
-                var retValue = await MongoHelper.IsChangeStreamEnabledAsync(_log, string.Empty, 
-                    targetConnStr, mu, true);
-                
-                context.CheckedCS = true;
-                
-                if (!retValue.IsCSEnabled)
-                    return TaskResult.Abort;
-            }
-
             return TaskResult.Success;
         }
 
@@ -1158,16 +1163,41 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             else if (strategy == ShardingStrategy.DontShard)
             {
-                // Move collection to specified shard if MoveToShard is set
+                // Move collection to specified shard if MoveToShard is set. First attempt happens
+                // here right after collection creation; if it fails (the server can return a
+                // transient internal error when called too soon after create), MoveStatus stays
+                // false and EnsureMoveAppliedAsync will retry once just before data copy starts.
                 var moveToShard = GetEffectiveMoveToShard(mu);
                 if (!string.IsNullOrWhiteSpace(moveToShard))
                 {
-                    // Defer the moveCollection call. Calling it immediately after collection
-                    // creation can fail with a transient internal error on the server, so we
-                    // queue it here and apply it (with a min gap and retries) right before the
-                    // unit's data copy starts.
-                    _pendingMovesByUnitId[mu.Id] = (moveToShard, DateTime.UtcNow);
-                    _log.WriteLine($"Queued moveCollection for {namespaceForLog} -> {moveToShard} (will run before data copy starts)", LogType.Debug);
+                    if (mu.MoveStatus)
+                    {
+                        _log.WriteLine($"moveCollection for {namespaceForLog} -> {moveToShard} already applied; skipping", LogType.Debug);
+                    }
+                    else
+                    {
+                        // Brief cool-down: server can return a transient internal error if
+                        // moveCollection is called immediately after collection creation.
+                        try { await Task.Delay(5000, _cts); } catch (OperationCanceledException) { return TaskResult.Canceled; }
+
+                        (bool moveOk, string? moveError) moveResult;
+                        try { await _moveCollectionGate.WaitAsync(_cts); } catch (OperationCanceledException) { return TaskResult.Canceled; }
+                        try
+                        {
+                            moveResult = await MongoHelper.MoveCollectionAsync(_log, targetClient, targetDatabaseName, targetCollectionName, moveToShard);
+                        }
+                        finally { _moveCollectionGate.Release(); }
+
+                        if (moveResult.moveOk)
+                        {
+                            mu.MoveStatus = true;
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                        }
+                        else
+                        {
+                            _log.WriteLine($"moveCollection for {namespaceForLog} -> {moveToShard} failed on first attempt; will retry before data copy starts. Error: {moveResult.moveError}", LogType.Warning);
+                        }
+                    }
                 }
             }
 
@@ -1178,53 +1208,87 @@ namespace OnlineMongoMigrationProcessor.Workers
         }
 
         /// <summary>
-        /// Applies any pending moveCollection request enqueued by <see cref="ApplyShardingStrategyAsync"/>
-        /// for the given unit. Enforces a minimum gap since enqueue and retries on transient failures so the
-        /// move is given time to succeed before data copy begins.
+        /// Runs the deferred moveCollection for the given unit just before data copy starts when
+        /// <see cref="MigrationUnit.MoveStatus"/> is false and a target shard is configured.
+        /// Uses RetryHelper for up to 4 attempts with 2s initial exponential backoff. On success
+        /// persists MoveStatus=true; on final failure leaves it false so it will be retried on
+        /// the next job run.
         /// </summary>
-        private async Task EnsurePendingMoveAppliedAsync(MigrationUnit mu, CancellationToken ct)
+        private async Task EnsureMoveAppliedAsync(MigrationUnit mu, CancellationToken ct)
         {
-            if (!_pendingMovesByUnitId.TryGetValue(mu.Id, out var pending))
+            if (mu.MoveStatus)
                 return;
 
-            const int minGapMs = 10000;
-            int[] retryDelaysMs = { 0, 5000, 15000, 30000 };
+            var moveToShard = GetEffectiveMoveToShard(mu);
+            if (string.IsNullOrWhiteSpace(moveToShard))
+                return;
 
-            var targetConnStr = MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob!.Id];
-            var targetClient = MongoClientFactory.Create(_log, targetConnStr);
+            if (ct.IsCancellationRequested)
+                return;
+
             var targetDatabaseName = mu.GetEffectiveTargetDatabaseName();
             var targetCollectionName = mu.GetEffectiveTargetCollectionName();
             var namespaceForLog = Log.FormatNamespaceForLog(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName);
 
-            var elapsedMs = (int)Math.Max(0, (DateTime.UtcNow - pending.EnqueuedAtUtc).TotalMilliseconds);
-            if (elapsedMs < minGapMs)
+            // Skip the move once writes have started against the target (e.g. on pause/resume).
+            // moveCollection is unsafe after data exists in the target collection.
+            if (mu.BulkCopyStartedOn.HasValue && mu.BulkCopyStartedOn.Value != DateTime.MinValue)
             {
-                var waitMs = minGapMs - elapsedMs;
-                _log.WriteLine($"Waiting {waitMs} ms before moving {namespaceForLog} -> {pending.Shard} (post-create cool-down)", LogType.Debug);
-                try { await Task.Delay(waitMs, ct); } catch (OperationCanceledException) { return; }
+                _log.WriteLine($"Skipping moveCollection for {namespaceForLog} -> {moveToShard}: writes to target have already started (BulkCopyStartedOn={mu.BulkCopyStartedOn:O})", LogType.Warning);
+                return;
             }
 
-            for (int attempt = 0; attempt < retryDelaysMs.Length; attempt++)
+            var targetConnStr = MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob!.Id];
+            var targetClient = MongoClientFactory.Create(_log, targetConnStr);
+
+
+            const int maxAttempts = 4;
+            string? lastError = null;
+            int attemptCounter = 0;
+            var retry = new RetryHelper();
+            var retryResult = await retry.ExecuteTask(
+                async () =>
+                {
+                    if (ct.IsCancellationRequested) return TaskResult.Canceled;
+
+                    try { await _moveCollectionGate.WaitAsync(ct); }
+                    catch (OperationCanceledException) { return TaskResult.Canceled; }
+
+                    int attempt = Interlocked.Increment(ref attemptCounter);
+                    try
+                    {
+                        var (ok, err) = await MongoHelper.MoveCollectionAsync(_log, targetClient, targetDatabaseName, targetCollectionName, moveToShard);
+                        if (ok)
+                        {
+                            if (attempt > 1)
+                                _log.WriteLine($"moveCollection for {namespaceForLog} -> {moveToShard} succeeded on attempt {attempt}/{maxAttempts}");
+                            return TaskResult.Success;
+                        }
+                        lastError = err;
+                        _log.WriteLine($"moveCollection for {namespaceForLog} -> {moveToShard} attempt {attempt}/{maxAttempts} failed. Error: {err}", LogType.Warning);
+                        return TaskResult.Retry;
+                    }
+                    finally { _moveCollectionGate.Release(); }
+                },
+                (ex, attempt, backoffSec) =>
+                {
+                    lastError = ex.Message;
+                    _log.WriteLine($"moveCollection for {namespaceForLog} -> {moveToShard} attempt {attempt}/{maxAttempts} threw: {ex.Message}. Retrying in {backoffSec}s...", LogType.Warning);
+                    return Task.FromResult(TaskResult.Retry);
+                },
+                _log,
+                maxTries: maxAttempts,
+                initialDelayMs: 2000);
+
+            if (retryResult == TaskResult.Success)
             {
-                if (ct.IsCancellationRequested)
-                    return;
-
-                if (retryDelaysMs[attempt] > 0)
-                {
-                    _log.WriteLine($"Retrying moveCollection for {namespaceForLog} -> {pending.Shard} in {retryDelaysMs[attempt]} ms (attempt {attempt + 1}/{retryDelaysMs.Length})", LogType.Debug);
-                    try { await Task.Delay(retryDelaysMs[attempt], ct); } catch (OperationCanceledException) { return; }
-                }
-
-                var moveResult = await MongoHelper.MoveCollectionAsync(_log, targetClient, targetDatabaseName, targetCollectionName, pending.Shard);
-                if (moveResult)
-                {
-                    _pendingMovesByUnitId.TryRemove(mu.Id, out _);
-                    return;
-                }
+                mu.MoveStatus = true;
+                MigrationJobContext.SaveMigrationUnit(mu, true);
             }
-
-            _log.WriteLine($"moveCollection for {namespaceForLog} -> {pending.Shard} did not succeed after {retryDelaysMs.Length} attempts; continuing without move", LogType.Warning);
-            _pendingMovesByUnitId.TryRemove(mu.Id, out _);
+            else if (retryResult != TaskResult.Canceled)
+            {
+                _log.WriteLine($"moveCollection for {namespaceForLog} -> {moveToShard} did not succeed after retries; data copy will proceed. Error: {lastError}", LogType.Error);
+            }
         }
 
         /// <summary>
@@ -1389,6 +1453,24 @@ namespace OnlineMongoMigrationProcessor.Workers
             // Lightweight global prerequisites only (no upfront per-collection partitioning).
             await ResolveAutoShardAssignmentsAsync(unitsForMigrate);
 
+            // SyncBack target change-stream probe runs once for the whole job. The probe creates a
+            // throwaway GUID database, inserts a doc, and then drops the database;
+            if (MigrationJobContext.CurrentlyActiveJob.SyncBackEnabled &&
+                !MigrationJobContext.CurrentlyActiveJob.IsSimulatedRun &&
+                Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob) &&
+                unitsForMigrate.Count > 0)
+            {
+                var targetConnStrForProbe = MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id];
+                if (!string.IsNullOrWhiteSpace(targetConnStrForProbe))
+                {
+                    _log.WriteLine("SyncBack: Checking if change stream is enabled on target");
+                    var probeResult = await MongoHelper.IsChangeStreamEnabledAsync(_log, string.Empty,
+                        targetConnStrForProbe, unitsForMigrate[0], true);
+                    if (!probeResult.IsCSEnabled)
+                        return TaskResult.Abort;
+                }
+            }
+
             var serverCtx = new PartitionPrepContext
             {
                 CheckedCS = false,
@@ -1528,6 +1610,13 @@ namespace OnlineMongoMigrationProcessor.Workers
             // on the registration gate when the last MU finishes.
             _migrationProcessor?.MarkAllUnitsDispatched();
 
+            // Resume case: when every MU was already complete the fast-path bypasses StartProcessAsync,
+            // so the coordinator never registers any MU and its OnMigrationUnitCompleted callback (the
+            // normal trigger for StopOfflineOrInvokeChangeStreams) never fires — leaving the CS runner
+            // unstarted and WaitForMigrationProcessorCompletionAsync looping forever. The method is
+            // gated and re-entrant, so this nudge is safe when MUs were actually processed.
+            try { _migrationProcessor?.StopOfflineOrInvokeChangeStreams(); } catch { }
+
             MigrationJobContext.AddVerboseLog($"Before WaitForMigrationProcessorCompletionAsync");
             return await WaitForMigrationProcessorCompletionAsync(ctsToken);
         }
@@ -1571,6 +1660,9 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
 
             _migrationProcessor?.MarkAllUnitsDispatched();
+
+            // Same resume-fast-path nudge as the async-partitioning loop (see comment above).
+            try { _migrationProcessor?.StopOfflineOrInvokeChangeStreams(); } catch { }
 
             MigrationJobContext.AddVerboseLog($"Before WaitForMigrationProcessorCompletionAsync");
             return await WaitForMigrationProcessorCompletionAsync(ctsToken);
@@ -1707,8 +1799,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (HandleControlPause())
                 return TaskResult.Canceled;
 
-            // Apply any deferred moveCollection now (with delay + retry) so data copy starts on the correct shard.
-            await EnsurePendingMoveAppliedAsync(migrationUnit, ctsToken);
+            // Apply any deferred moveCollection now so data copy starts on the correct shard.
+            await EnsureMoveAppliedAsync(migrationUnit, ctsToken);
 
             MigrationJobContext.AddVerboseLog($"Before StartMigrationProcessorAsync {migrationUnit.Id}");
             return await StartMigrationProcessorAsync(migrationUnit);
@@ -1717,53 +1809,56 @@ namespace OnlineMongoMigrationProcessor.Workers
 
         private async Task<TaskResult> SetSyncBackResumeTokenAsync(CancellationToken ctsToken)
         {
-            if (Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob!))
+            if (!Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob!))
+                return TaskResult.Success;
+
+            MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack = true;
+
+            // Single sync-back anchor shared by the job and every MU, regardless of whether the
+            // change stream is currently server- or collection-scoped. Later Collection<->Server
+            // transitions use SyncBackChangeStreamStartedOn (not the original job StartedOn) to
+            // replay reverse-direction changes from the moment sync-back was actually enabled.
+            // SetChangeStreamStartedOn is set-when-empty, so existing anchors are preserved.
+            var syncBackStartedOn = DateTime.UtcNow;
+            MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(true, syncBackStartedOn);
+
+            var units = Helper.GetMigrationUnitsToMigrate(MigrationJobContext.CurrentlyActiveJob);
+
+            // Seed every MU's sync-back anchor up front. Track freshly-seeded MUs so we set
+            // resume tokens only for them below (existing MUs already have one).
+            var freshlySeeded = new List<MigrationUnit>();
+            foreach (var mub in units)
             {
-
-                MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack = true;
-                if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server)
+                var mu = MigrationJobContext.GetMigrationUnit(mub.Id);
+                if (!mu.GetChangeStreamStartedOn(true).HasValue)
                 {
-                    if (!MigrationJobContext.CurrentlyActiveJob.GetChangeStreamStartedOn(true).HasValue)
-                        MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(true, DateTime.UtcNow);
-                }
-                else
-                {
-                    if (!MigrationJobContext.CurrentlyActiveJob.GetChangeStreamStartedOn(false).HasValue)
-                        MigrationJobContext.CurrentlyActiveJob.SetChangeStreamStartedOn(false, DateTime.UtcNow);
-                }
-
-                List<Task> resumeTokenTasks = new List<Task>();
-
-                var units = Helper.GetMigrationUnitsToMigrate(MigrationJobContext.CurrentlyActiveJob);
-
-                // Setup server-level resume token if applicable
-                if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && units.Count > 0)
-                {
-                    PartitionPrepContext ctx= new PartitionPrepContext();
-                    ctx.UseServerLevel = true;
-                    ctx.ServerLevelResumeTokenSet = false;
-
-                    await SetupServerLevelResumeTokenAsync(units[0], ctx, ctsToken, MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack);
-                    return TaskResult.Success;
-                }
-
-
-
-                foreach (var mub in units)
-                {
-                    var mu= MigrationJobContext.GetMigrationUnit(mub.Id);
-
-                    if (!mu.GetChangeStreamStartedOn(true).HasValue)
-                    {
-                        mu.SetChangeStreamStartedOn(true, DateTime.UtcNow);
-                        mu.CSLastChecked = DateTime.MinValue;
-                        MigrationJobContext.SaveMigrationUnit(mu, true);
-                        var setResumeResult = await SetCollectionResumeToken(mu, true, ctsToken, resumeTokenTasks);
-                        if (setResumeResult != TaskResult.Success)
-                            return setResumeResult;
-                    }                    
+                    mu.SetChangeStreamStartedOn(true, syncBackStartedOn);
+                    mu.CSLastChecked = DateTime.MinValue;
+                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                    freshlySeeded.Add(mu);
                 }
             }
+
+            List<Task> resumeTokenTasks = new List<Task>();
+
+            // Setup server-level resume token if applicable
+            if (MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && units.Count > 0)
+            {
+                PartitionPrepContext ctx = new PartitionPrepContext();
+                ctx.UseServerLevel = true;
+                ctx.ServerLevelResumeTokenSet = false;
+
+                await SetupServerLevelResumeTokenAsync(units[0], ctx, ctsToken, MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack);
+                return TaskResult.Success;
+            }
+
+            foreach (var mu in freshlySeeded)
+            {
+                var setResumeResult = await SetCollectionResumeToken(mu, true, ctsToken, resumeTokenTasks);
+                if (setResumeResult != TaskResult.Success)
+                    return setResumeResult;
+            }
+
             return TaskResult.Success;
         }
 
@@ -2130,7 +2225,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 _log.WriteLine($"Error in reading log. Orginal log backed up as {logfile}", LogType.Error);
             }
-            _log.WriteLine($"Job {MigrationJobContext.CurrentlyActiveJob.Id} - JobType: {MigrationJobContext.CurrentlyActiveJob.JobType} started on {MigrationJobContext.CurrentlyActiveJob.StartedOn} (UTC)", LogType.Warning);
+            _log.WriteLine($"Processing Job {MigrationJobContext.CurrentlyActiveJob.Id} (started on {MigrationJobContext.CurrentlyActiveJob.StartedOn} (UTC)) - JobType: {MigrationJobContext.CurrentlyActiveJob.JobType} ", LogType.Warning);
             _log.SetJob(MigrationJobContext.CurrentlyActiveJob);
             _log.WriteLine($"Working folder is {Environment.GetEnvironmentVariable("ResourceDrive")}");
             MigrationJobContext.InitializeLog(_log);
@@ -2375,7 +2470,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             
             string logfile = _log.Init(MigrationJobContext.CurrentlyActiveJob.Id);
             _log.SetJob(MigrationJobContext.CurrentlyActiveJob); // Set job reference for log level filtering
-            _log.WriteLine($"SyncBack: {MigrationJobContext.CurrentlyActiveJob.Id} started on {MigrationJobContext.CurrentlyActiveJob.StartedOn} (UTC)");
+
 
             MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack = true;
             MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);

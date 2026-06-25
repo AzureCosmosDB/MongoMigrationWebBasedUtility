@@ -36,6 +36,21 @@ namespace OnlineMongoMigrationProcessor
         private readonly ConcurrentDictionary<string, DateTime> _lastPerMuPersistUtc = new ConcurrentDictionary<string, DateTime>();
         private static readonly TimeSpan PerMuPersistInterval = TimeSpan.FromMinutes(5);
 
+        // Self-healing for cursors that go silent: when an idle batch returns a
+        // postBatchResumeToken identical to the one we sent in AND that token's
+        // embedded clusterTime is more than StuckCursorAgeThreshold behind wall
+        // clock, we rewind ChangeStreamStartedOn to UtcNow - StuckCursorRewindOffset
+        // and clear the resume token so the next batch opens a fresh cursor.
+        private static readonly TimeSpan StuckCursorAgeThreshold = TimeSpan.FromHours(24);
+        private static readonly TimeSpan StuckCursorRewindOffset = TimeSpan.FromHours(6);
+
+        // Per-MU count of consecutive idle rounds where postBatchResumeToken did
+        // not advance. TryRecoverStuckCursor is only invoked once the streak
+        // reaches PbrtStuckRoundsThreshold; any round that produces events or
+        // advances the token resets the count to 0.
+        private readonly ConcurrentDictionary<string, int> _consecutiveStuckRounds = new ConcurrentDictionary<string, int>();
+        private const int PbrtStuckRoundsThreshold = 5;
+
         private bool ShouldPersistMu(string muId, bool force)
         {
             if (force)
@@ -89,6 +104,42 @@ namespace OnlineMongoMigrationProcessor
             MigrationJobContext.AddVerboseLog("CollectionLevelChangeStreamProcessor.ProcessChangeStreamsAsync: starting");
             WriteBasicLog();
 
+            // Surface bootstrap context as a warning at processor start, mirroring the
+            // server-level path (ChangeStreamTransitionHelper). PendingAction selects the
+            // contextual message (user-initiated forward<->sync-back flip) and falls back
+            // to a neutral "initialized" message when nothing is queued. Transient lifecycle:
+            // PendingAction is cleared after the warning so reconnects do not re-log and
+            // the field is ready to carry the next user action.
+            var activeJob = MigrationJobContext.CurrentlyActiveJob;
+            if (activeJob != null)
+            {
+                string contextMsg;
+                switch (activeJob.PendingAction)
+                {
+                    case PendingChangeStreamAction.ForwardSyncEnabled:
+                        contextMsg = "Forward sync re-enabled by user.";
+                        break;
+                    case PendingChangeStreamAction.SyncBackEnabled:
+                        contextMsg = "Sync-back enabled by user.";
+                        break;
+                    default:
+                        contextMsg = "Collection-level change stream initialized.";
+                        break;
+                }
+
+                var startedOn = activeJob.GetChangeStreamStartedOn(_syncBack);
+                string startedOnStr = startedOn.HasValue ? startedOn.Value.ToString("O") : "<unset>";
+                _log.WriteLine(
+                    $"{_syncBackPrefix}{contextMsg} Collection-level change stream processor starting from {startedOnStr}.",
+                    LogType.Warning);
+
+                if (activeJob.PendingAction != PendingChangeStreamAction.None)
+                {
+                    activeJob.PendingAction = PendingChangeStreamAction.None;
+                    MigrationJobContext.SaveMigrationJob(activeJob);
+                }
+            }
+
             int index = 0;
             var sortedKeys = GetSortedCollectionKeys();
 
@@ -97,8 +148,9 @@ namespace OnlineMongoMigrationProcessor
             long loops = 0;
             long emptyLoops = 0;
             DateTime lastResumeTokenCheck = DateTime.MinValue;
+            bool batchWasInFlightAtPause = false;
 
-            while (!token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
+            while (!token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested && !MigrationJobContext.ChangeStreamAutoCloseRequested)
             {
                 var totalKeys = sortedKeys.Count;
 
@@ -120,7 +172,7 @@ namespace OnlineMongoMigrationProcessor
                 // Reset empty loops counter when we have collections to process
                 emptyLoops = ResetEmptyLoopsCounterIfNeeded(emptyLoops, totalKeys);
 
-                while (index < totalKeys && !token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
+                while (index < totalKeys && !token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested && !MigrationJobContext.ChangeStreamAutoCloseRequested)
                 {
                     var batchKeys = sortedKeys.Skip(index).Take(_concurrentProcessors).ToList();
                     int seconds = CalculateBatchDuration(batchKeys);
@@ -130,6 +182,20 @@ namespace OnlineMongoMigrationProcessor
                     await ExecuteBatchTasks(tasks, collectionProcessed, seconds);
 
                     index += _concurrentProcessors;
+
+                    // If a pause or graceful auto-close arrived during the batch we just
+                    // completed, surface that explicitly so the drain trail is unambiguous.
+                    if (MigrationJobContext.ControlledPauseRequested || MigrationJobContext.ChangeStreamAutoCloseRequested)
+                    {
+                        batchWasInFlightAtPause = true;
+                        string trigger = MigrationJobContext.ChangeStreamAutoCloseRequested
+                            ? "Graceful auto-close"
+                            : "Controlled pause";
+                        _log.WriteLine(
+                            $"{_syncBackPrefix}{trigger} observed after in-flight batch ({collectionProcessed.Count} collection(s)) completed. Exiting at safe point; no further batches will start.",
+                            LogType.Warning);
+                        break;
+                    }
 
                     // Pause between batches to allow memory recovery and reduce CPU spikes
                     // Increased to 5000ms to address OOM issues and server CPU spikes
@@ -158,6 +224,29 @@ namespace OnlineMongoMigrationProcessor
                 index = 0;
                 sortedKeys = GetSortedCollectionKeys();
             }
+
+            // Single drain-exit log so the trail in the UI is unambiguous: it states the
+            // reason for exit (pause / graceful close / cancellation / token) and whether
+            // a batch was mid-flight at the moment the trigger fired.
+            string exitReason;
+            if (MigrationJobContext.ChangeStreamAutoCloseRequested)
+                exitReason = batchWasInFlightAtPause
+                    ? "graceful auto-close (in-flight batch completed at safe point)"
+                    : "graceful auto-close (idle between batches; no batch was in flight)";
+            else if (MigrationJobContext.ControlledPauseRequested)
+                exitReason = batchWasInFlightAtPause
+                    ? "controlled pause (in-flight batch completed at safe point)"
+                    : "controlled pause (idle between batches; no batch was in flight)";
+            else if (ExecutionCancelled)
+                exitReason = "execution cancelled";
+            else if (token.IsCancellationRequested)
+                exitReason = "cancellation token signalled";
+            else
+                exitReason = "loop ended";
+
+            _log.WriteLine(
+                $"{_syncBackPrefix}Collection-level change stream processor exited: {exitReason}.",
+                LogType.Warning);
         }
 
         private async Task<(List<string> sortedKeys, long emptyLoops, DateTime lastResumeTokenCheck)> HandleEmptyCollectionKeys(long emptyLoops, DateTime lastResumeTokenCheck, CancellationToken token)
@@ -211,11 +300,7 @@ namespace OnlineMongoMigrationProcessor
 
         private void WriteBasicLog()
         {
-
-            bool isVCore = (_syncBack ? MigrationJobContext.CurrentlyActiveJob.TargetEndpoint : MigrationJobContext.CurrentlyActiveJob.SourceEndpoint)
-                .Contains("mongocluster.cosmos.azure.com", StringComparison.OrdinalIgnoreCase);
-
-            _log.WriteLine($"{_syncBackPrefix}Environment detection - IsVCore: {isVCore}, SyncBack: {_syncBack}", LogType.Debug);
+            _log.WriteLine($"{_syncBackPrefix}Environment detection - IsDocumentDB: {IsWatchedEndpointDocumentDB}, SyncBack: {_syncBack}", LogType.Debug);
         }
 
         private List<string> GetSortedCollectionKeys()
@@ -411,6 +496,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 if (mu == null)
                     return false;
+
 
                 mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
                 mu.OpLogError = errorType;
@@ -794,6 +880,18 @@ namespace OnlineMongoMigrationProcessor
             string collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
             _log.WriteLine($"{_syncBackPrefix}WatchCollection started for {collectionKey} - Duration: {seconds}s, ResumeToken: {(!string.IsNullOrEmpty(mu.GetResumeToken(_syncBack)) ? "SET" : "NOT SET")}", LogType.Debug);
 
+            // [PBRT] Entry snapshot: token short-hash + decoded ts, MU error state, last-change ts. Lets us confirm what we are resuming from and verify the manual reset took effect.
+            {
+                string tokIn = mu.GetResumeToken(_syncBack) ?? string.Empty;
+                string tokInHash = ShortHash(tokIn);
+                string tokInTs = TryDecodeResumeTokenTimestamp(tokIn);
+                string csLastTok = mu.GetCSLastResumeTokenWithChange(_syncBack) ?? string.Empty;
+                string csLastHash = ShortHash(csLastTok);
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[PBRT] WatchCollection entry {collectionKey} opLogError={mu.OpLogError} resetFlag={mu.ResetChangeStream} resumeToken[hash={tokInHash} ts={tokInTs}] csLastTokenHash={csLastHash} csLastChange={mu.GetCSLastChangeUTCTime(_syncBack):o} cursorUtc={mu.GetCursorUtcTimestamp(_syncBack):o}",
+                    LogType.Debug);
+            }
+
             BsonDocument userFilterDoc = MongoHelper.GetFilterDoc(mu.UserFilter);
                         
             AccumulatedChangesTracker accumulatedChangesInColl;
@@ -856,11 +954,22 @@ namespace OnlineMongoMigrationProcessor
 
                     if (cursor == null)
                     {
-                        MigrationJobContext.AddVerboseLog($"{_syncBackPrefix}Cursor is null for {collectionKey}");
+                        // [PBRT] Cursor came back null — highly unusual, surface it explicitly so we can spot why.
+                        _log.WriteLine($"{_syncBackPrefix}[PBRT] Cursor is NULL after CreateChangeStreamCursorAsync for {collectionKey} — returning early", LogType.Debug);
                         return;
                     }
 
                     MigrationJobContext.AddVerboseLog($"{_syncBackPrefix} Cursor created for {collectionKey} in {cursorCreationSw.Elapsed.TotalSeconds:F1}s. Starting processing...");
+
+                    // [PBRT] Cursor created — confirm timing and which resume strategy is in effect (ResumeAfter vs StartAtOperationTime).
+                    string strat = options.ResumeAfter != null
+                        ? $"ResumeAfter[hash={ShortHash(options.ResumeAfter.ToJson())}]"
+                        : options.StartAtOperationTime != null
+                            ? $"StartAtOperationTime[{options.StartAtOperationTime}]"
+                            : "None";
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[PBRT] Cursor created {collectionKey} createMs={cursorCreationSw.ElapsedMilliseconds} strategy={strat} batchSize={GetChangeStreamBatchSize()} pipelineStages={pipelineArray.Length}",
+                        LogType.Debug);
 
                     // 2. Process cursor with a fresh batch-duration CTS that starts NOW
                     //    (after cursor creation), so processing always gets the full batch time.
@@ -1180,6 +1289,12 @@ namespace OnlineMongoMigrationProcessor
 
             var rawWatchSummary = CreateTempRawWatchSummary();
 
+            // [PBRT] Per-round counters so we can see if cursor.MoveNextAsync ever returned a non-empty batch.
+            long tmpMoveNextCalls = 0;
+            long tmpMoveNextWithBatch = 0;
+            long tmpRawEventsRead = 0;
+            bool tmpFirstEventLogged = false;
+
             using (cursor)
             {
                 try
@@ -1190,6 +1305,7 @@ namespace OnlineMongoMigrationProcessor
                     while (DateTime.UtcNow < batchDeadline && !cancellationToken.IsCancellationRequested)
                     {
                         var hasNext = await cursor.MoveNextAsync(cancellationToken);
+                        tmpMoveNextCalls++;
                         if (!hasNext)
                         {
                             readStopwatch.Stop();
@@ -1201,11 +1317,26 @@ namespace OnlineMongoMigrationProcessor
                         readStopwatch.Stop();
                         accumulatedChangesInColl.CSTotalReadDurationInMS += readStopwatch.ElapsedMilliseconds;
 
+                        int tmpBatchCount = cursor.Current?.Count() ?? 0;
+                        if (tmpBatchCount > 0)
+                        {
+                            tmpMoveNextWithBatch++;
+                            tmpRawEventsRead += tmpBatchCount;
+                        }
 
                         foreach (var change in cursor.Current)
                         {
                             // Capture every raw event as soon as it is read from the cursor.
                             AddTempRawReceivedEvent(rawWatchSummary, change);
+
+                            // [PBRT] First event seen this round — confirms cursor is actually yielding data and shows op type + doc key.
+                            if (!tmpFirstEventLogged)
+                            {
+                                tmpFirstEventLogged = true;
+                                _log.WriteLine(
+                                    $"{_syncBackPrefix}[PBRT] First event {collectionKey} op={change.OperationType} docKey={change.DocumentKey?.ToJson() ?? "<null>"} eventTokenHash={ShortHash(change.ResumeToken.ToJson())} eventTs={GetChangeTimestampUtc(change):o}",
+                                    LogType.Debug);
+                            }
 
                             if (cancellationToken.IsCancellationRequested || ExecutionCancelled)
                             {
@@ -1309,6 +1440,15 @@ namespace OnlineMongoMigrationProcessor
                             string? tokenJson = postBatchToken?.ToJson();
                             var (_, currentResumeToken, _, _) = GetResumeParameters(mu);
 
+                            // [PBRT] Idle-round summary: did cursor produce anything? did postBatchResumeToken advance vs what we sent in?
+                            string inHash = ShortHash(currentResumeToken);
+                            string outHash = ShortHash(tokenJson ?? string.Empty);
+                            string outTs = TryDecodeResumeTokenTimestamp(tokenJson ?? string.Empty);
+                            bool willSaveToken = !string.IsNullOrEmpty(tokenJson) && tokenJson != currentResumeToken;
+                            _log.WriteLine(
+                                $"{_syncBackPrefix}[PBRT] idleRound {collectionKey} moveNext={tmpMoveNextCalls} withBatch={tmpMoveNextWithBatch} rawEvents={tmpRawEventsRead} postBatchToken[hash={outHash} ts={outTs}] in[hash={inHash}] advanced={(inHash != outHash)} willSaveToken={willSaveToken} postBatchNull={(postBatchToken == null)}",
+                                LogType.Debug);
+
                             // Always stamp CursorUtcTimestamp = now on idle cycles so the
                             // UI reflects that the watch is alive. On a truly idle cursor
                             // postBatchResumeToken often equals the ResumeAfter token we
@@ -1318,10 +1458,23 @@ namespace OnlineMongoMigrationProcessor
                             if (!string.IsNullOrEmpty(tokenJson) && tokenJson != currentResumeToken)
                             {
                                 SetResumeParameters(mu, DateTime.UtcNow, tokenJson, _syncBack);
+                                _consecutiveStuckRounds[collectionKey] = 0;
                             }
                             else
                             {
-                                mu.SetCursorUtcTimestamp(_syncBack, DateTime.UtcNow);
+                                //mu.SetCursorUtcTimestamp(_syncBack, DateTime.UtcNow);
+                                int stuck = _consecutiveStuckRounds.AddOrUpdate(collectionKey, 1, (_, v) => v + 1);
+                                if (stuck >= PbrtStuckRoundsThreshold)
+                                {
+                                    // PBRT did not advance for {stuck} consecutive idle rounds — cursor
+                                    // may be wedged. If PBRT clusterTime lags wall clock by more than
+                                    // StuckCursorAgeThreshold, rewind ChangeStreamStartedOn so the next
+                                    // batch opens a fresh cursor.
+                                    _log.WriteLine(
+                                        $"{_syncBackPrefix}[PBRT] {collectionKey} PBRT stuck for {stuck} consecutive idle rounds; invoking TryRecoverStuckCursor.",
+                                        LogType.Info);
+                                    TryRecoverStuckCursor(mu, collectionKey, tokenJson);
+                                }
                             }
                             // Persist every idle cycle — payload is tiny (token + timestamp)
                             // and skipping the write hides the cursor's progress for hours.
@@ -1331,6 +1484,15 @@ namespace OnlineMongoMigrationProcessor
                         {
                             _log.WriteLine($"{_syncBackPrefix}Could not retrieve postBatchResumeToken for {collectionKey}: {ex.Message}", LogType.Debug);
                         }
+                    }
+                    else
+                    {
+                        // [PBRT] Non-idle round summary: events flowed; flush has already advanced mu.ResumeToken. Confirm the new saved token.
+                        _consecutiveStuckRounds[collectionKey] = 0;
+                        var (_, savedTok, _, _) = GetResumeParameters(mu);
+                        _log.WriteLine(
+                            $"{_syncBackPrefix}[PBRT] eventsRound {collectionKey} moveNext={tmpMoveNextCalls} withBatch={tmpMoveNextWithBatch} rawEvents={tmpRawEventsRead} totalEventCount={accumulatedChangesInColl.TotalEventCount} savedTokenAfterFlush[hash={ShortHash(savedTok)} ts={TryDecodeResumeTokenTimestamp(savedTok)}]",
+                            LogType.Debug);
                     }
                 }
             }
@@ -1628,6 +1790,74 @@ namespace OnlineMongoMigrationProcessor
             var renderArgs = new RenderArgs<BsonDocument>(documentSerializer, serializerRegistry);
             return filter.Render(renderArgs);
 #endif
+        }
+
+        // [PBRT] Short stable identifier for a resume token (last 12 chars) so we can compare tokens across rounds without dumping the full BSON.
+        private static string ShortHash(string token)
+        {
+            if (string.IsNullOrEmpty(token)) return "<empty>";
+            int len = token.Length;
+            return len <= 12 ? token : token.Substring(len - 12);
+        }
+
+        // Detect a wedged collection.watch cursor and rewind it. Called from the
+        // idle-round finally block when the postBatchResumeToken is byte-identical
+        // to the one we sent in (i.e. the server reported no progress at all).
+        // If the PBRT's embedded clusterTime is more than StuckCursorAgeThreshold
+        // behind UtcNow we treat the cursor as stuck and:
+        //   - back up ChangeStreamStartedOn into OriginalChangeStreamStartedOn (once)
+        //   - set ChangeStreamStartedOn = UtcNow - StuckCursorRewindOffset (direct
+        //     field assignment because SetChangeStreamStartedOn is now write-once)
+        //   - clear ResumeToken and CSLast* so the next batch falls through to the
+        //     StartAtOperationTime branch of DetermineResumeStrategy
+        //   - reset CursorUtcTimestamp to MinValue so the timeStamp-based path 1
+        //     in DetermineResumeStrategy does not preempt the StartedOn-based
+        //     path 4 we want to fire next batch.
+        private void TryRecoverStuckCursor(MigrationUnit mu, string collectionKey, string? postBatchTokenJson)
+        {
+            if (string.IsNullOrEmpty(postBatchTokenJson)) return;
+
+            string tsStr = TryDecodeResumeTokenTimestamp(postBatchTokenJson);
+            if (!DateTime.TryParse(
+                    tsStr,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out DateTime pbrtTs))
+            {
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            TimeSpan age = now - pbrtTs;
+            if (age <= StuckCursorAgeThreshold) return;
+
+            DateTime newStartedOn = now - StuckCursorRewindOffset;
+            mu.ForceResetChangeStreamStartedOn(_syncBack, newStartedOn);
+            mu.SetCSLastChange(_syncBack, null, null);
+            mu.SetCursorUtcTimestamp(_syncBack, DateTime.MinValue);
+
+            _log.WriteLine(
+                $"{_syncBackPrefix}[recover] Stuck cursor detected for {collectionKey}: PBRT clusterTime={pbrtTs:o} is {age.TotalHours:F1}h behind wall clock. Forward ChangeStreamStartedOn to {newStartedOn:o}; resume token cleared. OriginalChangeStreamStartedOn={(mu.GetOriginalChangeStreamStartedOn(_syncBack)?.ToString("o") ?? "<null>")}",
+                LogType.Warning);
+        }
+
+        // [PBRT] Decode the leading 4-byte unix timestamp embedded in a v1 resume token (_data hex starts with type byte 0x82 then 4 bytes BE seconds). Returns "?" if not parseable.
+        private static string TryDecodeResumeTokenTimestamp(string tokenJson)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(tokenJson)) return "?";
+                var doc = BsonDocument.Parse(tokenJson);
+                if (!doc.Contains("_data")) return "?";
+                string hex = doc["_data"].AsString;
+                if (hex.Length < 10) return "?";
+                uint seconds = Convert.ToUInt32(hex.Substring(2, 8), 16);
+                return DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime.ToString("o");
+            }
+            catch
+            {
+                return "?";
+            }
         }
 
     }

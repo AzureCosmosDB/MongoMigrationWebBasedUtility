@@ -29,10 +29,22 @@ namespace OnlineMongoMigrationProcessor.Workers
         private IMongoCollection<RawBsonDocument> _targetRawCollection;
         private int _pageSize = 5000; // Increased from 500 for better throughput
         private int _rawFetchByIdChunkSize = 500;
-        private int _saveProgressEveryNPages = 20; // Reduce disk I/O by batching saves
+        // Doc-count threshold (not page-count) between in-flight progress checkpoints; keeps disk I/O bounded
+        // even when pageSize changes. Effective pages-between-saves = max(1, _saveProgressEveryNDocs / _pageSize).
+        private int _saveProgressEveryNDocs = 250_000;
         private long _successCount = 0;
         private long _failureCount = 0;
         private long _skippedCount = 0;
+
+        private static void DisposeRawBatch(List<RawBsonDocument> batch)
+        {
+            if (batch == null || batch.Count == 0) return;
+            for (int i = 0; i < batch.Count; i++)
+            {
+                try { batch[i]?.Dispose(); } catch { }
+            }
+            batch.Clear();
+        }
               
 
         private void UpdateProgress(
@@ -414,17 +426,18 @@ namespace OnlineMongoMigrationProcessor.Workers
             string segmentId)
         {
             int batchCount = 0;
+            int pagesPerSave = Math.Max(1, _saveProgressEveryNDocs / Math.Max(1, _pageSize));
             var rawFindOptions = new FindOptions<RawBsonDocument>
             {
                 BatchSize = _pageSize,
                 NoCursorTimeout = false
             };
 
+            List<RawBsonDocument> rawBatch = new List<RawBsonDocument>(_pageSize);
             try
             {
                 var renderedFilter = RenderFilterForRawCollection(combinedFilter);
                 var rawFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedFilter);
-                List<RawBsonDocument> rawBatch = new List<RawBsonDocument>(_pageSize);
 
                 using var rawCursor = await _sourceRawCollection.FindAsync(rawFilter, rawFindOptions, cancellationToken);
 
@@ -443,10 +456,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                             if (writeResult == TaskResult.Canceled)
                                 return TaskResult.Canceled;
 
-                            rawBatch.Clear();
+                            DisposeRawBatch(rawBatch);
                             batchCount++;
 
-                            if (batchCount % _saveProgressEveryNPages == 0)
+                            if (batchCount % pagesPerSave == 0)
                             {
                                 UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
                             }
@@ -459,6 +472,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                     var writeResult = await WriteRawBatchAsync(rawBatch, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
                     if (writeResult == TaskResult.Canceled)
                         return TaskResult.Canceled;
+                    DisposeRawBatch(rawBatch);
                 }
 
                 UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
@@ -482,6 +496,11 @@ namespace OnlineMongoMigrationProcessor.Workers
                     $"[DEBUG] Segment {mu.DatabaseName}.{mu.CollectionName}[{migrationChunkIndex}.{segmentId}] fast-path failure matched fallback policy ({rawReadEx.GetType().Name}).",
                     LogType.Debug);
                 return null;
+            }
+            finally
+            {
+                // Release any buffers still held if the loop exited via cancellation/exception/fallback.
+                DisposeRawBatch(rawBatch);
             }
         }
 
@@ -529,6 +548,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             string segmentId)
         {
             int batchCount = 0;
+            int pagesPerSave = Math.Max(1, _saveProgressEveryNDocs / Math.Max(1, _pageSize));
             List<BsonValue> idBatch = new List<BsonValue>(_pageSize);
 
             try
@@ -561,14 +581,21 @@ namespace OnlineMongoMigrationProcessor.Workers
                         if (idBatch.Count >= _pageSize)
                         {
                             var rawDocs = await FetchRawDocumentsByIdsAsync(idBatch, cancellationToken);
-                            var writeResult = await WriteRawBatchAsync(rawDocs, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
-                            if (writeResult == TaskResult.Canceled)
-                                return TaskResult.Canceled;
+                            try
+                            {
+                                var writeResult = await WriteRawBatchAsync(rawDocs, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                                if (writeResult == TaskResult.Canceled)
+                                    return TaskResult.Canceled;
+                            }
+                            finally
+                            {
+                                DisposeRawBatch(rawDocs);
+                            }
 
                             idBatch.Clear();
                             batchCount++;
 
-                            if (batchCount % _saveProgressEveryNPages == 0)
+                            if (batchCount % pagesPerSave == 0)
                             {
                                 UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
                             }
@@ -579,9 +606,16 @@ namespace OnlineMongoMigrationProcessor.Workers
                 if (idBatch.Count > 0)
                 {
                     var rawDocs = await FetchRawDocumentsByIdsAsync(idBatch, cancellationToken);
-                    var writeResult = await WriteRawBatchAsync(rawDocs, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
-                    if (writeResult == TaskResult.Canceled)
-                        return TaskResult.Canceled;
+                    try
+                    {
+                        var writeResult = await WriteRawBatchAsync(rawDocs, segment, mu, migrationChunkIndex, segmentId, isWriteSimulated, errors, cancellationToken);
+                        if (writeResult == TaskResult.Canceled)
+                            return TaskResult.Canceled;
+                    }
+                    finally
+                    {
+                        DisposeRawBatch(rawDocs);
+                    }
                 }
 
                 UpdateProgress(segmentId, mu, migrationChunkIndex, basePercent, contribFactor, targetCount, _successCount, _failureCount, _skippedCount);
@@ -1065,10 +1099,11 @@ namespace OnlineMongoMigrationProcessor.Workers
         private async Task InsertMissingDocument(BsonValue idValue, MigrationChunk migrationChunk)
         {
             MigrationJobContext.AddVerboseLog($"DocumentCopyWorker.InsertMissingDocument: _id={idValue}");
+            RawBsonDocument? sourceDoc = null;
             try
             {
                 var sourceFilter = Builders<RawBsonDocument>.Filter.Eq("_id", idValue);
-                var sourceDoc = await _sourceRawCollection.Find(sourceFilter).FirstOrDefaultAsync(CancellationToken.None);
+                sourceDoc = await _sourceRawCollection.Find(sourceFilter).FirstOrDefaultAsync(CancellationToken.None);
 
                 if (sourceDoc == null)
                 {
@@ -1092,6 +1127,10 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 _log.WriteLine($"Failed to insert missing document with _id: {idValue}. Details: {ex}", LogType.Error);
                 Interlocked.Increment(ref _failureCount);
+            }
+            finally
+            {
+                try { sourceDoc?.Dispose(); } catch { }
             }
         }
     }

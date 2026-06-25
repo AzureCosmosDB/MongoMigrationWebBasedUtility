@@ -61,7 +61,13 @@
                                     <div><span class="lbl">Sharding:</span> @FormatSharding(MigrationUnit.ShardingStrategy)</div>
                                     @if (MigrationUnit.ShardingStrategy == ShardingStrategy.DontShard && !string.IsNullOrWhiteSpace(MigrationUnit.MoveToShard))
                                     {
-                                        <div><span class="lbl">Move To Shard:</span> @MigrationUnit.MoveToShard</div>
+                                        <div>
+                                            <span class="lbl">Move To Shard:</span> @MigrationUnit.MoveToShard
+                                            @if (MigrationUnit.BulkCopyStartedOn.HasValue && !MigrationUnit.MoveStatus)
+                                            {
+                                                <span class="text-danger">(failed)</span>
+                                            }
+                                        </div>
                                     }
                                 </td>
                             </tr>
@@ -89,6 +95,10 @@
                                     {
                                         <div><span class="lbl">Mode:</span> @Helper.GetChangeStreamMode(MigrationJob)</div>
                                         <div><span class="lbl">Started On (UTC):</span> @GetChangeStreamStartedOnForDisplay(MigrationUnit, MigrationJob)</div>
+                                        @if (MigrationUnit.GetOriginalChangeStreamStartedOn(false).HasValue)
+                                        {
+                                            <div><span class="lbl">Original Started On (UTC):</span> @MigrationUnit.GetOriginalChangeStreamStartedOn(false)?.ToString() <span class="text-muted">(rewound after stuck cursor)</span></div>
+                                        }
                                         <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.GetOriginalResumeToken(false) ?? "N/A")</div>
                                         <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.GetCursorUtcTimestamp(false)</div>
                                         <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.GetResumeToken(false) ?? "N/A")</div>
@@ -122,6 +132,10 @@
                                     @if (MigrationJob != null && Helper.IsOnline(MigrationJob) && (MigrationJob?.SyncBackEnabled ?? false))
                                     {
                                         <div><span class="lbl">Started On (UTC):</span> @(MigrationUnit.GetChangeStreamStartedOn(true)?.ToString() ?? "N/A")</div>
+                                        @if (MigrationUnit.GetOriginalChangeStreamStartedOn(true).HasValue)
+                                        {
+                                            <div><span class="lbl">Original Started On (UTC):</span> @MigrationUnit.GetOriginalChangeStreamStartedOn(true)?.ToString() <span class="text-muted">(rewound after stuck cursor)</span></div>
+                                        }
                                         <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.GetOriginalResumeToken(true) ?? "N/A")</div>
                                         <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.GetCursorUtcTimestamp(true)</div>
                                         <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.GetResumeToken(true) ?? "N/A")</div>
