@@ -452,7 +452,7 @@ namespace OnlineMongoMigrationProcessor
                     : string.Empty;
                 _log.WriteLine(
                     $"{_syncBackPrefix}[PBRT Unblock] batch processed rawEvents={rawEventCount} matched={matched} replayed={replayedCount} advancedNoReplay={advancedNoReplayCount} skippedNotNewer={skippedNotNewerCount} matchedNamespaces=[{nsList}]{tail}",
-                    LogType.Info);
+                    matched > 0 ? LogType.Info : LogType.Debug);
             }
 
             return matched;
