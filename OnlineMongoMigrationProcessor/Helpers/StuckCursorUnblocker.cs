@@ -350,9 +350,17 @@ namespace OnlineMongoMigrationProcessor
             HashSet<string> matchedNamespaces)
         {
             int matched = 0;
+            int replayedCount = 0;
+            int advancedNoReplayCount = 0;
+            int rawEventCount = 0;
+            int skippedNotNewerCount = 0;
+            DateTime lastMatchedTs = DateTime.MinValue;
+            string? lastMatchedTokenHash = null;
+            var matchedThisBatch = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var change in cursor.Current ?? Enumerable.Empty<ChangeStreamDocument<BsonDocument>>())
             {
+                rawEventCount++;
                 if (change?.CollectionNamespace == null) continue;
                 string ns = $"{change.CollectionNamespace.DatabaseNamespace.DatabaseName}.{change.CollectionNamespace.CollectionName}";
 
@@ -371,6 +379,7 @@ namespace OnlineMongoMigrationProcessor
                     ResumeTokenInspector.TryGetClusterPositionKey(entry.ResumeToken, out string entryKey) &&
                     string.CompareOrdinal(eventKey, entryKey) <= 0)
                 {
+                    skippedNotNewerCount++;
                     continue;
                 }
 
@@ -407,22 +416,41 @@ namespace OnlineMongoMigrationProcessor
                 entry.PbrtClusterTimeUtc = stampTs;
 
                 matchedNamespaces.Add(ns);
+                matchedThisBatch.Add(ns);
                 matched++;
+                lastMatchedTs = stampTs;
+                lastMatchedTokenHash = ResumeTokenInspector.ShortHash(rawEventTokenJson);
 
                 string docKeyJson = SafeToJson(change.DocumentKey);
                 if (replayed)
                 {
+                    replayedCount++;
                     _log.WriteLine(
-                        $"{_syncBackPrefix}[PBRT Unblock] replayed 1 event for {ns} op={change.OperationType} documentKey={docKeyJson} tokenHash={ResumeTokenInspector.ShortHash(rawEventTokenJson)} ts={stampTs:o}",
-                        LogType.Info);
+                        $"{_syncBackPrefix}[PBRT Unblock] replayed 1 event for {ns} op={change.OperationType} documentKey={docKeyJson} tokenHash={lastMatchedTokenHash} ts={stampTs:o}",
+                        LogType.Debug);
                 }
                 else
                 {
+                    advancedNoReplayCount++;
                     _log.WriteLine(
-                        $"{_syncBackPrefix}[PBRT Unblock] WARNING advanced past 1 event WITHOUT replay for {ns} (replay unavailable/failed) op={change.OperationType} documentKey={docKeyJson} tokenHash={ResumeTokenInspector.ShortHash(rawEventTokenJson)} ts={stampTs:o}",
-                        LogType.Warning);
+                        $"{_syncBackPrefix}[PBRT Unblock] advanced past 1 event WITHOUT replay for {ns} (replay unavailable/failed) op={change.OperationType} documentKey={docKeyJson} tokenHash={lastMatchedTokenHash} ts={stampTs:o}",
+                        LogType.Debug);
                 }
             }
+
+            if (rawEventCount > 0)
+            {
+                string nsList = matchedThisBatch.Count == 0
+                    ? "<none>"
+                    : string.Join(",", matchedThisBatch);
+                string tail = matched > 0
+                    ? $" lastMatchedTokenHash={lastMatchedTokenHash} lastMatchedTs={lastMatchedTs:o}"
+                    : string.Empty;
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[PBRT Unblock] batch processed rawEvents={rawEventCount} matched={matched} replayed={replayedCount} advancedNoReplay={advancedNoReplayCount} skippedNotNewer={skippedNotNewerCount} matchedNamespaces=[{nsList}]{tail}",
+                    LogType.Info);
+            }
+
             return matched;
         }
 
