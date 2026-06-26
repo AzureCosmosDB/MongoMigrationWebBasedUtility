@@ -42,7 +42,7 @@ namespace OnlineMongoMigrationProcessor
         // or advances the token resets the count to 0. The streak is also cleared
         // after enqueue so we don't re-enqueue every subsequent idle round.
         private readonly ConcurrentDictionary<string, int> _consecutiveStuckRounds = new ConcurrentDictionary<string, int>();
-        private const int PbrtStuckRoundsThreshold = 4;
+        private const int PbrtStuckRoundsThreshold = 2;
 
         // Resolves MUs whose own per-collection cursor has gone silent by walking
         // a single cluster-wide change stream between rounds. See StuckCursorUnblocker.
@@ -251,6 +251,8 @@ namespace OnlineMongoMigrationProcessor
                 }
                 
                 loops++;
+
+                LogStuckCollectionsForRound();
                 LogRoundCompletion(loops, totalKeys);
 
                 // Advance any MUs whose own cursor went silent this round by piggy-
@@ -532,6 +534,20 @@ namespace OnlineMongoMigrationProcessor
                     // Ignore exceptions during logging
                 }
             }
+        }
+
+        private void LogStuckCollectionsForRound()
+        {
+            var stuckSnapshot = _consecutiveStuckRounds
+                .Where(kv => kv.Value > 0)
+                .OrderByDescending(kv => kv.Value)
+                .ToList();
+            if (stuckSnapshot.Count == 0) return;
+
+            string stuckList = string.Join(", ", stuckSnapshot.Select(kv => $"{kv.Key} [{kv.Value} x]"));
+            _log.WriteLine(
+                $"{_syncBackPrefix}PBRT stuck this round for {stuckSnapshot.Count} collection(s): {stuckList}",
+                LogType.Info);
         }
 
         private void LogRoundCompletion(long loops, int totalKeys)
@@ -856,23 +872,12 @@ namespace OnlineMongoMigrationProcessor
             await flushLock.WaitAsync();
             try
             {
-                // [STUCK-EMULATION-DISABLED] To re-enable bypassing hydration + bulk
-                // writes for collection_0001 (so only the StuckCursorUnblocker replay
-                // path writes to target), replace the hydration + BulkProcessChangesAsync
-                // block below with this gated variant:
-                //
-                //   bool bypassBulkWritesForEmulation = string.Equals(
-                //       mu.CollectionName, "collection_0001", StringComparison.Ordinal);
-                //   if (IsOptimizeForLargeDocsEnabled && !bypassBulkWritesForEmulation) { ...hydration... }
-                //   int failureCount;
-                //   if (bypassBulkWritesForEmulation) {
-                //       _log.WriteLine($"...[PBRT Stuck Emulation] skipping bulk writes...", LogType.Info);
-                //       failureCount = 0;
-                //   } else {
-                //       failureCount = await BulkProcessChangesAsync(...);
-                //   }
+                // [STUCK-EMULATION-DISABLED] To re-emulate a stuck collection,
+                // change the assignment back to:
+                //   string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal)
+                bool bypassBulkWritesForEmulation = false;
 
-                if (IsOptimizeForLargeDocsEnabled)
+                if (IsOptimizeForLargeDocsEnabled && !bypassBulkWritesForEmulation)
                 {
                     // Re-fetch document bodies from source (the side we tail) by _id
                     // before bulk writing, since the projected change-stream events
@@ -885,14 +890,25 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 // Flush accumulated changes - convert Dictionary.Values to List for BulkProcessChangesAsync
-                int failureCount = await BulkProcessChangesAsync(
-                    mu,
-                    targetCollection,
-                    insertEvents: accumulatedChangesInColl.DocsToBeInserted.Values.ToList(),
-                    updateEvents: accumulatedChangesInColl.DocsToBeUpdated.Values.ToList(),
-                    deleteEvents: accumulatedChangesInColl.DocsToBeDeleted.Values.ToList(),
-                    accumulatedChangesInColl: accumulatedChangesInColl,
-                    batchSize: 500);
+                int failureCount;
+                if (bypassBulkWritesForEmulation)
+                {
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[PBRT Stuck Emulation] skipping bulk writes for {mu.DatabaseName}.{mu.CollectionName} (totalChanges={accumulatedChangesInColl.TotalChangesCount})",
+                        LogType.Info);
+                    failureCount = 0;
+                }
+                else
+                {
+                    failureCount = await BulkProcessChangesAsync(
+                        mu,
+                        targetCollection,
+                        insertEvents: accumulatedChangesInColl.DocsToBeInserted.Values.ToList(),
+                        updateEvents: accumulatedChangesInColl.DocsToBeUpdated.Values.ToList(),
+                        deleteEvents: accumulatedChangesInColl.DocsToBeDeleted.Values.ToList(),
+                        accumulatedChangesInColl: accumulatedChangesInColl,
+                        batchSize: 500);
+                }
 
                 // Update resume token after successful flush.
                 // Guard with TotalChangesCount > 0: after a Reset(false) the dicts are cleared
@@ -922,19 +938,12 @@ namespace OnlineMongoMigrationProcessor
                             _log.ShowInMonitor($"{_syncBackPrefix}Timestamp mismatch detected for {collectionNamespace}. This may indicate a logic error in resume token management. Please investigate the logs for details.");
                         }
 
-                        // [STUCK-EMULATION-DISABLED] To re-enable freezing the resume
-                        // token for collection_0001 (so its PBRT stays stuck and forces
-                        // the StuckCursorUnblocker to act), wrap the save block below in:
-                        //
+                        // [STUCK-EMULATION-DISABLED] To re-emulate a stuck collection,
+                        // wrap the SetResumeParameters/SetCSLastChange/TrySaveMigrationUnit/
+                        // _resumeTokenCache update below in:
                         //   if (string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal))
-                        //   {
-                        //       _log.WriteLine($"...[PBRT Stuck Emulation] skipping resume-token save for {collectionNamespace}...", LogType.Info);
-                        //   }
-                        //   else
-                        //   {
-                        //       <save block below>
-                        //   }
-
+                        //   { _log.WriteLine($"[PBRT Stuck Emulation] skipping resume-token save for {collectionNamespace}", LogType.Info); }
+                        //   else { <existing body> }
                         SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
                         mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
                         if (ShouldPersistMu(mu.Id, isFinalFlush))
@@ -1514,16 +1523,11 @@ namespace OnlineMongoMigrationProcessor
                     // When events were processed, the flush already advanced mu.ResumeToken
                     // to the last change's token. We only use postBatchResumeToken for idle
                     // collections to keep CursorUtcTimestamp current.
-                    // [STUCK-EMULATION-DISABLED] To re-enable forcing the idle branch
-                    // for collection_0001 (so its stuck-rounds counter is not reset by
-                    // the eventsRound branch and the unblocker can enqueue), replace
-                    // the TotalEventCount guard below with:
-                    //
-                    //   bool forceIdleBranchForEmulation = string.Equals(
-                    //       mu.CollectionName, "collection_0001", StringComparison.Ordinal);
-                    //   if (accumulatedChangesInColl.TotalEventCount == 0 || forceIdleBranchForEmulation)
-
-                    if (accumulatedChangesInColl.TotalEventCount == 0)
+                    // [STUCK-EMULATION-DISABLED] To re-emulate a stuck collection,
+                    // change the assignment back to:
+                    //   string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal)
+                    bool forceIdleBranchForEmulation = false;
+                    if (accumulatedChangesInColl.TotalEventCount == 0 || forceIdleBranchForEmulation)
                     {
                         try
                         {
@@ -1531,13 +1535,10 @@ namespace OnlineMongoMigrationProcessor
                             string? tokenJson = postBatchToken?.ToJson();
                             var (_, currentResumeToken, _, _) = GetResumeParameters(mu);
 
-                            // [STUCK-EMULATION-DISABLED] To re-enable forcing the "PBRT did
-                            // not advance" branch for collection_0001, add:
-                            //
+                            // [STUCK-EMULATION-DISABLED] To re-emulate a stuck collection,
+                            // restore:
                             //   if (string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal))
-                            //   {
-                            //       tokenJson = currentResumeToken;
-                            //   }
+                            //   { tokenJson = currentResumeToken; }
 
                             // [PBRT] Idle-round summary: did cursor produce anything? did postBatchResumeToken advance vs what we sent in?
                             string inHash = ResumeTokenInspector.ShortHash(currentResumeToken);
@@ -1566,7 +1567,7 @@ namespace OnlineMongoMigrationProcessor
                             {
                                 int stuck = _consecutiveStuckRounds.AddOrUpdate(collectionKey, 1, (_, v) => v + 1);
                                 _log.WriteLine(
-                                        $"{_syncBackPrefix}PBRT for {collectionKey} stuck. Attempt {stuck}", LogType.Info);
+                                        $"{_syncBackPrefix}PBRT for {collectionKey} stuck. Attempt {stuck}", LogType.Debug);
                                 //mu.SetCursorUtcTimestamp(_syncBack, DateTime.UtcNow);
                                 
                                 if (stuck >= PbrtStuckRoundsThreshold)

@@ -90,5 +90,35 @@ namespace OnlineMongoMigrationProcessor
                 return false;
             }
         }
+
+        /// <summary>
+        /// Returns the entire <c>_data</c> hex (uppercased) for a v1 resume token.
+        /// MongoDB's KeyString encoding guarantees that lexicographic comparison of
+        /// the full hex matches oplog order, and the suffix carries UUID + opType +
+        /// documentKey so the value is unique per change event. Use this — not
+        /// <see cref="TryGetClusterPositionKey"/> — whenever you need to decide
+        /// "is event A strictly newer than event B", because multiple events in the
+        /// same oplog batch (e.g. an insertMany) share the same (ts, ordinal) prefix
+        /// and would all compare equal under the prefix-only key.
+        /// </summary>
+        public static bool TryGetFullDataKey(string tokenJson, out string key)
+        {
+            key = string.Empty;
+            try
+            {
+                if (string.IsNullOrEmpty(tokenJson)) return false;
+                var doc = BsonDocument.Parse(tokenJson);
+                if (!doc.Contains("_data")) return false;
+                string hex = doc["_data"].AsString;
+                if (string.IsNullOrEmpty(hex)) return false;
+                if (!hex.StartsWith("82", StringComparison.OrdinalIgnoreCase)) return false;
+                key = hex.ToUpperInvariant();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 }

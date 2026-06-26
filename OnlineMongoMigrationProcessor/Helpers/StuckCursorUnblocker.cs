@@ -375,8 +375,12 @@ namespace OnlineMongoMigrationProcessor
                 // mutations from earlier matches, can leave the entry ahead of where
                 // cluster-watch resumed. Re-replaying an older event would be wasted work
                 // at best and AdvanceMu's backward-rollback guard would reject it anyway.
-                if (ResumeTokenInspector.TryGetClusterPositionKey(rawEventTokenJson, out string eventKey) &&
-                    ResumeTokenInspector.TryGetClusterPositionKey(entry.ResumeToken, out string entryKey) &&
+                // Compare the FULL _data hex (not just the (ts, ordinal) prefix): multiple
+                // events in the same oplog batch (e.g. an insertMany) share that prefix,
+                // so a prefix-only check would discard every event after the first as
+                // "not newer".
+                if (ResumeTokenInspector.TryGetFullDataKey(rawEventTokenJson, out string eventKey) &&
+                    ResumeTokenInspector.TryGetFullDataKey(entry.ResumeToken, out string entryKey) &&
                     string.CompareOrdinal(eventKey, entryKey) <= 0)
                 {
                     skippedNotNewerCount++;
@@ -407,7 +411,7 @@ namespace OnlineMongoMigrationProcessor
 
                 DateTime stampTs = rawEventTs != DateTime.MinValue ? rawEventTs : DateTime.UtcNow;
 
-                AdvanceMu(entry, stampTs, rawEventTokenJson);
+                AdvanceMu(entry, stampTs, rawEventTokenJson, wasReplayed: replayed, replayedOpType: replayed ? change.OperationType : (ChangeStreamOperationType?)null);
 
                 // Mutate the in-memory entry so the next event for this ns in this batch
                 // compares against the new position and AdvanceMu's backward-rollback
@@ -535,8 +539,8 @@ namespace OnlineMongoMigrationProcessor
                 if (string.IsNullOrEmpty(canonicalToken)) continue;
 
                 bool canonicalIsNewer;
-                if (ResumeTokenInspector.TryGetClusterPositionKey(canonicalToken, out string canonKey) &&
-                    ResumeTokenInspector.TryGetClusterPositionKey(stale.ResumeToken, out string staleKey))
+                if (ResumeTokenInspector.TryGetFullDataKey(canonicalToken, out string canonKey) &&
+                    ResumeTokenInspector.TryGetFullDataKey(stale.ResumeToken, out string staleKey))
                 {
                     canonicalIsNewer = string.CompareOrdinal(canonKey, staleKey) > 0;
                 }
@@ -565,7 +569,7 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private void AdvanceMu(UnblockEntry entry, DateTime ts, string tokenJson)
+        private void AdvanceMu(UnblockEntry entry, DateTime ts, string tokenJson, bool wasReplayed = false, ChangeStreamOperationType? replayedOpType = null)
         {
             // Always resolve the canonical MU from the cache. Holding a stored MU
             // reference is unsafe: if the cache rebuilds (collection removed/re-added),
@@ -581,14 +585,15 @@ namespace OnlineMongoMigrationProcessor
 
             string preTokenJson = mu.GetResumeToken(_syncBack) ?? string.Empty;
 
-            // Backward-rollback protection: compare ts+ordinal (the 16 hex chars after
-            // the 0x82 type byte) of the candidate token against the canonical MU's
-            // current token. v1 tokens are designed so this prefix sorts lex-equal to
-            // oplog order, so this guard catches same-second backward-ordinal moves
-            // that the ts-only guard would silently allow. Fall back to ts comparison
-            // if either side fails to parse (rare; mainly defensive).
-            if (ResumeTokenInspector.TryGetClusterPositionKey(tokenJson, out string candidateKey) &&
-                ResumeTokenInspector.TryGetClusterPositionKey(preTokenJson, out string currentKey))
+            // Backward-rollback protection: compare the FULL _data hex of the candidate
+            // token against the canonical MU's current token. v1 tokens are KeyString-
+            // encoded so lexicographic comparison of the full hex matches oplog order
+            // exactly, and the suffix (UUID + opType + documentKey) makes the value
+            // unique per event — a (ts, ordinal) prefix would treat every event in the
+            // same oplog batch as equal. Fall back to ts comparison if either side
+            // fails to parse (rare; mainly defensive).
+            if (ResumeTokenInspector.TryGetFullDataKey(tokenJson, out string candidateKey) &&
+                ResumeTokenInspector.TryGetFullDataKey(preTokenJson, out string currentKey))
             {
                 if (string.CompareOrdinal(candidateKey, currentKey) < 0)
                 {
@@ -607,6 +612,20 @@ namespace OnlineMongoMigrationProcessor
 
             string preTokenHash = ResumeTokenInspector.ShortHash(preTokenJson);
             SetResumeParameters(mu, ts, tokenJson, _syncBack);
+
+            // When we actually replayed a real change event, mirror the regular
+            // flush path (FlushPendingChangesAsync) and stamp the MU's
+            // CSLastChangeUTCTime / CSLastResumeTokenWithChange so the UI and
+            // downstream consumers see this as a genuine last-change marker.
+            if (wasReplayed)
+            {
+                mu.SetCSLastChange(_syncBack, ts, tokenJson);
+                if (replayedOpType.HasValue)
+                {
+                    IncrementCountersForReplay(mu, replayedOpType.Value);
+                }
+            }
+
             string postSetTokenJson = mu.GetResumeToken(_syncBack) ?? string.Empty;
             string postSetTokenHash = ResumeTokenInspector.ShortHash(postSetTokenJson);
             bool saved = MigrationJobContext.SaveMigrationUnit(mu, true);
@@ -614,11 +633,62 @@ namespace OnlineMongoMigrationProcessor
             string postSaveTokenHash = ResumeTokenInspector.ShortHash(postSaveTokenJson);
 
             _log.WriteLine(
-                $"{_syncBackPrefix}[PBRT Unblock] AdvanceMu {entry.DatabaseName}.{entry.CollectionName} muId={entry.MuId} jobId={entry.JobId} preHash={preTokenHash} postSetHash={postSetTokenHash} postSaveHash={postSaveTokenHash} saved={saved}",
+                $"{_syncBackPrefix}[PBRT Unblock] AdvanceMu {entry.DatabaseName}.{entry.CollectionName} muId={entry.MuId} jobId={entry.JobId} preHash={preTokenHash} postSetHash={postSetTokenHash} postSaveHash={postSaveTokenHash} saved={saved} replayed={wasReplayed}",
                 LogType.Debug);
         }
 
         private static string FormatTs(DateTime ts) => ts == DateTime.MinValue ? "?" : ts.ToString("o");
+
+        // Bump the same per-op event + doc counters that the regular flush path bumps
+        // (via ChangeStreamProcessor.Increment{Event,Doc}Counter) so the UI totals
+        // include events the unblocker replayed. Also bump CSUpdatesInLastBatch so
+        // the "events in last batch" display reflects unblocker activity until the
+        // next watch cycle overwrites it.
+        private void IncrementCountersForReplay(MigrationUnit mu, ChangeStreamOperationType op)
+        {
+            switch (op)
+            {
+                case ChangeStreamOperationType.Insert:
+                    if (!_syncBack)
+                    {
+                        mu.CSDInsertEvents++;
+                        mu.CSDocsInserted++;
+                    }
+                    else
+                    {
+                        mu.SyncBackInsertEvents++;
+                        mu.SyncBackDocsInserted++;
+                    }
+                    break;
+                case ChangeStreamOperationType.Update:
+                case ChangeStreamOperationType.Replace:
+                    if (!_syncBack)
+                    {
+                        mu.CSUpdateEvents++;
+                        mu.CSDocsUpdated++;
+                    }
+                    else
+                    {
+                        mu.SyncBackUpdateEvents++;
+                        mu.SyncBackDocsUpdated++;
+                    }
+                    break;
+                case ChangeStreamOperationType.Delete:
+                    if (!_syncBack)
+                    {
+                        mu.CSDeleteEvents++;
+                        mu.CSDocsDeleted++;
+                    }
+                    else
+                    {
+                        mu.SyncBackDeleteEvents++;
+                        mu.SyncBackDocsDeleted++;
+                    }
+                    break;
+            }
+
+            mu.CSUpdatesInLastBatch++;
+        }
     }
 }
 #endif
