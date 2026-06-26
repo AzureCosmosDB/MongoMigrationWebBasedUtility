@@ -48,6 +48,11 @@ namespace OnlineMongoMigrationProcessor
         private readonly string _syncBackPrefix;
         private readonly Func<float, int> _getBatchDurationInSeconds;
         private readonly Func<bool> _shouldSplitLargeEvents;
+        // Optional: replay a single change directly to the target by documentKey,
+        // returning true on success. Used to avoid losing the matched event when no
+        // safe rewind position exists. Requires source/target client plumbing only
+        // available on the owning processor, hence the callback.
+        private readonly Func<MigrationUnit, BsonDocument, ChangeStreamOperationType, bool>? _tryReplayChange;
         private readonly ConcurrentDictionary<string, UnblockEntry> _entries =
             new ConcurrentDictionary<string, UnblockEntry>(StringComparer.Ordinal);
 
@@ -57,7 +62,8 @@ namespace OnlineMongoMigrationProcessor
             bool syncBack,
             string syncBackPrefix,
             Func<float, int> getBatchDurationInSeconds,
-            Func<bool> shouldSplitLargeEvents)
+            Func<bool> shouldSplitLargeEvents,
+            Func<MigrationUnit, BsonDocument, ChangeStreamOperationType, bool>? tryReplayChange = null)
         {
             _log = log;
             _changeStreamMongoClient = changeStreamMongoClient;
@@ -65,6 +71,7 @@ namespace OnlineMongoMigrationProcessor
             _syncBackPrefix = syncBackPrefix ?? string.Empty;
             _getBatchDurationInSeconds = getBatchDurationInSeconds;
             _shouldSplitLargeEvents = shouldSplitLargeEvents ?? (() => false);
+            _tryReplayChange = tryReplayChange;
         }
 
         public int Count => _entries.Count;
@@ -96,6 +103,11 @@ namespace OnlineMongoMigrationProcessor
             _log.WriteLine(
                 $"{_syncBackPrefix}[PBRT Unblock] enqueued {collectionKey} tokenHash={ResumeTokenInspector.ShortHash(postBatchTokenJson!)} pbrtTs={FormatTs(pbrtTs)} listSize={_entries.Count}",
                 LogType.Info);
+
+            // [Temp] Full token + embedded collection UUID at enqueue.
+            _log.WriteLine(
+                $"{_syncBackPrefix}[Temp][PBRT Unblock] ENQUEUE ns={collectionKey} muId={mu.Id} uuid={ExtractCollectionUuidHex(postBatchTokenJson!)} token={postBatchTokenJson}",
+                LogType.Info);
         }
 
         /// <summary>Remove an enqueued entry by collection key (called when an MU is removed from the job).</summary>
@@ -123,6 +135,17 @@ namespace OnlineMongoMigrationProcessor
 
             _log.WriteLine(
                 $"{_syncBackPrefix}[PBRT Unblock] resolving {working.Count} stuck MU(s) via cluster-watch; oldestKey={oldest.DatabaseName}.{oldest.CollectionName} pbrtTs={FormatTs(oldest.PbrtClusterTimeUtc)} tokenHash={ResumeTokenInspector.ShortHash(oldest.ResumeToken)}",
+                LogType.Info);
+
+            // [Temp] Dump every entry in this round + the oldest token used as ResumeAfter.
+            foreach (var kv in working)
+            {
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[Temp][PBRT Unblock] WORKING-ENTRY ns={kv.Key} muId={kv.Value.MuId} pbrtTs={FormatTs(kv.Value.PbrtClusterTimeUtc)} uuid={ExtractCollectionUuidHex(kv.Value.ResumeToken)} token={kv.Value.ResumeToken}",
+                    LogType.Info);
+            }
+            _log.WriteLine(
+                $"{_syncBackPrefix}[Temp][PBRT Unblock] OLDEST-RESUME-AFTER ns={oldest.DatabaseName}.{oldest.CollectionName} uuid={ExtractCollectionUuidHex(oldest.ResumeToken)} token={oldest.ResumeToken}",
                 LogType.Info);
 
             int batchSeconds = _getBatchDurationInSeconds(1.0f);
@@ -278,6 +301,13 @@ namespace OnlineMongoMigrationProcessor
                     stats.RawEventsRead += batchCount;
                 }
 
+                // [Temp] Post-MoveNextAsync snapshot of the cluster PBRT.
+                string postMoveTokenJson = ReadCursorPbrtJson(cursor);
+                ResumeTokenInspector.TryDecodeUtc(postMoveTokenJson, out DateTime postMoveTs);
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[Temp][PBRT Unblock] POST-MOVENEXT moveNextIdx={stats.MoveNextCalls} batchCount={batchCount} postClusterPbrtTs={FormatTs(postMoveTs)} uuid={ExtractCollectionUuidHex(postMoveTokenJson)} token={postMoveTokenJson}",
+                    LogType.Info);
+
                 stats.MatchedEvents += ProcessBatchEvents(cursor, working, effectiveResumeToken, effectiveTs);
             }
 
@@ -288,7 +318,7 @@ namespace OnlineMongoMigrationProcessor
         // BEFORE the next MoveNextAsync. Any event surfaced by that MoveNext has
         // clusterTime >= this PBRT, so resuming a collection-scoped watch from
         // <paramref name="token"/> guarantees the matched event will be re-emitted.
-        private static void CaptureEffectiveToken(
+        private void CaptureEffectiveToken(
             IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor,
             ref string token,
             ref DateTime ts)
@@ -304,6 +334,11 @@ namespace OnlineMongoMigrationProcessor
                 token = preJson;
                 if (ResumeTokenInspector.TryDecodeUtc(preJson, out DateTime parsedTs))
                     ts = parsedTs;
+
+                // [Temp] Cluster-cursor PBRT captured just before MoveNextAsync.
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[Temp][PBRT Unblock] PRE-MOVENEXT clusterPbrtTs={FormatTs(ts)} uuid={ExtractCollectionUuidHex(preJson)} token={preJson}",
+                    LogType.Info);
             }
             catch
             {
@@ -333,22 +368,45 @@ namespace OnlineMongoMigrationProcessor
                 if (change?.CollectionNamespace == null) continue;
                 string ns = $"{change.CollectionNamespace.DatabaseNamespace.DatabaseName}.{change.CollectionNamespace.CollectionName}";
 
+                // [Temp] Every raw event surfaced by cluster-watch (matched or not).
+                string rawEventTokenJson = SafeResumeTokenToJson(change.ResumeToken);
+                ResumeTokenInspector.TryDecodeUtc(rawEventTokenJson, out DateTime rawEventTs);
+                bool nsMatched = working.ContainsKey(ns);
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[Temp][PBRT Unblock] RAW-EVENT ns={ns} op={change.OperationType} matched={nsMatched} eventTs={FormatTs(rawEventTs)} uuid={ExtractCollectionUuidHex(rawEventTokenJson)} eventToken={rawEventTokenJson}",
+                    LogType.Info);
+
                 if (working.TryGetValue(ns, out var entry))
                 {
+                    // [Temp] Anchor state at the moment we decide how to advance.
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[Temp][PBRT Unblock] MATCH-DECIDE-INPUT ns={ns} entryPbrtTs={FormatTs(entry.PbrtClusterTimeUtc)} entryUuid={ExtractCollectionUuidHex(entry.ResumeToken)} prevAnchorTs={FormatTs(prevAnchorTs)} prevAnchorUuid={ExtractCollectionUuidHex(prevAnchorToken)} prevAnchorToken={prevAnchorToken}",
+                        LogType.Info);
                     // Default: rewind to "just before this event" (replay-safe).
                     string advanceToken = prevAnchorToken;
                     DateTime advanceTs = prevAnchorTs;
                     bool skippedEvent = false;
+                    bool replayedEvent = false;
 
                     // If the rewind position equals (or is older than) the MU's
                     // own enqueued PBRT, the AdvanceMu guard would no-op and the
-                    // MU would never move. In that case fall back to the matched
-                    // event's own resume token -- this SKIPS this single event for
-                    // the MU's own watch but actually unsticks the cursor.
+                    // MU would never move. In that case advance past the matched
+                    // event using its own resume token. To avoid losing the event,
+                    // attempt to replay it directly to the target first; only mark
+                    // as "skipped" if replay was not possible or failed.
                     bool wouldBeNoOp =
                         entry.PbrtClusterTimeUtc != DateTime.MinValue &&
                         advanceTs != DateTime.MinValue &&
                         advanceTs <= entry.PbrtClusterTimeUtc;
+
+                    // [STUCK-EMULATION-DISABLED] To re-enable forcing the replay/skip
+                    // branch for collection_0001 (so the unblocker always treats its
+                    // match as a no-op rewind candidate), add:
+                    //
+                    //   if (string.Equals(entry.CollectionName, "collection_0001", StringComparison.Ordinal))
+                    //   {
+                    //       wouldBeNoOp = true;
+                    //   }
 
                     if (wouldBeNoOp)
                     {
@@ -368,19 +426,53 @@ namespace OnlineMongoMigrationProcessor
                             }
                         }
                         catch { /* keep prev anchor */ }
+
+                        if (skippedEvent && _tryReplayChange != null && change.DocumentKey != null)
+                        {
+                            var muForReplay = MigrationJobContext.GetMigrationUnit(entry.MuId, entry.JobId);
+                            if (muForReplay != null)
+                            {
+                                try
+                                {
+                                    if (_tryReplayChange(muForReplay, change.DocumentKey, change.OperationType))
+                                    {
+                                        replayedEvent = true;
+                                        skippedEvent = false;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _log.WriteLine(
+                                        $"{_syncBackPrefix}[PBRT Unblock] replay attempt failed for {ns} op={change.OperationType}; falling back to skip. Details: {ex.Message}",
+                                        LogType.Warning);
+                                }
+                            }
+                        }
                     }
 
                     DateTime stampTs = advanceTs != DateTime.MinValue ? advanceTs : DateTime.UtcNow;
+
+                    // [Temp] Final decision before persisting to MU.
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[Temp][PBRT Unblock] MATCH-DECIDE-OUTPUT ns={ns} wouldBeNoOp={wouldBeNoOp} skipped={skippedEvent} replayed={replayedEvent} advanceTs={FormatTs(stampTs)} advanceUuid={ExtractCollectionUuidHex(advanceToken)} advanceToken={advanceToken}",
+                        LogType.Info);
+
                     AdvanceMu(entry, stampTs, advanceToken);
                     working.Remove(ns);
                     _entries.TryRemove(ns, out _);
                     matched++;
 
                     string docKeyJson = SafeToJson(change.DocumentKey);
-                    if (skippedEvent)
+                    if (replayedEvent)
                     {
                         _log.WriteLine(
-                            $"{_syncBackPrefix}[PBRT Unblock] WARNING skipped 1 event for {ns} (no safe rewind position) op={change.OperationType} documentKey={docKeyJson} tokenHash={ResumeTokenInspector.ShortHash(advanceToken)} ts={stampTs:o}; remaining={working.Count}",
+                            $"{_syncBackPrefix}[PBRT Unblock] replayed 1 event for {ns} op={change.OperationType} documentKey={docKeyJson} tokenHash={ResumeTokenInspector.ShortHash(advanceToken)} ts={stampTs:o}; remaining={working.Count}",
+                            LogType.Info);
+                    }
+                    else if (skippedEvent)
+                    {
+                        _log.WriteLine(
+                            $"{_syncBackPrefix}[PBRT Unblock] WARNING skipped 1 event for {ns} (no safe rewind and replay unavailable/failed) op={change.OperationType} documentKey={docKeyJson} tokenHash={ResumeTokenInspector.ShortHash(advanceToken)} ts={stampTs:o}; remaining={working.Count}",
                             LogType.Warning);
                     }
                     else
@@ -423,6 +515,36 @@ namespace OnlineMongoMigrationProcessor
             catch { return "<unserializable>"; }
         }
 
+        // [Temp] Best-effort serialization of an event's _id (resume token) bson.
+        private static string SafeResumeTokenToJson(BsonDocument? rt)
+        {
+            if (rt == null) return "<none>";
+            try { return rt.ToJson(); }
+            catch { return "<unserializable>"; }
+        }
+
+        // [Temp] Extracts the embedded collection UUID hex (16 bytes / 32 hex chars)
+        // from a v1 resume token's _data field. The UUID is encoded as BSON
+        // binary (subtype 0x04), so we locate the 0x1004 marker and read the
+        // next 32 hex chars. Returns "?" if not parseable.
+        private static string ExtractCollectionUuidHex(string? tokenJson)
+        {
+            if (string.IsNullOrEmpty(tokenJson)) return "?";
+            try
+            {
+                var doc = BsonDocument.Parse(tokenJson);
+                if (!doc.Contains("_data")) return "?";
+                string hex = doc["_data"].AsString;
+                int idx = hex.IndexOf("1004", StringComparison.OrdinalIgnoreCase);
+                if (idx < 0 || idx + 4 + 32 > hex.Length) return "?";
+                return hex.Substring(idx + 4, 32).ToUpperInvariant();
+            }
+            catch
+            {
+                return "?";
+            }
+        }
+
         private void FastForwardLeftovers(
             IChangeStreamCursor<ChangeStreamDocument<BsonDocument>> cursor,
             IDictionary<string, UnblockEntry> working)
@@ -440,6 +562,11 @@ namespace OnlineMongoMigrationProcessor
 
             ResumeTokenInspector.TryDecodeUtc(pbrtJson, out DateTime pbrtTs);
             DateTime stampTs = pbrtTs != DateTime.MinValue ? pbrtTs : DateTime.UtcNow;
+
+            // [Temp] Cluster PBRT used for fast-forwarding leftover MUs.
+            _log.WriteLine(
+                $"{_syncBackPrefix}[Temp][PBRT Unblock] FAST-FORWARD-PBRT count={working.Count} ts={FormatTs(stampTs)} uuid={ExtractCollectionUuidHex(pbrtJson)} token={pbrtJson}",
+                LogType.Info);
 
             foreach (var kv in working.ToList())
             {
@@ -468,13 +595,17 @@ namespace OnlineMongoMigrationProcessor
 
         private void AdvanceMu(UnblockEntry entry, DateTime ts, string tokenJson)
         {
-            // Only advance if the new PBRT is strictly newer than the entry's own
-            // PBRT at enqueue time. Without this guard, an idle cluster watch (PBRT
-            // unchanged) would roll a newer MU's resume token backwards when its
-            // entry got grouped with an older one.
+            // Only reject true backward moves. Resume-token timestamps have 1s
+            // resolution (the 4B BE seconds field after 0x82), so multiple ordered
+            // events within the same second share the same ts; forward progress
+            // inside that second is encoded in the ordinal that follows. Using <=
+            // here would silently drop genuine same-second forward advances and
+            // freeze the MU at the first event of any active second. Strict < still
+            // blocks the original concern (an idle cluster watch with an older PBRT
+            // rolling a newer MU's token backwards).
             if (entry.PbrtClusterTimeUtc != DateTime.MinValue &&
                 ts != DateTime.MinValue &&
-                ts <= entry.PbrtClusterTimeUtc)
+                ts < entry.PbrtClusterTimeUtc)
             {
                 return;
             }
@@ -491,14 +622,22 @@ namespace OnlineMongoMigrationProcessor
                 return;
             }
 
-            string preTokenHash = ResumeTokenInspector.ShortHash(mu.GetResumeToken(_syncBack) ?? string.Empty);
+            string preTokenJson = mu.GetResumeToken(_syncBack) ?? string.Empty;
+            string preTokenHash = ResumeTokenInspector.ShortHash(preTokenJson);
             SetResumeParameters(mu, ts, tokenJson, _syncBack);
-            string postSetTokenHash = ResumeTokenInspector.ShortHash(mu.GetResumeToken(_syncBack) ?? string.Empty);
+            string postSetTokenJson = mu.GetResumeToken(_syncBack) ?? string.Empty;
+            string postSetTokenHash = ResumeTokenInspector.ShortHash(postSetTokenJson);
             bool saved = MigrationJobContext.SaveMigrationUnit(mu, true);
-            string postSaveTokenHash = ResumeTokenInspector.ShortHash(mu.GetResumeToken(_syncBack) ?? string.Empty);
+            string postSaveTokenJson = mu.GetResumeToken(_syncBack) ?? string.Empty;
+            string postSaveTokenHash = ResumeTokenInspector.ShortHash(postSaveTokenJson);
 
             _log.WriteLine(
                 $"{_syncBackPrefix}[PBRT Unblock] AdvanceMu {entry.DatabaseName}.{entry.CollectionName} muId={entry.MuId} jobId={entry.JobId} preHash={preTokenHash} postSetHash={postSetTokenHash} postSaveHash={postSaveTokenHash} saved={saved}",
+                LogType.Info);
+
+            // [Temp] Full pre/post tokens + UUIDs around the AdvanceMu save.
+            _log.WriteLine(
+                $"{_syncBackPrefix}[Temp][PBRT Unblock] AdvanceMu-DETAIL ns={entry.DatabaseName}.{entry.CollectionName} muId={entry.MuId} ts={FormatTs(ts)} saved={saved} preUuid={ExtractCollectionUuidHex(preTokenJson)} postSetUuid={ExtractCollectionUuidHex(postSetTokenJson)} postSaveUuid={ExtractCollectionUuidHex(postSaveTokenJson)} newUuid={ExtractCollectionUuidHex(tokenJson)} preToken={preTokenJson} newToken={tokenJson} postSaveToken={postSaveTokenJson}",
                 LogType.Info);
         }
 

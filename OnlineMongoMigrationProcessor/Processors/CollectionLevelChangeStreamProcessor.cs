@@ -86,7 +86,33 @@ namespace OnlineMongoMigrationProcessor
                 _syncBack,
                 _syncBackPrefix,
                 GetBatchDurationInSeconds,
-                () => IsOptimizeForLargeDocsEnabled && IsSplitLargeEventSupported);
+                () => IsOptimizeForLargeDocsEnabled && IsSplitLargeEventSupported,
+                (mu, documentKey, opType) =>
+                {
+                    // Force-apply a single change directly to the target by documentKey.
+                    // Used by the unblocker when no safe rewind exists so we don't lose
+                    // the event. Builds source/target collection refs locally because the
+                    // unblocker has no access to _sourceClient/_targetClient.
+                    try
+                    {
+                        var replaySourceClient = _syncBack ? _targetClient : _sourceClient;
+                        var replaySourceDb = replaySourceClient.GetDatabase(
+                            _syncBack ? mu.GetEffectiveTargetDatabaseName() : mu.DatabaseName);
+                        var replaySourceCollection = replaySourceDb.GetCollection<BsonDocument>(
+                            _syncBack ? mu.GetEffectiveTargetCollectionName() : mu.CollectionName);
+                        var targetDb = _targetClient.GetDatabase(mu.GetEffectiveTargetDatabaseName());
+                        var targetCollection = targetDb.GetCollection<BsonDocument>(mu.GetEffectiveTargetCollectionName());
+                        return AutoReplayFirstChangeInResumeToken(
+                            documentKey.ToJson(), opType, replaySourceCollection, targetCollection, mu);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.WriteLine(
+                            $"{_syncBackPrefix}[PBRT Unblock] replay setup failed for {mu.DatabaseName}.{mu.CollectionName}: {ex.Message}",
+                            LogType.Warning);
+                        return false;
+                    }
+                });
         }
 
         public override void RemoveMigrationUnit(string migrationUnitId)
@@ -830,6 +856,22 @@ namespace OnlineMongoMigrationProcessor
             await flushLock.WaitAsync();
             try
             {
+                // [STUCK-EMULATION-DISABLED] To re-enable bypassing hydration + bulk
+                // writes for collection_0001 (so only the StuckCursorUnblocker replay
+                // path writes to target), replace the hydration + BulkProcessChangesAsync
+                // block below with this gated variant:
+                //
+                //   bool bypassBulkWritesForEmulation = string.Equals(
+                //       mu.CollectionName, "collection_0001", StringComparison.Ordinal);
+                //   if (IsOptimizeForLargeDocsEnabled && !bypassBulkWritesForEmulation) { ...hydration... }
+                //   int failureCount;
+                //   if (bypassBulkWritesForEmulation) {
+                //       _log.WriteLine($"...[PBRT Stuck Emulation] skipping bulk writes...", LogType.Info);
+                //       failureCount = 0;
+                //   } else {
+                //       failureCount = await BulkProcessChangesAsync(...);
+                //   }
+
                 if (IsOptimizeForLargeDocsEnabled)
                 {
                     // Re-fetch document bodies from source (the side we tail) by _id
@@ -879,12 +921,26 @@ namespace OnlineMongoMigrationProcessor
                             _log.WriteLine($"{_syncBackPrefix}Timestamp mismatch Old Value: {currentTimestamp} is newer than New Value: {accumulatedChangesInColl.LatestTimestamp} for {collectionNamespace}. Old Token:{currentResumeToken}, New Token:{accumulatedChangesInColl.LatestResumeToken}", LogType.Error);
                             _log.ShowInMonitor($"{_syncBackPrefix}Timestamp mismatch detected for {collectionNamespace}. This may indicate a logic error in resume token management. Please investigate the logs for details.");
                         }
+
+                        // [STUCK-EMULATION-DISABLED] To re-enable freezing the resume
+                        // token for collection_0001 (so its PBRT stays stuck and forces
+                        // the StuckCursorUnblocker to act), wrap the save block below in:
+                        //
+                        //   if (string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal))
+                        //   {
+                        //       _log.WriteLine($"...[PBRT Stuck Emulation] skipping resume-token save for {collectionNamespace}...", LogType.Info);
+                        //   }
+                        //   else
+                        //   {
+                        //       <save block below>
+                        //   }
+
                         SetResumeParameters(mu, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken,_syncBack);
                         mu.SetCSLastChange(_syncBack, accumulatedChangesInColl.LatestTimestamp, accumulatedChangesInColl.LatestResumeToken);
                         if (ShouldPersistMu(mu.Id, isFinalFlush))
                             TrySaveMigrationUnit(mu, true);
-                    
-                        
+
+
                         _resumeTokenCache[$"{targetCollection.CollectionNamespace}"] = accumulatedChangesInColl.LatestResumeToken;
                     }
                 }
@@ -1458,6 +1514,15 @@ namespace OnlineMongoMigrationProcessor
                     // When events were processed, the flush already advanced mu.ResumeToken
                     // to the last change's token. We only use postBatchResumeToken for idle
                     // collections to keep CursorUtcTimestamp current.
+                    // [STUCK-EMULATION-DISABLED] To re-enable forcing the idle branch
+                    // for collection_0001 (so its stuck-rounds counter is not reset by
+                    // the eventsRound branch and the unblocker can enqueue), replace
+                    // the TotalEventCount guard below with:
+                    //
+                    //   bool forceIdleBranchForEmulation = string.Equals(
+                    //       mu.CollectionName, "collection_0001", StringComparison.Ordinal);
+                    //   if (accumulatedChangesInColl.TotalEventCount == 0 || forceIdleBranchForEmulation)
+
                     if (accumulatedChangesInColl.TotalEventCount == 0)
                     {
                         try
@@ -1466,13 +1531,13 @@ namespace OnlineMongoMigrationProcessor
                             string? tokenJson = postBatchToken?.ToJson();
                             var (_, currentResumeToken, _, _) = GetResumeParameters(mu);
 
-                            // TEMP-STUCK-EMULATION: force the "PBRT did not advance" branch
-                            // for collection_0001 to exercise the StuckCursorUnblocker path.
-                            // REMOVE BEFORE MERGE.
-                            //if (string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal))
-                            //{
-                            //    tokenJson = currentResumeToken;
-                            //}
+                            // [STUCK-EMULATION-DISABLED] To re-enable forcing the "PBRT did
+                            // not advance" branch for collection_0001, add:
+                            //
+                            //   if (string.Equals(mu.CollectionName, "collection_0001", StringComparison.Ordinal))
+                            //   {
+                            //       tokenJson = currentResumeToken;
+                            //   }
 
                             // [PBRT] Idle-round summary: did cursor produce anything? did postBatchResumeToken advance vs what we sent in?
                             string inHash = ResumeTokenInspector.ShortHash(currentResumeToken);
@@ -1796,7 +1861,7 @@ namespace OnlineMongoMigrationProcessor
                             // will fetch the current source body at flush time instead.
                             if (!isWriteSimulated)
                             {
-                                _log.WriteLine($"{_syncBackPrefix}Processing {change.OperationType} operation for {collNameSpace} with _id {idValue}. No document found on source.", LogType.Info);
+                                _log.WriteLine($"{_syncBackPrefix}Processing {change.OperationType} operation for {collNameSpace} with _id {idValue}. No document found on source.", LogType.Debug);
                              }
                         }
                         else
