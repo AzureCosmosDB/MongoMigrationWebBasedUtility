@@ -131,6 +131,14 @@ namespace OnlineMongoMigrationProcessor
             var working = _entries.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
             if (working.Count == 0) return;
 
+            // Refresh each entry from the canonical MU before opening cluster-watch.
+            // Between Enqueue and ResolveAsync the per-collection flush path may have
+            // advanced the MU's resume token; using the enqueue-time snapshot as the
+            // cluster-watch ResumeAfter would re-emit events the MU already processed
+            // and risk a same-second backward advance.
+            RefreshFromCanonical(working);
+            if (working.Count == 0) return;
+
             UnblockEntry oldest = PickOldest(working.Values);
 
             _log.WriteLine(
@@ -593,23 +601,62 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
+        // Pulls each working entry's ResumeToken / PbrtClusterTimeUtc forward to the
+        // canonical MU's current state. Drops the entry if the canonical MU is gone.
+        // Called once at the top of ResolveAsync so cluster-watch resumes from the
+        // newest known position rather than a stale enqueue-time snapshot.
+        private void RefreshFromCanonical(IDictionary<string, UnblockEntry> working)
+        {
+            foreach (var key in working.Keys.ToList())
+            {
+                var stale = working[key];
+                var mu = MigrationJobContext.GetMigrationUnit(stale.MuId, stale.JobId);
+                if (mu == null)
+                {
+                    working.Remove(key);
+                    _entries.TryRemove(key, out _);
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[PBRT Unblock] dropping {key}; canonical MU not found (muId={stale.MuId} jobId={stale.JobId})",
+                        LogType.Warning);
+                    continue;
+                }
+
+                string canonicalToken = mu.GetResumeToken(_syncBack) ?? string.Empty;
+                if (string.IsNullOrEmpty(canonicalToken)) continue;
+
+                bool canonicalIsNewer;
+                if (ResumeTokenInspector.TryGetClusterPositionKey(canonicalToken, out string canonKey) &&
+                    ResumeTokenInspector.TryGetClusterPositionKey(stale.ResumeToken, out string staleKey))
+                {
+                    canonicalIsNewer = string.CompareOrdinal(canonKey, staleKey) > 0;
+                }
+                else
+                {
+                    ResumeTokenInspector.TryDecodeUtc(canonicalToken, out DateTime canonTsOnly);
+                    canonicalIsNewer = canonTsOnly != DateTime.MinValue && canonTsOnly > stale.PbrtClusterTimeUtc;
+                }
+
+                if (!canonicalIsNewer) continue;
+
+                ResumeTokenInspector.TryDecodeUtc(canonicalToken, out DateTime canonTs);
+                working[key] = new UnblockEntry
+                {
+                    MuId = stale.MuId,
+                    JobId = stale.JobId,
+                    DatabaseName = stale.DatabaseName,
+                    CollectionName = stale.CollectionName,
+                    ResumeToken = canonicalToken,
+                    AddedUtc = stale.AddedUtc,
+                    PbrtClusterTimeUtc = canonTs,
+                };
+                _log.WriteLine(
+                    $"{_syncBackPrefix}[PBRT Unblock] refreshed {key} from canonical MU; staleHash={ResumeTokenInspector.ShortHash(stale.ResumeToken)} canonicalHash={ResumeTokenInspector.ShortHash(canonicalToken)}",
+                    LogType.Info);
+            }
+        }
+
         private void AdvanceMu(UnblockEntry entry, DateTime ts, string tokenJson)
         {
-            // Only reject true backward moves. Resume-token timestamps have 1s
-            // resolution (the 4B BE seconds field after 0x82), so multiple ordered
-            // events within the same second share the same ts; forward progress
-            // inside that second is encoded in the ordinal that follows. Using <=
-            // here would silently drop genuine same-second forward advances and
-            // freeze the MU at the first event of any active second. Strict < still
-            // blocks the original concern (an idle cluster watch with an older PBRT
-            // rolling a newer MU's token backwards).
-            if (entry.PbrtClusterTimeUtc != DateTime.MinValue &&
-                ts != DateTime.MinValue &&
-                ts < entry.PbrtClusterTimeUtc)
-            {
-                return;
-            }
-
             // Always resolve the canonical MU from the cache. Holding a stored MU
             // reference is unsafe: if the cache rebuilds (collection removed/re-added),
             // SaveMigrationUnit silently rejects writes from non-canonical instances.
@@ -623,6 +670,31 @@ namespace OnlineMongoMigrationProcessor
             }
 
             string preTokenJson = mu.GetResumeToken(_syncBack) ?? string.Empty;
+
+            // Backward-rollback protection: compare ts+ordinal (the 16 hex chars after
+            // the 0x82 type byte) of the candidate token against the canonical MU's
+            // current token. v1 tokens are designed so this prefix sorts lex-equal to
+            // oplog order, so this guard catches same-second backward-ordinal moves
+            // that the ts-only guard would silently allow. Fall back to ts comparison
+            // if either side fails to parse (rare; mainly defensive).
+            if (ResumeTokenInspector.TryGetClusterPositionKey(tokenJson, out string candidateKey) &&
+                ResumeTokenInspector.TryGetClusterPositionKey(preTokenJson, out string currentKey))
+            {
+                if (string.CompareOrdinal(candidateKey, currentKey) < 0)
+                {
+                    _log.WriteLine(
+                        $"{_syncBackPrefix}[PBRT Unblock] AdvanceMu REJECTED backward move for {entry.DatabaseName}.{entry.CollectionName} muId={entry.MuId} candidateKey={candidateKey} currentKey={currentKey}",
+                        LogType.Warning);
+                    return;
+                }
+            }
+            else if (entry.PbrtClusterTimeUtc != DateTime.MinValue &&
+                     ts != DateTime.MinValue &&
+                     ts < entry.PbrtClusterTimeUtc)
+            {
+                return;
+            }
+
             string preTokenHash = ResumeTokenInspector.ShortHash(preTokenJson);
             SetResumeParameters(mu, ts, tokenJson, _syncBack);
             string postSetTokenJson = mu.GetResumeToken(_syncBack) ?? string.Empty;

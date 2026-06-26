@@ -61,5 +61,34 @@ namespace OnlineMongoMigrationProcessor
                 ? ts.ToString("o", CultureInfo.InvariantCulture)
                 : "?";
         }
+
+        /// <summary>
+        /// Extracts the 16-hex-char (ts + ordinal) prefix that follows the leading
+        /// type byte 0x82 in a v1 resume token. Both fields are BE-encoded unsigned
+        /// 32-bit integers, so lexicographic comparison of this prefix is identical
+        /// to numeric comparison of the (ts, ordinal) tuple. Use this when you need
+        /// strict oplog ordering at sub-second resolution (e.g. backward-rollback
+        /// protection when many events share the same second).
+        /// </summary>
+        public static bool TryGetClusterPositionKey(string tokenJson, out string key)
+        {
+            key = string.Empty;
+            try
+            {
+                if (string.IsNullOrEmpty(tokenJson)) return false;
+                var doc = BsonDocument.Parse(tokenJson);
+                if (!doc.Contains("_data")) return false;
+                string hex = doc["_data"].AsString;
+                // 2 (type byte) + 8 (ts) + 8 (ordinal) = 18 hex chars minimum.
+                if (hex.Length < 18) return false;
+                if (!hex.StartsWith("82", StringComparison.OrdinalIgnoreCase)) return false;
+                key = hex.Substring(2, 16).ToUpperInvariant();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 }
