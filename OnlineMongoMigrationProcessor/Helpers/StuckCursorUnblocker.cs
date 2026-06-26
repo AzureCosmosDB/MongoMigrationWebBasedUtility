@@ -615,7 +615,7 @@ namespace OnlineMongoMigrationProcessor
 
             _log.WriteLine(
                 $"{_syncBackPrefix}[PBRT Unblock] AdvanceMu {entry.DatabaseName}.{entry.CollectionName} muId={entry.MuId} jobId={entry.JobId} preHash={preTokenHash} postSetHash={postSetTokenHash} postSaveHash={postSaveTokenHash} saved={saved}",
-                LogType.Info);
+                LogType.Debug);
         }
 
         private static string FormatTs(DateTime ts) => ts == DateTime.MinValue ? "?" : ts.ToString("o");
