@@ -895,9 +895,9 @@ namespace OnlineMongoMigrationProcessor.Workers
             MigrationJobContext.AddVerboseLog($"PrepareUnitForCopyAsync: mu={mu.DatabaseName}.{mu.CollectionName}");
             _log.WriteLine($"Starting PrepareUnitForCopyAsync for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
 
-            if (mu.SourceStatus == CollectionStatus.IsView)
+            if (mu.SourceStatus == CollectionStatus.IsView || mu.SourceStatus == CollectionStatus.IsTimeSeries)
             {
-                _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} is a view - skipping", LogType.Debug);
+                _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} is a {(mu.SourceStatus == CollectionStatus.IsTimeSeries ? "time-series collection" : "view")} - skipping", LogType.Debug);
                 return TaskResult.Success;
             }
 
@@ -919,6 +919,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                 return await HandleMissingCollectionAsync(mu, _cts);
             }
             else if (collectionStatus == CollectionValidationResult.IsView)
+            {
+                return TaskResult.Success;
+            }
+            else if (collectionStatus == CollectionValidationResult.IsTimeSeries)
             {
                 return TaskResult.Success;
             }
@@ -994,16 +998,25 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                 _log.WriteLine($"Collection exists, checking if it's a collection (not a view): {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
                 bool isCollection = true;
+                bool isTimeSeries = false;
                 try
                 {
                     var ret = await MongoHelper.CheckIsCollectionAsync(_sourceClient, mu.DatabaseName, mu.CollectionName);
-                    isCollection = checkExist && ret.Item2;
-                    _log.WriteLine($"CheckIsCollectionAsync result: {isCollection} for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                    isCollection = checkExist && ret.IsCollection;
+                    isTimeSeries = ret.IsTimeSeries;
+                    _log.WriteLine($"CheckIsCollectionAsync result: isCollection={isCollection} isTimeSeries={isTimeSeries} for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
                 }
                 catch (Exception ex)
                 {
                     _log.WriteLine($"Error checking if {mu.DatabaseName}.{mu.CollectionName} is a collection. Details: {ex}", LogType.Warning);
                     isCollection = true;
+                }
+
+                if (isTimeSeries)
+                {
+                    mu.SourceStatus = CollectionStatus.IsTimeSeries;
+                    _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} is a time-series collection. Time-series collections are not supported by the target (Cosmos DB for MongoDB / DocumentDB) and cannot be migrated as regular collections.", LogType.Warning);
+                    return CollectionValidationResult.IsTimeSeries;
                 }
 
                 if (!isCollection)
@@ -1444,7 +1457,8 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             Valid,
             NotFound,
-            IsView
+            IsView,
+            IsTimeSeries
         }
 
         private async Task<TaskResult> MigrateJobCollections(bool syncBack,CancellationToken ctsToken)
@@ -1528,7 +1542,7 @@ namespace OnlineMongoMigrationProcessor.Workers
                         if (_migrationCancelled || ctsToken.IsCancellationRequested)
                             return TaskResult.Canceled;
 
-                        var (exists, isCollection) = await ValidateSourceCollectionAsync(mu);
+                        var (exists, isCollection, isTimeSeries) = await ValidateSourceCollectionAsync(mu);
 
                         // Order matters: a missing namespace returns (exists=false, isCollection=false).
                         // Handle the missing case first so we don't mis-classify it as a view.
@@ -1536,6 +1550,14 @@ namespace OnlineMongoMigrationProcessor.Workers
                         {
                             _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} does not exist on source. Marking as NotFound and continuing.", LogType.Warning);
                             return await HandleMissingCollectionAsync(mu, ctsToken);
+                        }
+
+                        if (isTimeSeries)
+                        {
+                            mu.SourceStatus = CollectionStatus.IsTimeSeries;
+                            MigrationJobContext.SaveMigrationUnit(mu, true);
+                            _log.WriteLine($"{mu.DatabaseName}.{mu.CollectionName} is a time-series collection. Time-series collections are not supported by the target (Cosmos DB for MongoDB / DocumentDB) — skipping.", LogType.Warning);
+                            return TaskResult.Success;
                         }
 
                         if (!isCollection)
@@ -1703,7 +1725,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (!Helper.IsMigrationUnitValid(migrationUnit))
                 return TaskResult.Success;
 
-            if (migrationUnit.SourceStatus == CollectionStatus.IsView)
+            if (migrationUnit.SourceStatus == CollectionStatus.IsView || migrationUnit.SourceStatus == CollectionStatus.IsTimeSeries)
                 return TaskResult.Success;
 
             // Fast-path: if offline migration already completed for this unit,
@@ -1711,7 +1733,14 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (await TryQueueCompletedUnitForChangeStreamAsync(migrationUnit, "migrate-end-to-end"))
                 return TaskResult.Success;
 
-            var (exists, isCollection) = await ValidateSourceCollectionAsync(migrationUnit);
+            var (exists, isCollection, isTimeSeries) = await ValidateSourceCollectionAsync(migrationUnit);
+
+            if (isTimeSeries)
+            {
+                migrationUnit.SourceStatus = CollectionStatus.IsTimeSeries;
+                _log.WriteLine($"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName} is a time-series collection. Time-series collections are not supported by the target (Cosmos DB for MongoDB / DocumentDB).", LogType.Warning);
+                return TaskResult.Success;
+            }
 
             if (!isCollection)
             {
@@ -1732,7 +1761,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             return await ExecuteMigrationForUnitAsync(migrationUnit,  syncBack, ctsToken, resumeTokenTasks);
         }
 
-        private async Task<(bool exists, bool isCollection)> ValidateSourceCollectionAsync(MigrationUnit migrationUnit)
+        private async Task<(bool exists, bool isCollection, bool isTimeSeries)> ValidateSourceCollectionAsync(MigrationUnit migrationUnit)
         {
             MigrationJobContext.AddVerboseLog($"ValidateSourceCollectionAsync: mu={migrationUnit.DatabaseName}.{migrationUnit.CollectionName}");
             bool checkExist;
@@ -1744,14 +1773,16 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (!checkExist)
             {
                 migrationUnit.SourceStatus = CollectionStatus.Unknown;
-                return (false, false);
+                return (false, false, false);
             }
 
             bool isCollection = true;
+            bool isTimeSeries = false;
             try
             {
                 var ret = await MongoHelper.CheckIsCollectionAsync(_sourceClient!, migrationUnit.DatabaseName, migrationUnit.CollectionName);
                 isCollection = ret.IsCollection;
+                isTimeSeries = ret.IsTimeSeries;
             }
             catch
             {
@@ -1761,7 +1792,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (isCollection)
                 migrationUnit.SourceStatus = CollectionStatus.OK;
 
-            return (checkExist, isCollection);
+            return (checkExist, isCollection, isTimeSeries);
         }
 
         private async Task ValidateTargetCollectionExistsAsync(MigrationUnit migrationUnit)
