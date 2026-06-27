@@ -289,6 +289,11 @@ namespace OnlineMongoMigrationProcessor
         public long DumpGap { get; set; }
         public long RestoreGap { get; set; }
 
+        // Populated from collStats.avgObjSize at partition prep. 0 = unknown.
+        // Used by ProcessExecutor to convert mongorestore's byte-progress output
+        // into an approximate restored doc count so % completion updates mid-restore.
+        public long AvgDocSizeBytes { get; set; }
+
         public long CSDInsertEvents { get; set; }
         public long CSDeleteEvents { get; set; }
         public long CSUpdateEvents { get; set; }

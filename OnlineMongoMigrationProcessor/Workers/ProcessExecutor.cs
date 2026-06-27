@@ -388,7 +388,34 @@ namespace OnlineMongoMigrationProcessor.Workers
                 {
                     // Don't reset continuousDuplicateStart here - byte-size progress lines are periodic
                     // status output from mongorestore and don't indicate duplicates have stopped
-                    _log.ShowInMonitor($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {data}");
+
+                    // Convert bytes-restored to an approximate doc count using mu.AvgDocSizeBytes
+                    // so PercentageUpdater can report mid-restore progress instead of jumping 0 -> 100
+                    // only when the final "done" line lands.
+                    string approxSuffix = string.Empty;
+
+                    if (mu.AvgDocSizeBytes > 0 && TryExtractRestoreBytes(data, out long bytesRestored))
+                    {
+                        long approxDocs = bytesRestored / mu.AvgDocSizeBytes;
+                        long cap = chunk.DumpResultDocCount > 0 ? chunk.DumpResultDocCount : chunk.DumpQueryDocCount;
+                        if (cap > 0) approxDocs = Math.Min(approxDocs, cap);
+
+                        // Monotonic: never go backwards (handles mongorestore restarts where
+                        // its internal byte counter resets to 0).
+                        if (approxDocs > chunk.RestoredSuccessDocCount)
+                        {
+                            chunk.RestoredSuccessDocCount = approxDocs;
+                            mu.RestorePercent = PercentageUpdater.CalculateOverallPercentFromAllChunks(mu, isRestore: true, log: _log);
+                        }
+
+                        if (cap > 0)
+                        {
+                            double chunkPct = Math.Min(100.0, approxDocs * 100.0 / cap);
+                            approxSuffix = $" ( approx {chunkPct:0.##}%)";
+                        }
+                    }
+
+                    _log.ShowInMonitor($"{processType} for {mu.DatabaseName}.{mu.CollectionName} Chunk[{chunkIndex}] : {data}{approxSuffix}");
                 }
                 else
                 {
@@ -518,6 +545,36 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             // Return 0 if no match found
             return 0;
+        }
+
+        // Parses a mongorestore byte-progress line whose tail is "<value> <KB|MB|GB|TB>"
+        // (e.g. "sampledb.MultiIdMixed30gb 1.22GB"). Uses binary units (1024).
+        private static readonly Regex RestoreBytesRegex = new Regex(
+            @"([\d.]+)\s*(KB|MB|GB|TB)\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        public static bool TryExtractRestoreBytes(string input, out long bytes)
+        {
+            bytes = 0;
+            if (string.IsNullOrEmpty(input)) return false;
+
+            var m = RestoreBytesRegex.Match(input);
+            if (!m.Success) return false;
+            if (!double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out double value)) return false;
+
+            long multiplier = m.Groups[2].Value.ToUpperInvariant() switch
+            {
+                "KB" => 1024L,
+                "MB" => 1024L * 1024,
+                "GB" => 1024L * 1024 * 1024,
+                "TB" => 1024L * 1024 * 1024 * 1024,
+                _ => 0L
+            };
+            if (multiplier == 0) return false;
+
+            bytes = (long)(value * multiplier);
+            return bytes > 0;
         }
 
         

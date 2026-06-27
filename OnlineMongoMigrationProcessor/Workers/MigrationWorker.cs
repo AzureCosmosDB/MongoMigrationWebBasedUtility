@@ -1033,7 +1033,30 @@ namespace OnlineMongoMigrationProcessor.Workers
             var db = _sourceClient!.GetDatabase(mu.DatabaseName);
             var coll = db.GetCollection<BsonDocument>(mu.CollectionName);
 
-            mu.EstimatedDocCount = coll.EstimatedDocumentCount();
+            bool gotCountFromStats = false;
+            try
+            {
+                var statsCmd = new BsonDocument { { "collStats", mu.CollectionName } };
+                var stats = db.RunCommand<BsonDocument>(statsCmd);
+
+                if (stats.TryGetValue("count", out var countVal) && countVal.IsNumeric)
+                {
+                    mu.EstimatedDocCount = countVal.ToInt64();
+                    gotCountFromStats = true;
+                }
+                if (stats.TryGetValue("avgObjSize", out var avgObjSizeVal) && avgObjSizeVal.IsNumeric)
+                {
+                    long avg = (long)avgObjSizeVal.ToDouble();
+                    if (avg > 0) mu.AvgDocSizeBytes = avg;
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"collStats failed for {mu.DatabaseName}.{mu.CollectionName}; falling back to EstimatedDocumentCount, AvgDocSizeBytes left as 0. Details: {ex.Message}", LogType.Debug);
+            }
+
+            if (!gotCountFromStats)
+                mu.EstimatedDocCount = coll.EstimatedDocumentCount();
 
             _ = Task.Run(() =>
             {
