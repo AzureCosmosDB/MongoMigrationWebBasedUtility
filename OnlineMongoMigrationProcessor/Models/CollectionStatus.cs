@@ -5,6 +5,7 @@ namespace OnlineMongoMigrationProcessor
         Unknown,
         OK,
         NotFound,
-        IsView
+        IsView,
+        IsTimeSeries
     }
 }

@@ -209,7 +209,7 @@
 
 @if (_resetChangeStreamDialogOpen && CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.JobType!= OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
 {
-    <ResetChangeStream Job="@CurrentlyLoadedMigrationJob" MigrationUnits="@((@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob) ?? new List<MigrationUnit>()).Where(mu => mu.SourceStatus != CollectionStatus.NotFound && mu.SourceStatus != CollectionStatus.IsView).ToList())" OnCollectionsUpdated="@OnCSReset" />
+    <ResetChangeStream Job="@CurrentlyLoadedMigrationJob" MigrationUnits="@((@JobManager.GetMigrationUnits(CurrentlyLoadedMigrationJob) ?? new List<MigrationUnit>()).Where(mu => mu.SourceStatus != CollectionStatus.NotFound && mu.SourceStatus != CollectionStatus.IsView && mu.SourceStatus != CollectionStatus.IsTimeSeries).ToList())" OnCollectionsUpdated="@OnCSReset" />
 }
 @if (_collectionDetailsDialogOpen && _selectedMigrationUnit != null)
 {
@@ -362,6 +362,7 @@
                         <td>
                             @(mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                 : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "Skipped (TIMESERIES)"
                                                 : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                 : (mu.DumpComplete ? "Success" : $"{mu.DumpPercent:F1}%"))
 
@@ -372,6 +373,7 @@
                             <td>
                                 @(mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                     : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                    : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "Skipped (TIMESERIES)"
                                                     : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                     : (mu.RestoreComplete || mu.RestorePercent == 100 ? "Success" : $"{mu.RestorePercent:F1}%"))
 
@@ -382,6 +384,7 @@
                             @{ var failedSuffix = mu.IndexesFailed > 0 ? $", {mu.IndexesFailed} failed" : string.Empty; }
                             @(mu.SourceStatus == CollectionStatus.NotFound ? "N/A"
                                                 : mu.SourceStatus == CollectionStatus.IsView ? "N/A"
+                                                : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "N/A"
                                                 : mu.IndexBuildComplete && mu.IndexesFailed > 0 ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
                                                 : mu.IndexBuildComplete || mu.IndexPercent >= 100 ? $"{displayIndexCount} indexes (Success)"
                                                 : (mu.IndexPercent > 0 || mu.IndexesExpected > 0) ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
@@ -703,6 +706,7 @@ else if (@_showLogBackupFile)
             // Source Status / Download Status
             var sourceStatus = mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                 : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "Skipped (TIMESERIES)"
                                                 : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                 : (mu.DumpComplete ? "Success" : $"{mu.DumpPercent:F1}%");
             if (sourceStatus.Contains(searchText, StringComparison.OrdinalIgnoreCase))
@@ -713,6 +717,7 @@ else if (@_showLogBackupFile)
             {
                 var uploadStatus = mu.SourceStatus == CollectionStatus.NotFound ? "Skipped (404)"
                                                     : mu.SourceStatus == CollectionStatus.IsView ? "Skipped (VIEW)"
+                                                    : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "Skipped (TIMESERIES)"
                                                     : mu.SkippedDueToMaxRetries ? "Skipped (Max Retries)"
                                                     : (mu.RestoreComplete || mu.RestorePercent == 100 ? "Success" : $"{mu.RestorePercent:F1}%");
                 if (uploadStatus.Contains(searchText, StringComparison.OrdinalIgnoreCase))
@@ -725,6 +730,7 @@ else if (@_showLogBackupFile)
                 var failedSuffix = mu.IndexesFailed > 0 ? $", {mu.IndexesFailed} failed" : string.Empty;
                 var indexStatus = mu.SourceStatus == CollectionStatus.NotFound ? "N/A"
                                                     : mu.SourceStatus == CollectionStatus.IsView ? "N/A"
+                                                    : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "N/A"
                                                     : mu.IndexBuildComplete && mu.IndexesFailed > 0 ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
                                                     : mu.IndexBuildComplete || mu.IndexPercent >= 100 ? $"{displayIndexCount} indexes (Success)"
                                                     : (mu.IndexPercent > 0 || mu.IndexesExpected > 0) ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
@@ -865,6 +871,9 @@ else if (@_showLogBackupFile)
         if (mu.SourceStatus == CollectionStatus.IsView)
             return "0_Skipped (VIEW)"; // Sort skipped items first
 
+        if (mu.SourceStatus == CollectionStatus.IsTimeSeries)
+            return "0_Skipped (TIMESERIES)"; // Sort skipped items first
+
         if (mu.SkippedDueToMaxRetries)
             return "0_Skipped (Max Retries)"; // Sort skipped items first
 
@@ -895,7 +904,7 @@ else if (@_showLogBackupFile)
 
     private string GetCollectionRowClass(MigrationUnitBasic mu)
     {
-        if (mu.SourceStatus == CollectionStatus.NotFound || mu.SourceStatus == CollectionStatus.IsView)
+        if (mu.SourceStatus == CollectionStatus.NotFound || mu.SourceStatus == CollectionStatus.IsView || mu.SourceStatus == CollectionStatus.IsTimeSeries)
             return "table-danger";
 
         if (mu.OpLogError != ChangeStreamError.None)

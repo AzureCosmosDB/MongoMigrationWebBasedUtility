@@ -186,6 +186,7 @@ namespace MongoMigrationWebApp.Components
         {
             if (u.SourceStatus == CollectionStatus.NotFound) return "Skipped (404)";
             if (u.SourceStatus == CollectionStatus.IsView) return "Skipped (VIEW)";
+            if (u.SourceStatus == CollectionStatus.IsTimeSeries) return "Skipped (TIMESERIES)";
             if (u.SkippedDueToMaxRetries) return "Skipped (Max Retries)";
             return u.SourceStatus.ToString();
         }

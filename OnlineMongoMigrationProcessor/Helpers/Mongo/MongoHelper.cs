@@ -1006,10 +1006,16 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 #endif
 
     
-        public static async Task<(bool Exits,bool IsCollection)> CheckIsCollectionAsync(MongoClient client, string databaseName, string collectionName)
+        public static async Task<(bool Exits, bool IsCollection, bool IsTimeSeries)> CheckIsCollectionAsync(MongoClient client, string databaseName, string collectionName)
         {
-
             var database = client.GetDatabase(databaseName);
+
+            // The internal bucket namespace of a time-series collection cannot be restored
+            // to Cosmos DocumentDB (system.* namespaces are reserved). Treat as TS up-front.
+            if (!string.IsNullOrEmpty(collectionName) && collectionName.StartsWith("system.buckets.", StringComparison.Ordinal))
+            {
+                return (true, false, true);
+            }
 
             // Filter by collection name
             var filter = new BsonDocument("name", collectionName);
@@ -1019,13 +1025,19 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
             if (collectionInfo == null)
             {
-                return new(false, false);
+                return (false, false, false);
             }
 
             // Check the "type" field returned in listCollections
             var type = collectionInfo.GetValue("type", "collection").AsString;
-            return new(true, type == "collection");
+            bool isTimeSeries = string.Equals(type, "timeseries", StringComparison.OrdinalIgnoreCase);
+            if (!isTimeSeries && collectionInfo.TryGetValue("options", out var optsVal) && optsVal.IsBsonDocument && optsVal.AsBsonDocument.Contains("timeseries"))
+            {
+                isTimeSeries = true;
+            }
 
+            bool isCollection = string.Equals(type, "collection", StringComparison.OrdinalIgnoreCase) && !isTimeSeries;
+            return (true, isCollection, isTimeSeries);
         }
 
         public static async Task<bool> CheckRUCollectionExistsAsync(MongoClient client, string databaseName, string collectionName)
@@ -1096,7 +1108,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         {
             if(await CheckCollectionExistsAsync(client, databaseName, collectionName))
             {
-                (bool Exits, bool IsCollection) ret;
+                (bool Exits, bool IsCollection, bool IsTimeSeries) ret;
                 try
                 {
                     ret = await CheckIsCollectionAsync(client, databaseName, collectionName); //fails if connnected to secondary
