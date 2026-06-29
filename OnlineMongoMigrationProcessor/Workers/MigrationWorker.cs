@@ -826,7 +826,11 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (_migrationProcessor == null)
                 return Task.FromResult(true);
 
-            bool indexesPending = !mu.IndexBuildComplete
+            // Use IndexBuildCompleteExplicit (backing field) not IndexBuildComplete (computed) —
+            // the computed getter reports true whenever IndexesExpected==0 alongside
+            // Dump/RestoreComplete, which is the entry state before the non-unique pre-count
+            // inside BuildNonUniqueIndexesAfterCopyAsync has had a chance to populate it.
+            bool indexesPending = !mu.IndexBuildCompleteExplicit
                 && mu.IndexingStrategy.HasValue
                 && mu.IndexingStrategy.Value != IndexingStrategy.DontIndex;
 

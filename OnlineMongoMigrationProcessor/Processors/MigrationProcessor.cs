@@ -270,7 +270,9 @@ namespace OnlineMongoMigrationProcessor.Processors
         public async Task<bool> BuildNonUniqueIndexesAfterCopyAsync(MigrationUnit mu)
         {
             if (_cts.Token.IsCancellationRequested)
+            {
                 return false;
+            }
 
             var activeJob = MigrationJobContext.CurrentlyActiveJob;
             if (activeJob == null)
@@ -288,9 +290,14 @@ namespace OnlineMongoMigrationProcessor.Processors
                 return true;
             }
 
-            // Skip if already complete
-            if (mu.IndexBuildComplete)
+            // Skip if already complete. Use the explicit backing field, not the computed
+            // IndexBuildComplete getter — the latter reports true whenever IndexesExpected==0
+            // alongside Dump/RestoreComplete, which is exactly the entry state before the
+            // non-unique pre-count below has had a chance to populate IndexesExpected.
+            if (mu.IndexBuildCompleteExplicit)
+            {
                 return true;
+            }
 
             if (!MigrationJobContext.TargetConnectionString.TryGetValue(activeJob.Id, out var targetConnStr) || string.IsNullOrWhiteSpace(targetConnStr))
             {

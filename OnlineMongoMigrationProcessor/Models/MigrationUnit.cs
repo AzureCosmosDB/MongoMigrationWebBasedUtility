@@ -72,6 +72,17 @@ namespace OnlineMongoMigrationProcessor
             set => _indexBuildComplete = value;
         }
         private bool _indexBuildComplete;
+
+        /// <summary>
+        /// Backing-field-only view of <see cref="IndexBuildComplete"/>. The public getter
+        /// reports true whenever <see cref="IndexesExpected"/> == 0 alongside dump/restore
+        /// completion, which is misleading during the post-copy window before the non-unique
+        /// pre-count has run. Callers that need to know whether the index-build phase has
+        /// actually finished (vs. simply not started) should read this property instead.
+        /// </summary>
+        [JsonIgnore]
+        [BsonIgnore]
+        public bool IndexBuildCompleteExplicit => _indexBuildComplete;
         /// <summary>
         /// Count of non-unique indexes that have been created on the target collection.
         /// </summary>
