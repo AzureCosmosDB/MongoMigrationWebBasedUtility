@@ -202,7 +202,7 @@ namespace OnlineMongoMigrationProcessor
                 // version >= 6 but rejects $changeStreamSplitLargeEvent with
                 // "Stage $changeStreamSplitLargeEvent is not permitted in a $changeStream pipeline".
                 // Skip it for that endpoint regardless of reported server version.
-                if (IsWatchedEndpointDocumentDB) return false;
+                if (MongoHelper.IsDocumentDBEndpoint(_syncBack ? _targetClient : _sourceClient)) return false;
 
                 var v = MigrationJobContext.CurrentlyActiveJob?.SourceServerVersion;
                 if (string.IsNullOrEmpty(v)) return false;
@@ -214,21 +214,10 @@ namespace OnlineMongoMigrationProcessor
 
         // True when the endpoint the change-stream is opened against is Azure Cosmos DB for
         // MongoDB vCore (DocumentDB). For sync-back the watched endpoint is the target;
-        // otherwise it's the source. Detected from the active connection string because
-        // job.SourceEndpoint / job.TargetEndpoint are never populated.
-        protected bool IsWatchedEndpointDocumentDB
-        {
-            get
-            {
-                var job = MigrationJobContext.CurrentlyActiveJob;
-                if (job == null) return false;
-                string? connStr = _syncBack
-                    ? MigrationJobContext.TargetConnectionString.TryGetValue(job.Id, out var t) ? t : null
-                    : MigrationJobContext.SourceConnectionString.TryGetValue(job.Id, out var s) ? s : null;
-                return !string.IsNullOrEmpty(connStr)
-                    && connStr.Contains("mongocluster.cosmos.azure.com", StringComparison.OrdinalIgnoreCase);
-            }
-        }
+        // otherwise it's the source. Delegates to MongoHelper.IsDocumentDBEndpoint which
+        // probes via `db.runCommand({ hello: 1 })` and caches per-client.
+        protected bool IsWatchedEndpointDocumentDB =>
+            MongoHelper.IsDocumentDBEndpoint(_syncBack ? _targetClient : _sourceClient);
 
         // A split event is "final" when it's not a fragment, or when fragment == of.
         // Non-final fragments must be skipped (their resume tokens are tracked so
