@@ -141,7 +141,7 @@ else
                     <div><span class="lbl">Mode:</span> @Helper.GetChangeStreamMode(MigrationJob)</div>
                     <div><span class="lbl">Started On (UTC):</span> @GetChangeStreamStartedOnForDisplay(mu, MigrationJob)</div>
                     <div><span class="lbl">Start Resume Token:</span> @(mu.GetOriginalResumeToken(false) ?? "N/A")</div>
-                    <div><span class="lbl">Current Timestamp:</span> @mu.GetCursorUtcTimestamp(false)</div>
+                    <div><span class="lbl">Current Timestamp:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : mu.GetCursorUtcTimestamp(false).ToString())</div>
                     <div><span class="lbl">Current Resume Token:</span> @(mu.GetResumeToken(false) ?? "N/A")</div>
                     <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(mu.GetResumeDocumentKeyForDirection(false)) ? "N/A" : mu.GetInitialDocumenReplayed(false).ToString())</div>
                     <div><span class="lbl">First Change Document:</span> @(mu.GetResumeDocumentKeyForDirection(false)?.ToString() ?? "N/A")</div>
@@ -155,7 +155,7 @@ else
                     <div><span class="lbl">Failed (with retries):</span> @FormatLong(mu.CSErrors)</div>
                     <div><span class="lbl">Avg Read Latency (ms):</span> @mu.CSAvgReadLatencyInMS.ToString("F2")</div>
                     <div><span class="lbl">Avg Write Latency (ms):</span> @mu.CSAvgWriteLatencyInMS.ToString("F2")</div>
-                    <div><span class="lbl">Last Change UTC Time:</span> @(mu.GetCSLastChangeUTCTime(false)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                    <div><span class="lbl">Last Change UTC Time:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : (mu.GetCSLastChangeUTCTime(false)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A"))</div>
                     <div><span class="lbl">Last Resume Token With Change:</span> @(mu.GetCSLastResumeTokenWithChange(false) ?? "N/A")</div>
                     @if (Helper.GetChangeStreamMode(MigrationJob) == "Aggressive" && mu.AggressiveCacheDeleted)
                     {
@@ -165,7 +165,7 @@ else
                 <td class="group-cell">
                     <div><span class="lbl">Started On (UTC):</span> @(mu.GetChangeStreamStartedOn(true)?.ToString() ?? "N/A")</div>
                     <div><span class="lbl">Start Resume Token:</span> @(mu.GetOriginalResumeToken(true) ?? "N/A")</div>
-                    <div><span class="lbl">Current Timestamp:</span> @mu.GetCursorUtcTimestamp(true)</div>
+                    <div><span class="lbl">Current Timestamp:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : mu.GetCursorUtcTimestamp(true).ToString())</div>
                     <div><span class="lbl">Current Resume Token:</span> @(mu.GetResumeToken(true) ?? "N/A")</div>
                     <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(mu.GetResumeDocumentKeyForDirection(true)) ? "N/A" : mu.GetInitialDocumenReplayed(true).ToString())</div>
                     <div><span class="lbl">First Change Document:</span> @(mu.GetResumeDocumentKeyForDirection(true)?.ToString() ?? "N/A")</div>
@@ -177,7 +177,7 @@ else
                     <div><span class="lbl">Updated:</span> @FormatLong(mu.SyncBackDocsUpdated) (from @FormatLong(mu.SyncBackUpdateEvents) events)</div>
                     <div><span class="lbl">Duplicate Processed:</span> @FormatLong(mu.SyncBackDuplicateDocsSkipped) skipped</div>
                     <div><span class="lbl">Failed (with retries):</span> @FormatLong(mu.SyncBackErrors)</div>
-                    <div><span class="lbl">Last Change UTC Time:</span> @(mu.GetCSLastChangeUTCTime(true)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                    <div><span class="lbl">Last Change UTC Time:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : (mu.GetCSLastChangeUTCTime(true)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A"))</div>
                     <div><span class="lbl">Last Resume Token With Change:</span> @(mu.GetCSLastResumeTokenWithChange(true) ?? "N/A")</div>
                 </td>
                

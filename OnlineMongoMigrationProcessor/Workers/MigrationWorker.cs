@@ -600,7 +600,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
         }
 
-        private async Task<TaskResult> SetCollectionResumeToken(MigrationUnit mu, bool syncBack, CancellationToken _cts, List<Task> resumeTokenTasks)
+        private async Task<TaskResult> SetCollectionResumeToken(MigrationUnit mu, bool syncBack, CancellationToken _cts, List<Task> resumeTokenTasks, bool runSynchronously = false)
         {
 #if LEGACY_MONGODB_DRIVER
             // Change stream resume tokens not supported with legacy MongoDB driver
@@ -619,43 +619,28 @@ namespace OnlineMongoMigrationProcessor.Workers
 
             _log.WriteLine($"Asynchronous resume token setup initiated ({durationSeconds}s timeout) for {mu.DatabaseName}.{mu.CollectionName}. Reset CS {mu.ResetChangeStream}", LogType.Debug);                
             string collectionKey = $"{mu.DatabaseName}.{mu.CollectionName}";
+
             try
             {
-                _log.WriteLine($"Calling SetChangeStreamResumeTokenAsync as async for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
-                var task = Task.Run(async () =>
+                if (runSynchronously)
                 {
-                    try
-                    {
-                        MongoClient mongoClient = new MongoClient();
-                        if(syncBack)
-                        {
-                            mongoClient= MongoClientFactory.Create(_log, MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], false, string.Empty);
-                        }
-                        else
-                        {
-                            if(_sourceClient!=null)
-                            {
-                                mongoClient = _sourceClient!;
-                            }
-                            else
-                            {
-                                mongoClient= MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], false, string.Empty);
-                            }
+                    // RU copy: the change stream always starts from "now" (Cosmos RU cannot open a
+                    // change stream at a historical timestamp). Capture the resume token (open the
+                    // cursor) BEFORE partitioning/bulk copy begins, otherwise change events that
+                    // occur while the collection is being partitioned would be missed.
+                    _log.WriteLine($"Capturing resume token synchronously (before partitioning) for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                    await CaptureResumeTokenAsync(mu, syncBack, durationSeconds, _cts);
+                }
+                else
+                {
+                    _log.WriteLine($"Calling SetChangeStreamResumeTokenAsync as async for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
+                    var task = Task.Run(() => CaptureResumeTokenAsync(mu, syncBack, durationSeconds, _cts));
 
-                        }
-
-                        await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts);
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.WriteLine($"Error in SetChangeStreamResumeTokenAsync for {mu.DatabaseName}.{mu.CollectionName}. Details: {ex}", LogType.Error);
-                    }
-                });
-                    
-                // Store task in dictionary by collection key
-                _resumeTokenTasksByCollection[collectionKey] = task;
-                // Also add to list for tracking
-                resumeTokenTasks.Add(task);
+                    // Store task in dictionary by collection key
+                    _resumeTokenTasksByCollection[collectionKey] = task;
+                    // Also add to list for tracking
+                    resumeTokenTasks.Add(task);
+                }
             }
             catch (Exception ex)
             {
@@ -666,6 +651,37 @@ namespace OnlineMongoMigrationProcessor.Workers
             return TaskResult.Success;
 #endif
         }
+
+#if !LEGACY_MONGODB_DRIVER
+        private async Task CaptureResumeTokenAsync(MigrationUnit mu, bool syncBack, int durationSeconds, CancellationToken _cts)
+        {
+            try
+            {
+                MongoClient mongoClient = new MongoClient();
+                if (syncBack)
+                {
+                    mongoClient = MongoClientFactory.Create(_log, MigrationJobContext.TargetConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], false, string.Empty);
+                }
+                else
+                {
+                    if (_sourceClient != null)
+                    {
+                        mongoClient = _sourceClient!;
+                    }
+                    else
+                    {
+                        mongoClient = MongoClientFactory.Create(_log, MigrationJobContext.SourceConnectionString[MigrationJobContext.CurrentlyActiveJob.Id], false, string.Empty);
+                    }
+                }
+
+                await MongoHelper.SetChangeStreamResumeTokenAsync(_log, mongoClient, MigrationJobContext.CurrentlyActiveJob, mu, durationSeconds, syncBack, _cts);
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine($"Error in SetChangeStreamResumeTokenAsync for {mu.DatabaseName}.{mu.CollectionName}. Details: {ex}", LogType.Error);
+            }
+        }
+#endif
 
         private async Task<TaskResult> PreparePartitionsAsync(CancellationToken _cts, bool skipPartitioning)
         {
@@ -953,6 +969,16 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                     if (!context.SkipPartitioning)
                     {
+                        // RU copy change streams always start from "now" (Cosmos RU cannot open a
+                        // change stream at a historical timestamp). Capture the resume token
+                        // synchronously BEFORE partitioning so change events that occur while the
+                        // collection is being partitioned/bulk-copied are not missed.
+                        if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy
+                            && Helper.IsOnline(MigrationJobContext.CurrentlyActiveJob))
+                        {
+                            await SetCollectionResumeToken(mu, MigrationJobContext.CurrentlyActiveJob.ProcessingSyncBack, _cts, new List<Task>(), runSynchronously: true);
+                        }
+
                         _log.WriteLine($"Creating partitions for {mu.DatabaseName}.{mu.CollectionName}", LogType.Debug);
                         var partResult = await CreatePartitionsAsync(mu, _cts);
                         if (partResult != TaskResult.Success)

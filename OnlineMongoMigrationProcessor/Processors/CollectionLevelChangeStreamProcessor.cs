@@ -1563,6 +1563,13 @@ namespace OnlineMongoMigrationProcessor
                                 SetResumeParameters(mu, stampTs, tokenJson, _syncBack);
                                 _consecutiveStuckRounds[collectionKey] = 0;
                             }
+                            else if (MigrationJobContext.CurrentlyActiveJob.JobType == JobType.RUOptimizedCopy)
+                            {
+                                // PBRT stuck-cursor detection and cluster-watch unblock are
+                                // MongoDB-specific workarounds and do not apply to Cosmos RU
+                                // change streams. Skip the stuck counting/enqueue for RU jobs so
+                                // the [PBRT] stuck/unblock logs never fire for them.
+                            }
                             else
                             {
                                 int stuck = _consecutiveStuckRounds.AddOrUpdate(collectionKey, 1, (_, v) => v + 1);
