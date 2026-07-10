@@ -435,8 +435,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     var id = doc["_id"];
                     if (id.IsObjectId)
                         id = id.AsObjectId;
-                    
-                    var filter = Builders<RawBsonDocument>.Filter.Eq("_id", id);
+
+                    // Flatten a composite (embedded) _id into dotted-path equality predicates so
+                    // sharded collections with a nested shard key (e.g. { "_id.aggregatedChallengeId": "hashed" })
+                    // can target a single shard on upsert. A whole-embedded-_id equality hides the
+                    // nested shard key from mongos and fails with
+                    // "An {upsert:true} update on a sharded collection must target a single shard".
+                    var filter = MongoHelper.BuildIdEqualityFilter<RawBsonDocument>(id);
                     return new ReplaceOneModel<RawBsonDocument>(filter, doc) { IsUpsert = true };
                 }).ToList();
 

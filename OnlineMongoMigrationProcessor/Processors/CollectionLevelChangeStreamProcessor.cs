@@ -1853,7 +1853,6 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Update:
                     case ChangeStreamOperationType.Replace:
                         IncrementEventCounter(mu, change.OperationType);
-                        var filter = Builders<BsonDocument>.Filter.Eq("_id", idValue);
                         if (!IsOptimizeForLargeDocsEnabled && (change.FullDocument == null || change.FullDocument.IsBsonNull))
                         {
                             // Without OFLD we use FullDocument:UpdateLookup, so a null body means the doc was
