@@ -662,7 +662,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                         collection = database.GetCollection<BsonDocument>(collectionName);
 
                         // Initialize with safe defaults; will be overridden below
-                    
+                        
                         if (job.JobType == JobType.RUOptimizedCopy)
                         {
                             if (string.IsNullOrEmpty(mu.OriginalResumeToken))
@@ -875,19 +875,18 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     if (job.JobType == JobType.RUOptimizedCopy)
                     {
                         // Use linkedCts.Token instead of cts.Token to respect both timeout and manual cancellation
-                        if (await cursor.MoveNextAsync(linkedCts.Token))
-                        {
+                        //if (await cursor.MoveNextAsync(linkedCts.Token))
+                        //{
                             if (string.IsNullOrEmpty(mu.OriginalResumeToken))
                             {
                                 var resumeTokenJson = cursor.GetResumeToken().ToJson();
 
                                 mu.ResumeToken = resumeTokenJson;
                                 mu.OriginalResumeToken = resumeTokenJson;
-
                             }
                             return;
-                        }
-                        return;
+                        //}                       
+                        //return;
                     }
 
                     // Iterate until cancellation or first change detected

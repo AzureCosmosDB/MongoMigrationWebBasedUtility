@@ -100,7 +100,7 @@
                                             <div><span class="lbl">Original Started On (UTC):</span> @MigrationUnit.GetOriginalChangeStreamStartedOn(false)?.ToString() <span class="text-muted">(rewound after stuck cursor)</span></div>
                                         }
                                         <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.GetOriginalResumeToken(false) ?? "N/A")</div>
-                                        <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.GetCursorUtcTimestamp(false)</div>
+                                        <div><span class="lbl">Current Timestamp:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : MigrationUnit.GetCursorUtcTimestamp(false).ToString())</div>
                                         <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.GetResumeToken(false) ?? "N/A")</div>
                                         <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(MigrationUnit.GetResumeDocumentKeyForDirection(false)) ? "N/A" : MigrationUnit.GetInitialDocumenReplayed(false).ToString())</div>
                                         <div><span class="lbl">First Change Document:</span> @(MigrationUnit.GetResumeDocumentKeyForDirection(false)?.ToString() ?? "N/A")</div>
@@ -112,7 +112,7 @@
                                         <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.CSErrors)</div>
                                         <div><span class="lbl">Avg Read Latency (ms):</span> @MigrationUnit.CSAvgReadLatencyInMS.ToString("F2")</div>
                                         <div><span class="lbl">Avg Write Latency (ms):</span> @MigrationUnit.CSAvgWriteLatencyInMS.ToString("F2")</div>
-                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationUnit.GetCSLastChangeUTCTime(false)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : (MigrationUnit.GetCSLastChangeUTCTime(false)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A"))</div>
                                         <div><span class="lbl">Last Resume Token With Change:</span> @(MigrationUnit.GetCSLastResumeTokenWithChange(false) ?? "N/A")</div>
                                         @if (Helper.GetChangeStreamMode(MigrationJob) == "Aggressive" && MigrationUnit.AggressiveCacheDeleted)
                                         {
@@ -137,7 +137,7 @@
                                             <div><span class="lbl">Original Started On (UTC):</span> @MigrationUnit.GetOriginalChangeStreamStartedOn(true)?.ToString() <span class="text-muted">(rewound after stuck cursor)</span></div>
                                         }
                                         <div><span class="lbl">Start Resume Token:</span> @(MigrationUnit.GetOriginalResumeToken(true) ?? "N/A")</div>
-                                        <div><span class="lbl">Current Timestamp:</span> @MigrationUnit.GetCursorUtcTimestamp(true)</div>
+                                        <div><span class="lbl">Current Timestamp:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : MigrationUnit.GetCursorUtcTimestamp(true).ToString())</div>
                                         <div><span class="lbl">Current Resume Token:</span> @(MigrationUnit.GetResumeToken(true) ?? "N/A")</div>
                                         <div><span class="lbl">First Change Replayed:</span> @(string.IsNullOrEmpty(MigrationUnit.GetResumeDocumentKeyForDirection(true)) ? "N/A" : MigrationUnit.GetInitialDocumenReplayed(true).ToString())</div>
                                         <div><span class="lbl">First Change Document:</span> @(MigrationUnit.GetResumeDocumentKeyForDirection(true)?.ToString() ?? "N/A")</div>
@@ -147,7 +147,7 @@
                                         <div><span class="lbl">Updated:</span> @FormatLong(MigrationUnit.SyncBackDocsUpdated) (from @FormatLong(MigrationUnit.SyncBackUpdateEvents) events)</div>
                                         <div><span class="lbl">Duplicate Processed:</span> @FormatLong(MigrationUnit.SyncBackDuplicateDocsSkipped) skipped</div>
                                         <div><span class="lbl">Failed (with retries):</span> @FormatLong(MigrationUnit.SyncBackErrors)</div>
-                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationUnit.GetCSLastChangeUTCTime(true)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A")</div>
+                                        <div><span class="lbl">Last Change UTC Time:</span> @(MigrationJob?.JobType == JobType.RUOptimizedCopy ? "N/A" : (MigrationUnit.GetCSLastChangeUTCTime(true)?.ToString("yyyy-MM-dd HH:mm:ss") ?? "N/A"))</div>
                                         <div><span class="lbl">Last Resume Token With Change:</span> @(MigrationUnit.GetCSLastResumeTokenWithChange(true) ?? "N/A")</div>
                                     }
                                     else
