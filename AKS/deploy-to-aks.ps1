@@ -360,6 +360,14 @@ Write-Host "`nStep 10: Prompting for StateStore connection string..." -Foregroun
 $secureConnString = Read-Host -Prompt "The StateStore keeps track of migration job details in a DocumentDB. You may use the same database as the Target DocumentDB or a separate one. Enter the connection string for the StateStore." -AsSecureString
 $connString = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureConnString))
 
+# Step 10b: Encryption key seed (optional, entered securely so it is not shown on screen)
+Write-Host "`nStep 10b: Prompting for encryption key seed (optional)..." -ForegroundColor Yellow
+$secureSeed = Read-Host -Prompt "Enter the encryption key for the application. Press Enter to keep the default or existing." -AsSecureString
+$encryptionKeySeed = ""
+if ($secureSeed -and $secureSeed.Length -gt 0) {
+    $encryptionKeySeed = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSeed))
+}
+
 # Step 11: Deploy instances
 Write-Host "`nStep 11: Deploying $InstanceCount instance(s)..." -ForegroundColor Yellow
 $imageName = "$AcrName.azurecr.io/$($AcrRepository):$($ImageTag)"
@@ -379,6 +387,21 @@ for ($i = 1; $i -le $InstanceCount; $i++) {
     $ErrorActionPreference = 'Stop'
 
     kubectl create secret generic $connSecretName --namespace $Namespace --from-literal=connectionstring="$connString" --dry-run=client -o yaml | kubectl apply -f - | Out-Null
+
+    # Add the per-install encryption key seed to the instance secret when supplied.
+    # When omitted, the app keeps using its legacy built-in seed for backward compatibility.
+    $encryptionKeySeedEnv = ""
+    if (-not [string]::IsNullOrEmpty($encryptionKeySeed)) {
+        $seedSecretName = "$instanceName-keyseed"
+        kubectl create secret generic $seedSecretName --namespace $Namespace --from-literal=encryptionkeyseed="$encryptionKeySeed" --dry-run=client -o yaml | kubectl apply -f - | Out-Null
+        $encryptionKeySeedEnv = @"
+        - name: EncryptionKeySeed
+          valueFrom:
+            secretKeyRef:
+              name: $seedSecretName
+              key: encryptionkeyseed
+"@
+    }
 
   $serviceAnnotations = ""
   if (-not $serviceIsPublic) {
@@ -442,6 +465,7 @@ spec:
               key: connectionstring
         - name: AZURE_CLIENT_ID
           value: "$uamiClientId"
+$encryptionKeySeedEnv
         resources:
           requests:
             cpu: "2"
@@ -472,7 +496,7 @@ spec:
     $deployYaml | kubectl apply -f - | Out-Null
 }
 
-Remove-Variable connString, secureConnString -ErrorAction Ignore
+Remove-Variable connString, secureConnString, encryptionKeySeed, secureSeed -ErrorAction Ignore
 
 # Step 12: Wait for endpoints
 Write-Host "`nStep 12: Waiting for service endpoint IPs..." -ForegroundColor Yellow

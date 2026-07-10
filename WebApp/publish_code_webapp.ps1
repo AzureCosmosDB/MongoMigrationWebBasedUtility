@@ -1,5 +1,6 @@
 param (
-    [bool]$SupportMongoDump = $true
+    [bool]$SupportMongoDump = $true,
+    [string]$EncryptionKeySeed = ""
 )
 
 # Variables to be replaced
@@ -46,3 +47,10 @@ Compress-Archive -Path "$publishFolder\*" -DestinationPath $zipPath -Update
 # Deploy files to Azure Web App
 Write-Host "Deploying to Azure Web App..."
 az webapp deploy --resource-group $resourceGroupName --name $webAppName --src-path $zipPath --type zip
+
+# Configure the per-install encryption key seed when supplied.
+# When omitted, the app keeps using its legacy built-in seed for backward compatibility.
+if (-not [string]::IsNullOrEmpty($EncryptionKeySeed)) {
+    Write-Host "Setting EncryptionKeySeed application setting..."
+    az webapp config appsettings set --resource-group $resourceGroupName --name $webAppName --settings "EncryptionKeySeed=$EncryptionKeySeed" | Out-Null
+}
