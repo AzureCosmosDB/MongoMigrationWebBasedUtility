@@ -1521,7 +1521,6 @@ namespace OnlineMongoMigrationProcessor
                     case ChangeStreamOperationType.Update:
                     case ChangeStreamOperationType.Replace:
                         IncrementEventCounter(mu, change.OperationType);
-                        var filter = Builders<BsonDocument>.Filter.Eq("_id", idValue);
                         if (!IsOptimizeForLargeDocsEnabled && (change.FullDocument == null || change.FullDocument.IsBsonNull))
                         {
                             // Without OFLD we use FullDocument:UpdateLookup, so a null body means the doc was
@@ -1531,7 +1530,9 @@ namespace OnlineMongoMigrationProcessor
                             if (!isWriteSimulated)
                             {
                                 _log.WriteLine($"{_syncBackPrefix}Processing {change.OperationType} operation for {collNameSpace} with _id {idValue}. No document found on source, deleting it from target.");
-                                var deleteTTLFilter = Builders<BsonDocument>.Filter.Eq("_id", idValue);
+                                // Flatten a composite (embedded) _id so sharded collections with a nested
+                                // shard key can target a single shard on the delete.
+                                var deleteTTLFilter = MongoHelper.BuildIdEqualityFilter<BsonDocument>(idValue);
                                 try
                                 {
                                     targetCollection.DeleteOne(deleteTTLFilter);

@@ -1974,14 +1974,70 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         {
             var filters = new List<FilterDefinition<BsonDocument>>();
 
-            foreach (var element in documentKey.Elements)
+            AddEqualityFiltersFromDocument(documentKey, string.Empty, filters);
+
+            if (filters.Count == 0)
             {
-                filters.Add(Builders<BsonDocument>.Filter.Eq(element.Name, element.Value));
+                // Defensive fallback: match the document key elements as-is.
+                foreach (var element in documentKey.Elements)
+                {
+                    filters.Add(Builders<BsonDocument>.Filter.Eq(element.Name, element.Value));
+                }
             }
 
             return filters.Count == 1
                 ? filters[0]
                 : Builders<BsonDocument>.Filter.And(filters);
+        }
+
+        /// <summary>
+        /// Builds an equality filter that targets a single document by its <c>_id</c>.
+        /// When <paramref name="idValue"/> is an embedded document (a composite key), the
+        /// filter is flattened into dotted-path equality predicates (e.g. "_id.aggregatedChallengeId")
+        /// so that sharded collections whose shard key is a nested field can extract the shard key
+        /// for single-shard targeting on upsert/replace/delete.
+        /// </summary>
+        public static FilterDefinition<TDocument> BuildIdEqualityFilter<TDocument>(BsonValue idValue)
+        {
+            if (idValue != null && idValue.IsBsonDocument)
+            {
+                var nestedFilters = new List<FilterDefinition<TDocument>>();
+                AddEqualityFiltersFromDocument(idValue.AsBsonDocument, "_id", nestedFilters);
+
+                if (nestedFilters.Count > 0)
+                {
+                    return nestedFilters.Count == 1
+                        ? nestedFilters[0]
+                        : Builders<TDocument>.Filter.And(nestedFilters);
+                }
+            }
+
+            return Builders<TDocument>.Filter.Eq("_id", idValue);
+        }
+
+        // Flattens embedded documents (e.g. a composite _id) into dotted-path equality
+        // predicates. This is required for sharded collections whose shard key is a nested
+        // field such as { "_id.aggregatedChallengeId": "hashed" }: an equality match on the
+        // whole embedded _id document does not expose the nested value to mongos, so upsert /
+        // replace / delete fail with
+        // "An {upsert:true} update on a sharded collection must target a single shard".
+        // Matching every scalar leaf still uniquely identifies the document while surfacing
+        // the nested shard key.
+        private static void AddEqualityFiltersFromDocument<TDocument>(BsonDocument document, string prefix, List<FilterDefinition<TDocument>> filters)
+        {
+            foreach (var element in document.Elements)
+            {
+                var path = prefix.Length == 0 ? element.Name : $"{prefix}.{element.Name}";
+
+                if (element.Value.IsBsonDocument)
+                {
+                    AddEqualityFiltersFromDocument(element.Value.AsBsonDocument, path, filters);
+                }
+                else
+                {
+                    filters.Add(Builders<TDocument>.Filter.Eq(path, element.Value));
+                }
+            }
         }
 
 

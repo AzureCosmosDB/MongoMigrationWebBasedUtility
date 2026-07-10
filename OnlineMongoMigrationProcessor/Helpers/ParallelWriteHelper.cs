@@ -48,27 +48,14 @@ namespace OnlineMongoMigrationProcessor.Helpers
             {
                 var fieldNames = documentKey.Names.ToArray();
                 MigrationJobContext.AddVerboseLog($"{_logPrefix}Cached filter builder for {collectionNamespace} with fields: [{string.Join(", ", fieldNames)}]");
-                
-                // Create optimized filter builder based on field count
-                if (fieldNames.Length == 1)
-                {
-                    // Single field optimization (most common - non-sharded)
-                    var fieldName = fieldNames[0];
-                    return (docKey) => Builders<BsonDocument>.Filter.Eq(fieldName, docKey[fieldName]);
-                }
-                else
-                {
-                    // Multiple fields - compound filter for sharded collections
-                    return (docKey) =>
-                    {
-                        var filters = new List<FilterDefinition<BsonDocument>>(fieldNames.Length);
-                        foreach (var fieldName in fieldNames)
-                        {
-                            filters.Add(Builders<BsonDocument>.Filter.Eq(fieldName, docKey[fieldName]));
-                        }
-                        return Builders<BsonDocument>.Filter.And(filters);
-                    };
-                }
+
+                // Delegate to the shared builder, which flattens embedded documents (e.g. a
+                // composite _id) into dotted-path equality predicates. This is required for
+                // sharded collections whose shard key is a nested field such as
+                // { "_id.aggregatedChallengeId": "hashed" }: an equality match on the whole
+                // embedded _id document hides the nested shard key from mongos, so upserts fail
+                // with "An {upsert:true} update on a sharded collection must target a single shard".
+                return (docKey) => MongoHelper.BuildFilterFromDocumentKey(docKey);
             });
         }
 
