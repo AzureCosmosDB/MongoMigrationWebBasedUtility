@@ -26,6 +26,10 @@ param storageAccountName string = take('${replace(containerAppName, '-', '')}sto
 @description('StateStore connection string for the container')
 param stateStoreConnectionString string = ''
 
+@secure()
+@description('Per-install secret seed used to derive the AES key that encrypts the stored app password. Leave empty to keep the legacy built-in seed (not recommended for production).')
+param encryptionKeySeed string = ''
+
 @description('StateStore App ID for the container')
 param stateStoreAppID string = ''
 
@@ -222,12 +226,17 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
     managedEnvironmentId: containerAppEnvironment.id
     workloadProfileName: workloadProfileName
     configuration: {
-      secrets: stateStoreConnectionString != '' ? [
+      secrets: concat(stateStoreConnectionString != '' ? [
         {
           name: 'statestore-connection'
           value: stateStoreConnectionString
         }
-      ] : []
+      ] : [], encryptionKeySeed != '' ? [
+        {
+          name: 'encryption-key-seed'
+          value: encryptionKeySeed
+        }
+      ] : [])
       registries: [
         {
           server: acr.properties.loginServer
@@ -286,6 +295,11 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             {
               name: 'StateStoreConnectionStringOrPath'
               secretRef: 'statestore-connection'
+            }
+          ] : [], encryptionKeySeed != '' ? [
+            {
+              name: 'EncryptionKeySeed'
+              secretRef: 'encryption-key-seed'
             }
           ] : [], useEntraIdForStorage ? [
             {

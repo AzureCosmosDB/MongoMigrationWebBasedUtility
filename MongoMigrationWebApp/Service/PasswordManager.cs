@@ -9,9 +9,39 @@ namespace MongoMigrationWebApp.Service
     public class PasswordManager
     {
         private const string PasswordFileName = "app.password";
-        private static readonly byte[] EncryptionKey = Encoding.UTF8.GetBytes("MongoMigration2025SecureKey12345"); // 32 bytes for AES-256
+
+        // Name of the environment variable that supplies a per-install secret seed.
+        // The AES-256 key is derived from this seed (SHA-256) rather than being hardcoded.
+        private const string EncryptionKeySeedEnvVariable = "EncryptionKeySeed";
+
+        // Legacy seed retained only as a fallback so existing installs (that stored the
+        // password before a per-install seed was configured) can still be decrypted.
+        // Supply the EncryptionKeySeed environment variable to override this in production.
+        private const string LegacyEncryptionKeySeed = "MongoMigration2025SecureKey12345";
+
+        // 32-byte AES-256 key derived once at startup from the configured seed.
+        private static readonly byte[] EncryptionKey = ResolveEncryptionKey();
+
+        // Legacy 32-byte key (raw UTF-8 bytes of the legacy seed) used to decrypt passwords
+        // that were stored before a per-install seed was configured. Passwords decrypted with
+        // this key are transparently re-encrypted with EncryptionKey on first use.
+        private static readonly byte[] LegacyEncryptionKey = Encoding.UTF8.GetBytes(LegacyEncryptionKeySeed);
 
         private readonly string _passwordFilePath;
+
+        private static byte[] ResolveEncryptionKey()
+        {
+            var seed = Environment.GetEnvironmentVariable(EncryptionKeySeedEnvVariable);
+            if (string.IsNullOrWhiteSpace(seed))
+            {
+                // No seed supplied: fall back to the legacy built-in value for backward compatibility.
+                return Encoding.UTF8.GetBytes(LegacyEncryptionKeySeed);
+            }
+
+            // Derive a deterministic 32-byte key from the supplied seed so any string length works.
+            using var sha256 = SHA256.Create();
+            return sha256.ComputeHash(Encoding.UTF8.GetBytes(seed));
+        }
 
         public PasswordManager()
         {
@@ -44,10 +74,10 @@ namespace MongoMigrationWebApp.Service
                 return null;
             }
 
+            byte[] encryptedBytes;
+
             try
             {
-                byte[] encryptedBytes;
-                
                 if (StorageStreamFactory.UseBlobStorage)
                 {
                     // Read from Blob Storage
@@ -61,15 +91,50 @@ namespace MongoMigrationWebApp.Service
                     // Read from local file
                     encryptedBytes = await File.ReadAllBytesAsync(_passwordFilePath);
                 }
-                
-                var decryptedPassword = Decrypt(encryptedBytes);
-                return decryptedPassword;
             }
             catch
             {
-                // If decryption fails, return null
+                // If the stored password cannot be read, return null
                 return null;
             }
+
+            // Try the active key first.
+            try
+            {
+                return Decrypt(encryptedBytes, EncryptionKey);
+            }
+            catch
+            {
+                // Fall through to legacy-key handling below.
+            }
+
+            // Backward compatibility: if the active key differs from the legacy key, try the
+            // legacy key. If it succeeds, re-encrypt the password with the active key on first use.
+            if (!EncryptionKey.AsSpan().SequenceEqual(LegacyEncryptionKey))
+            {
+                try
+                {
+                    var decryptedPassword = Decrypt(encryptedBytes, LegacyEncryptionKey);
+                    try
+                    {
+                        // Migrate the stored password to the active key.
+                        await SetPasswordAsync(decryptedPassword);
+                    }
+                    catch
+                    {
+                        // A migration failure must not block a valid login; the next
+                        // successful call will retry the migration.
+                    }
+                    return decryptedPassword;
+                }
+                catch
+                {
+                    // If legacy decryption also fails, return null.
+                    return null;
+                }
+            }
+
+            return null;
         }
 
         public async Task<bool> IsPasswordSetAsync()
@@ -124,11 +189,11 @@ namespace MongoMigrationWebApp.Service
             }
         }
 
-        private string Decrypt(byte[] cipherText)
+        private string Decrypt(byte[] cipherText, byte[] key)
         {
             using (Aes aes = Aes.Create())
             {
-                aes.Key = EncryptionKey;
+                aes.Key = key;
 
                 // Extract IV from the beginning of the cipher text
                 byte[] iv = new byte[aes.IV.Length];
