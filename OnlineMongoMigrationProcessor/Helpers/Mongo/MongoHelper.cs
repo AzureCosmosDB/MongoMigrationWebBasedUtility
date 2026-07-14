@@ -1742,6 +1742,30 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 : new BsonDocument(); // return empty if parsing fails
         }
 
+        /// <summary>
+        /// Validates a user-supplied collection filter using the same MongoDB (relaxed/extended JSON)
+        /// parser the migration pipeline uses at runtime. Unlike strict JSON validation, this accepts
+        /// MongoDB query operators (e.g. <c>$exists</c>, <c>$gte</c>), unquoted field names, and
+        /// extended-JSON types (e.g. <c>{ "$date": ... }</c>). Returns true for null/whitespace filters.
+        /// </summary>
+        public static bool IsValidFilter(string? filter, out string? error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(filter))
+                return true;
+
+            try
+            {
+                BsonDocument.Parse(filter);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
 
         public static string GenerateQueryString(BsonValue? gte, BsonValue? lt, BsonValue? lte, DataType dataType, BsonDocument? userFilterDoc, MigrationUnit? migrationUnit = null)
         {
@@ -1837,6 +1861,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                             case "$eq":
                                 if (!doc.Contains(element.Name) || doc[element.Name] != op.Value) return false;
                                 break;
+                            case "$ne":
+                                // MongoDB $ne matches when the field is absent or holds a different value.
+                                if (doc.Contains(element.Name) && doc[element.Name] == op.Value) return false;
+                                break;
                             case "$gte":
                                 if (!doc.Contains(element.Name) || doc[element.Name].CompareTo(op.Value) < 0) return false;
                                 break;
@@ -1851,6 +1879,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                                 break;
                             case "$in":
                                 if (!doc.Contains(element.Name) || !op.Value.AsBsonArray.Contains(doc[element.Name])) return false;
+                                break;
+                            case "$exists":
+                                // MongoDB $exists true => field must be present; false => field must be absent.
+                                if (op.Value.ToBoolean() != doc.Contains(element.Name)) return false;
                                 break;
                             default:
                                 throw new NotSupportedException($"Operator {op.Name} is not supported yet.");

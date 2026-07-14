@@ -12,7 +12,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
-using System.Text.Json;
 
 namespace MongoMigrationWebApp.Components
 {
@@ -265,16 +264,14 @@ namespace MongoMigrationWebApp.Components
                 return;
             }
 
-            // Validate filter JSON if provided
+            // Validate filter if provided. Use the MongoDB parser (relaxed/extended JSON) so the
+            // validation matches what the migration pipeline actually uses at runtime — this accepts
+            // query operators like $exists/$gte, unquoted field names, and extended-JSON types.
             if (!IsRuOptimizedCopyJob && !string.IsNullOrWhiteSpace(_formFilter))
             {
-                try
+                if (!MongoHelper.IsValidFilter(_formFilter, out var filterError))
                 {
-                    JsonDocument.Parse(_formFilter);
-                }
-                catch (JsonException ex)
-                {
-                    _error = $"Invalid filter JSON: {ex.Message}";
+                    _error = $"Invalid filter: {filterError}";
                     return;
                 }
             }
@@ -436,16 +433,14 @@ namespace MongoMigrationWebApp.Components
             var draft = _drafts.FirstOrDefault(d => d.Id == draftId);
             if (draft == null) return;
 
-            // Validate filter JSON if provided
+            // Validate filter if provided. Use the MongoDB parser (relaxed/extended JSON) so the
+            // validation matches what the migration pipeline actually uses at runtime — this accepts
+            // query operators like $exists/$gte, unquoted field names, and extended-JSON types.
             if (!IsRuOptimizedCopyJob && !string.IsNullOrWhiteSpace(_formFilter))
             {
-                try
+                if (!MongoHelper.IsValidFilter(_formFilter, out var filterError))
                 {
-                    JsonDocument.Parse(_formFilter);
-                }
-                catch (JsonException ex)
-                {
-                    _error = $"Invalid filter JSON: {ex.Message}";
+                    _error = $"Invalid filter: {filterError}";
                     return;
                 }
             }
