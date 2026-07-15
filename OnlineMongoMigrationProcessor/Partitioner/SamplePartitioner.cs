@@ -742,6 +742,9 @@ namespace OnlineMongoMigrationProcessor
                     case DataType.Int64:
                         matchCondition = new BsonDocument("_id", new BsonDocument("$type", 18)); // 18 is BSON type for Int64
                         break;
+                    case DataType.Double:
+                        matchCondition = new BsonDocument("_id", new BsonDocument("$type", 1)); // 1 is BSON type for Double
+                        break;
                     case DataType.String:
                         matchCondition = new BsonDocument("_id", new BsonDocument("$type", 2)); // 2 is BSON type for String
                         break;
@@ -751,6 +754,9 @@ namespace OnlineMongoMigrationProcessor
                     case DataType.Date:
                         matchCondition = new BsonDocument("_id", new BsonDocument("$type", 9)); // 9 is BSON type for Date
                         break;
+                    case DataType.Timestamp:
+                        matchCondition = new BsonDocument("_id", new BsonDocument("$type", 17)); // 17 is BSON type for Timestamp
+                        break;
                     case DataType.BinData:
                         matchCondition = new BsonDocument("_id", new BsonDocument("$type", 5)); // 5 is BSON type for Binary
                         break;
@@ -759,7 +765,7 @@ namespace OnlineMongoMigrationProcessor
                         break;
                     case DataType.Other:
                         // Exclude all known types to catch "others"
-                        var excludedTypes = new BsonArray { 2, 7, 9, 16, 18, 19 };
+                        var excludedTypes = new BsonArray { 1, 2, 7, 9, 16, 17, 18, 19 };
                         matchCondition = new BsonDocument("_id", new BsonDocument("$nin", new BsonDocument("$type", excludedTypes)));
                         break;
                     default:
@@ -835,6 +841,12 @@ namespace OnlineMongoMigrationProcessor
                     lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonInt64(long.Parse(lteString));
                     break;
 
+                case DataType.Double:
+                    gte ??= new BsonDouble(double.Parse(gteString, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture));
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonDouble(double.Parse(ltString, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture));
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonDouble(double.Parse(lteString, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture));
+                    break;
+
                 case DataType.String:
                     gte ??= new BsonString(gteString);
                     lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonString(ltString);
@@ -857,6 +869,12 @@ namespace OnlineMongoMigrationProcessor
                     gte ??= new BsonDateTime(DateTime.Parse(gteString));
                     lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonDateTime(DateTime.Parse(ltString));
                     lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonDateTime(DateTime.Parse(lteString));
+                    break;
+
+                case DataType.Timestamp:
+                    gte ??= new BsonTimestamp(long.Parse(gteString, System.Globalization.CultureInfo.InvariantCulture));
+                    lt ??= string.IsNullOrEmpty(ltString) ? BsonNull.Value : new BsonTimestamp(long.Parse(ltString, System.Globalization.CultureInfo.InvariantCulture));
+                    lte ??= string.IsNullOrEmpty(lteString) ? BsonNull.Value : new BsonTimestamp(long.Parse(lteString, System.Globalization.CultureInfo.InvariantCulture));
                     break;
 
                 case DataType.BinData:
@@ -1094,6 +1112,8 @@ namespace OnlineMongoMigrationProcessor
             {
                 DataType.BinData => value.ToJson(),
                 DataType.Object => value.ToJson(),
+                DataType.Double => value.AsDouble.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                DataType.Timestamp => value.AsBsonTimestamp.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 _ => value.ToString()!
             };
         }
