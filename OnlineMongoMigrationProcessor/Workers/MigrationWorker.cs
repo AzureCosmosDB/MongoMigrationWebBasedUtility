@@ -2861,7 +2861,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             var dataTypes = new List<DataType>
             {
                 DataType.Int, DataType.Int64, DataType.String, DataType.Object,
-                DataType.Decimal128, DataType.Date, DataType.ObjectId, DataType.BinData
+                DataType.Decimal128, DataType.Date, DataType.ObjectId, DataType.BinData,
+                DataType.Double, DataType.Timestamp
             };
             _log.WriteLine($"Using all DataTypes for partitioning ({dataTypes.Count} types)", LogType.Debug);
             return dataTypes;
@@ -3097,6 +3098,8 @@ namespace OnlineMongoMigrationProcessor.Workers
             {
                 DataType.BinData => value.ToJson(),
                 DataType.Object => value.ToJson(),
+                DataType.Double => value.AsDouble.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                DataType.Timestamp => value.AsBsonTimestamp.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 _ => value.ToString()
             };
         }

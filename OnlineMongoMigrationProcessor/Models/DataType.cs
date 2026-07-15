@@ -10,6 +10,9 @@ namespace OnlineMongoMigrationProcessor
         BinData,
         String,
         Object,
-        Other
+        Other,
+        // Appended after Other to preserve existing integer values for already-persisted jobs.
+        Double,
+        Timestamp
     }
 }

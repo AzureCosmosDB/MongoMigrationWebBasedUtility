@@ -1637,9 +1637,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 DataType.ObjectId => filterBuilder.Lt(fieldName, value.AsObjectId),
                 DataType.Int => filterBuilder.Lt(fieldName, value.AsInt32),
                 DataType.Int64 => filterBuilder.Lt(fieldName, value.AsInt64),
+                DataType.Double => filterBuilder.Lt(fieldName, value.AsDouble),
                 DataType.String => filterBuilder.Lt(fieldName, value.AsString),
                 DataType.Decimal128 => filterBuilder.Lt(fieldName, value.AsDecimal128),
                 DataType.Date => filterBuilder.Lt(fieldName, ((BsonDateTime)value).ToUniversalTime()),
+                DataType.Timestamp => filterBuilder.Lt(fieldName, value.AsBsonTimestamp),
                 DataType.Object => filterBuilder.Lt(fieldName, value.AsBsonDocument),
                 DataType.BinData => filterBuilder.Lt(fieldName, value.AsBsonBinaryData),
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
@@ -1657,9 +1659,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 DataType.ObjectId => filterBuilder.Lte(fieldName, value.AsObjectId),
                 DataType.Int => filterBuilder.Lte(fieldName, value.AsInt32),
                 DataType.Int64 => filterBuilder.Lte(fieldName, value.AsInt64),
+                DataType.Double => filterBuilder.Lte(fieldName, value.AsDouble),
                 DataType.String => filterBuilder.Lte(fieldName, value.AsString),
                 DataType.Decimal128 => filterBuilder.Lte(fieldName, value.AsDecimal128),
                 DataType.Date => filterBuilder.Lte(fieldName, ((BsonDateTime)value).ToUniversalTime()),
+                DataType.Timestamp => filterBuilder.Lte(fieldName, value.AsBsonTimestamp),
                 DataType.Object => filterBuilder.Lte(fieldName, value.AsBsonDocument),
                 DataType.BinData => filterBuilder.Lte(fieldName, value.AsBsonBinaryData),
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
@@ -1677,9 +1681,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 DataType.ObjectId => filterBuilder.Gte(fieldName, value.AsObjectId),
                 DataType.Int => filterBuilder.Gte(fieldName, value.AsInt32),
                 DataType.Int64 => filterBuilder.Gte(fieldName, value.AsInt64),
+                DataType.Double => filterBuilder.Gte(fieldName, value.AsDouble),
                 DataType.String => filterBuilder.Gte(fieldName, value.AsString),
                 DataType.Decimal128 => filterBuilder.Gte(fieldName, value.AsDecimal128),
                 DataType.Date => filterBuilder.Gte(fieldName, ((BsonDateTime)value).ToUniversalTime()),
+                DataType.Timestamp => filterBuilder.Gte(fieldName, value.AsBsonTimestamp),
                 DataType.Object => filterBuilder.Gte(fieldName, value.AsBsonDocument),
                 DataType.BinData => filterBuilder.Gte(fieldName, value.AsBsonBinaryData),
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
@@ -1693,9 +1699,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 DataType.ObjectId => "objectId",
                 DataType.Int => "int",
                 DataType.Int64 => "long",
+                DataType.Double => "double",
                 DataType.String => "string",
                 DataType.Decimal128 => "decimal",
                 DataType.Date => "date",
+                DataType.Timestamp => "timestamp",
                 DataType.Object => "object",
                 DataType.BinData => "binData",
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
@@ -1934,9 +1942,11 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 DataType.ObjectId => $"{{\\\"$oid\\\":\\\"{value.AsObjectId}\\\"}}",
                 DataType.Int => value.AsInt32.ToString(),
                 DataType.Int64 => value.AsInt64.ToString(),
+                DataType.Double => $"{{\\\"$numberDouble\\\":\\\"{value.AsDouble.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}\\\"}}",
                 DataType.String => $"\\\"{EscapeStringForJsonQueryArg(value.AsString)}\\\"",
                 DataType.Decimal128 => $"{{\\\"$numberDecimal\\\":\\\"{value.AsDecimal128}\\\"}}",
                 DataType.Date => $"{{\\\"$date\\\":\\\"{((BsonDateTime)value).ToUniversalTime():yyyy-MM-ddTHH:mm:ssZ}\\\"}}",
+                DataType.Timestamp => $"{{\\\"$timestamp\\\":{{\\\"t\\\":{value.AsBsonTimestamp.Timestamp},\\\"i\\\":{value.AsBsonTimestamp.Increment}}}}}",
                 DataType.Object => value.AsBsonDocument.ToString(),
                 DataType.BinData => $"{{\\\"$binary\\\":{{\\\"base64\\\":\\\"{Convert.ToBase64String(value.AsBsonBinaryData.Bytes)}\\\",\\\"subType\\\":\\\"{((byte)value.AsBsonBinaryData.SubType):x2}\\\"}}}}",
                 _ => throw new ArgumentException($"Unsupported DataType: {dataType}")
@@ -2573,6 +2583,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             {
                 DataType.BinData => value.ToJson(),
                 DataType.Object => value.ToJson(),
+                DataType.Double => value.AsDouble.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                DataType.Timestamp => value.AsBsonTimestamp.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 _ => value.ToString()
             };
         }
