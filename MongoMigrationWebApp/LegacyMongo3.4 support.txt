@@ -1,0 +1,51 @@
+Local docker running 3.4
+mongodb://localhost:27017
+
+If using WebApp use this config
+
+	For 4.2 and above use this 
+	https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.10.0.zip
+	For 3.4
+	{"MongoDumpURL":"https://fastdl.mongodb.org/win32/mongodb-win32-x86_64-2008plus-ssl-3.4.24.zip","MongoRestoreURL":"https://fastdl.mongodb.org/tools/db/mongodb-database-tools-windows-x86_64-100.10.0.zip"}
+
+For ACA/AKS
+	3.4 compatible MongoDump link, update docker file
+	https://fastdl.mongodb.org/linux/mongodb-linux-arm64-ubuntu1604-3.4.24.tgz
+	https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1604-3.4.24.tgz
+
+
+
+Update OnlineMongoMigrationProcessor.csproj
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+	<AssemblyName>OnlineMongoMigrationProcessor</AssemblyName>
+  <NoWarn>CS8602;CS8603;CS8604;CS8618;CS1998;CS0219;CS0618;CS0105;CS8600;CS8625;CS8619;CS0168;CS8629;CS0472;NU1605</NoWarn>
+	<!-- Define LEGACY_MONGODB_DRIVER when using MongoDB.Driver less than 2.19 to disable online migration features (change streams).
+	     Remove this line when upgrading to a newer MongoDB.Driver version. -->
+	<DefineConstants>$(DefineConstants);LEGACY_MONGODB_DRIVER</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="MigrationWorker.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Identity" Version="1.13.2" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.23.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.0" />
+    <PackageReference Include="MongoDB.Bson" Version="2.13.3" />
+    <PackageReference Include="MongoDB.Driver" Version="2.13.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="OnlineMongoMigrationProcessor.Tests" />
+  </ItemGroup>
+
+</Project>
