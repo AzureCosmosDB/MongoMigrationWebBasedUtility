@@ -87,9 +87,31 @@
                             {
                                 <option value="Online">Online</option>
                             }
-                            <!--<option value="SyncOnly">Sync Only</option>-->
+                            @if (!MigrationJobContext.IsLegacyDriver && (jobType == JobType.DumpAndRestore || cdcMode == CDCMode.SyncOnly))
+                            {
+                                <option value="SyncOnly">Sync Only</option>
+                            }
                         </select>
+                        @if (cdcMode == CDCMode.SyncOnly)
+                        {
+                            <div class="form-text">
+                                Sync Only skips the data copy (dump &amp; restore) and starts change stream processing only.
+                                Use this when the collections have already been migrated. Available for MongoDump and MongoRestore jobs.
+                            </div>
+                        }
                     </div>
+                    @if (cdcMode == CDCMode.SyncOnly)
+                    {
+                        <div class="mb-3">
+                            <label for="sync-only-start-time" class="form-label" title="Change stream processing will start from this time (UTC).">
+                                Change Stream Start Time (UTC)
+                            </label>
+                            <input type="datetime-local" id="sync-only-start-time" class="form-control" step="1" @bind="syncOnlyStartTime" disabled="@(!NewMode)" />
+                            <div class="form-text">
+                                Enter the UTC time from which changes should be replayed. Ensure the source oplog has not rotated past this point.
+                            </div>
+                        </div>
+                    }
                     <div class="mb-3">
                         <label for="change-stream-scope" class="form-label" title="Specify the scope of change stream monitoring during online migration.">
                             Change Stream Scope
@@ -243,6 +265,7 @@
     private string sourceEndpoint = string.Empty;   // Source endpoint extracted from the connection string
     private string targetEndpoint = string.Empty;   // Target endpoint extracted from the connection string
     private string SelectedMode = "Offline"; // default or loaded value
+    private DateTime syncOnlyStartTime = DateTime.UtcNow; // Sync Only change stream start time (UTC)
     private string SelectedChangeStreamMode = "Delayed"; // Default change stream mode
     private string SelectedChangeStreamScope = "Collection"; // Default change stream type
     private ChangeStreamLevel changeStreamLevel = ChangeStreamLevel.Collection; // Default to Collection
@@ -365,7 +388,15 @@
             SelectedChangeStreamScope = "Collection"; // Set to Collection for RU optimized copy
             changeStreamMode = ChangeStreamMode.Immediate; // Force to Immediate
             changeStreamLevel = ChangeStreamLevel.Collection; // Force to Collection level
-        }       
+        }
+
+        // Sync Only is only supported for MongoDump and MongoRestore jobs. If the tool is switched
+        // away from DumpAndRestore while Sync Only is selected, fall back to Offline.
+        if (jobType != JobType.DumpAndRestore && cdcMode == CDCMode.SyncOnly)
+        {
+            cdcMode = CDCMode.Offline;
+            SelectedMode = "Offline";
+        }
     }
 
     protected override void OnInitialized()
@@ -392,6 +423,7 @@
             SelectedChangeStreamMode = "Delayed"; // Default to Delayed
             SelectedChangeStreamScope = "Collection"; // Default to Collection
             changeStreamLevel = ChangeStreamLevel.Collection; // Default to Collection
+            syncOnlyStartTime = DateTime.UtcNow; // Default Sync Only start time
         }
         else
         {
@@ -449,6 +481,8 @@
                 CDCMode.SyncOnly => "SyncOnly",
                 _ => "Offline"
             };
+
+            syncOnlyStartTime = Job?.SyncOnlyChangeStreamStartTime?.ToUniversalTime() ?? DateTime.UtcNow;
         }
     }
 
@@ -510,6 +544,18 @@
             return;
         }
 
+        // Sync Only requires a change stream start time that is not in the future.
+        DateTime? syncOnlyStartUtc = null;
+        if (cdcMode == CDCMode.SyncOnly)
+        {
+            syncOnlyStartUtc = DateTime.SpecifyKind(syncOnlyStartTime, DateTimeKind.Utc);
+            if (syncOnlyStartUtc.Value > DateTime.UtcNow)
+            {
+                errorMessage = "Change Stream Start Time (UTC) can't be in the future.";
+                return;
+            }
+        }
+
         var job = new MigrationJob
         {
             Name = name,
@@ -529,6 +575,7 @@
             ChangeStreamMode = changeStreamMode,
             ChangeStreamLevel = changeStreamLevel,
             LogLevel = logLevel,
+            SyncOnlyChangeStreamStartTime = syncOnlyStartUtc,
             MigrationUnitBasics = new List<MigrationUnitBasic>()
         };
         if (OnSubmit != null)

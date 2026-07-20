@@ -1,6 +1,6 @@
 # Migration Tool for Azure DocumentDB
 
-Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use web app. Choose your migration tool and migration mode (offline or online). The app orchestrates bulk copy and, for online jobs, change‑stream catch‑up. You don’t need to learn or use these command-line tools yourself.
+Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use web app. Choose your migration tool and migration mode (offline, online, or sync only). The app orchestrates bulk copy and, for online jobs, change‑stream catch‑up. You don’t need to learn or use these command-line tools yourself.
 
 ### Migration tool
 
@@ -12,6 +12,7 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
 
 - **Offline**: Snapshot-only copy. Job completes automatically when copy finishes.
 - **Online**: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
+- **Sync Only**: Skips the bulk data copy and processes change streams only, starting from a time you specify. Use it when the collections are already copied to the target and you just need to catch up (and keep) changes. Available for MongoDump and MongoRestore jobs.
 
 
 ## Table of Contents
@@ -214,7 +215,7 @@ The web app is protected by a single application password.
 
 1. Go to the home page. Click **New Job**.
 2. In the **New Job Details** pop-up enter the job **Name**, **Source Connection String**, and **Target Connection String**.
-3. Pick the **Migration Tool** (MongoDump and MongoRestore, MongoDB Driver, or MongoDB Driver — Cosmos DB RU read optimized) and the **Migration Mode** (Offline or Online).
+3. Pick the **Migration Tool** (MongoDump and MongoRestore, MongoDB Driver, or MongoDB Driver — Cosmos DB RU read optimized) and the **Migration Mode** (Offline, Online, or Sync Only). **Sync Only** is available for MongoDump and MongoRestore jobs.
 4. Optionally switch to the **Advanced** tab to set Log Level, Change Stream Scope, Change Stream Mode, Post Migration Sync Back, Simulation Mode, and Parallel Processing knobs.
 5. Click **OK** to create the job. The dialog tells you up front: *"You will be able to add collections once the job is created."*
 
@@ -245,7 +246,7 @@ Each collection (draft or existing) carries its own options. The badges on the l
 
 | Option | Values | Notes |
 |---|---|---|
-| **Overwrite** | `False` (append) / `True` (drop target first) | When `False` the target keeps its current collection, indexes, and shard key. Indexing, Sharding, and Move-to are locked because the target is not recreated. |
+| **Overwrite** | `False` (append) / `True` (drop target first) | When `False` the target keeps its current collection, indexes, and shard key. Indexing, Sharding, and Move-to are locked because the target is not recreated. Sync Only jobs force `False` (append) since no data is copied. |
 | **Indexing strategy** | `Copy indexes from source (non-blocking)` / `Copy indexes from source (blocking)` / `Do not create indexes` | See [Indexing: blocking vs non-blocking](#indexing-blocking-vs-non-blocking). |
 | **Sharding strategy** | `Copy sharding from source` / `Do not shard target collection` | Mutually exclusive with **Move to shard** — see [Sharding and Move-to-shard](#sharding-and-move-to-shard). |
 | **Move to shard** | `Don't move` / `Auto` / `<shard name>` | Only available when Sharding = *Do not shard* and the target cluster has more than one shard. |
@@ -288,11 +289,15 @@ The `Auto` and named-shard moves use admin `moveCollection`, which is supported 
 
 ### Migration modes
 
-Migrations can be done in two ways:
+Migrations can be done in three ways:
 
 - **Offline Migration**: A snapshot based bulk copy from source to target. New data added/updated/deleted on the source after the snapshot isn't copied to the target. The application downtime required depends on the time taken for the bulk copy activity to complete.
 
 - **Online Migration**: Apart from the bulk data copy activity done in the offline migration, a change stream monitors all additions/updates/deletes. After the bulk data copy is completed, the data in the change stream is copied to the target to ensure that all updates made during the migration process are also transferred to the target. The application downtime required is minimal.
+
+- **Sync Only Migration**: Skips the bulk data copy (dump &amp; restore) entirely and runs change-stream processing only, replaying changes from a **start time (UTC)** you provide. Use it when the collections have already been copied to the target by another means and you only need to catch up and keep replicating subsequent changes. When the job starts, the offline copy phase is automatically flagged complete for every collection, a warning is logged indicating the job is running in Sync Only mode, and change stream processing begins from the specified time. Like Online, a Sync Only job requires a manual **Cut Over** to finish. Because no data is copied, collections in a Sync Only job are always **append** (Overwrite is disabled). Available only for **MongoDump and MongoRestore** jobs.
+
+  > **Oplog retention:** Ensure the source oplog has not rotated past your chosen start time — otherwise the change stream cannot resume from that point. See [Oplog retention size](#oplog-retention-size).
 
 
 #### Oplog retention size
@@ -311,6 +316,7 @@ When creating or resuming a job, you can tailor behavior via these options. **Ap
 - Migration mode
     - Offline: Snapshot-only copy. Job completes automatically when copy finishes.
     - Online: Copies bulk data, then processes change streams to catch up. Requires manual Cut Over to finish.
+    - Sync Only: Skips the bulk data copy and processes change streams only, starting from a user-specified time (UTC). Collections are forced to append (Overwrite disabled). Requires manual Cut Over to finish. Available for MongoDump and MongoRestore jobs.
 
 - Per-collection options (set in **Manage Collections**)
     - **Overwrite**: drop the target collection before migration (`True`) or append to existing target (`False`).

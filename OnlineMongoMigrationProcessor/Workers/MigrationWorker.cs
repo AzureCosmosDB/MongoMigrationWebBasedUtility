@@ -2210,6 +2210,8 @@ namespace OnlineMongoMigrationProcessor.Workers
                 if (HandleControlPause())
                     return;
 
+                FlagOfflineCompleteForSyncOnly();
+
                 if (!await EnsureMongoToolsAvailableAsync())
                     return;
 
@@ -2343,6 +2345,56 @@ namespace OnlineMongoMigrationProcessor.Workers
                 sourceConnectionString);
 
             Helper.AddMigrationUnits(unitsToAdd, MigrationJobContext.CurrentlyActiveJob, _log);
+        }
+
+        /// <summary>
+        /// For Sync Only (<see cref="CDCMode.SyncOnly"/>) jobs the offline dump/restore phase is skipped
+        /// entirely: every migration unit is flagged as offline-complete and the change stream is anchored
+        /// to the user-provided start time so change processing begins immediately when the job runs.
+        /// Only applies to DumpAndRestore jobs.
+        /// </summary>
+        private void FlagOfflineCompleteForSyncOnly()
+        {
+            var job = MigrationJobContext.CurrentlyActiveJob;
+            if (job == null || job.CDCMode != CDCMode.SyncOnly)
+                return;
+
+            // Anchor the change stream to the user-provided start time (fallback: now). Stored/consumed as UTC.
+            var startTime = job.SyncOnlyChangeStreamStartTime.HasValue
+                ? DateTime.SpecifyKind(job.SyncOnlyChangeStreamStartTime.Value, DateTimeKind.Utc)
+                : DateTime.UtcNow;
+
+            job.SetChangeStreamStartedOn(false, startTime);
+            MigrationJobContext.SaveMigrationJob(job);
+
+            _log.WriteLine(
+                $"Job is running in Sync Only mode. The offline data copy (dump & restore) will be skipped and marked complete; change stream processing will start from {startTime:O} (UTC).",
+                LogType.Warning);
+
+            if (job.MigrationUnitBasics == null)
+                return;
+
+            foreach (var mub in job.MigrationUnitBasics)
+            {
+                MigrationJobContext.MutateMigrationUnit(mub.Id, m =>
+                {
+                    m.SourceStatus = CollectionStatus.OK;
+                    m.DumpComplete = true;
+                    m.DumpPercent = 100;
+                    m.RestoreComplete = true;
+                    m.RestorePercent = 100;
+                    m.IndexBuildComplete = true;
+                    m.IndexPercent = 100;
+
+                    if (!m.BulkCopyStartedOn.HasValue || m.BulkCopyStartedOn.Value == DateTime.MinValue)
+                        m.BulkCopyStartedOn = startTime;
+                    if (!m.BulkCopyEndedOn.HasValue || m.BulkCopyEndedOn.Value == DateTime.MinValue)
+                        m.BulkCopyEndedOn = DateTime.UtcNow;
+
+                    m.SetChangeStreamStartedOn(false, startTime);
+                    m.UpdateParentJob();
+                }, updateParent: true);
+            }
         }
 
         private async Task<bool> EnsureMongoToolsAvailableAsync()

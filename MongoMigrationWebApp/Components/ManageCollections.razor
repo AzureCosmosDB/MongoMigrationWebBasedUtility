@@ -69,9 +69,12 @@
                             {
                                 <div class="vr"></div>
                                 <span class="text-muted small">Apply to drafts:</span>
-                                <button class="btn btn-sm btn-outline-primary" @onclick="@(() => BulkSetOverwrite(true))" title="Set Overwrite = TRUE on selected drafts">
-                                    Overwrite: TRUE
-                                </button>
+                                @if (!IsSyncOnlyJob)
+                                {
+                                    <button class="btn btn-sm btn-outline-primary" @onclick="@(() => BulkSetOverwrite(true))" title="Set Overwrite = TRUE on selected drafts">
+                                        Overwrite: TRUE
+                                    </button>
+                                }
                                 <button class="btn btn-sm btn-outline-secondary" @onclick="@(() => BulkSetOverwrite(false))" title="Set Overwrite = FALSE (append) on selected drafts">
                                     Overwrite: FALSE
                                 </button>
@@ -612,10 +615,12 @@
         builder.AddMarkupContent(24, "<label class=\"form-label\">Overwrite target collection</label>");
         builder.OpenElement(25, "select");
         builder.AddAttribute(26, "class", "form-select form-select-sm");
-        builder.AddAttribute(27, "value", _formOverwrite?.ToString() ?? "False");
-        builder.AddAttribute(28, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e => _formOverwrite = bool.Parse(e.Value?.ToString() ?? "False")));
-        builder.AddMarkupContent(29, "<option value=\"False\">No — append documents to existing target</option><option value=\"True\">Yes — drop target first, then migrate</option>");
+        builder.AddAttribute(27, "value", (IsSyncOnlyJob ? false : _formOverwrite)?.ToString() ?? "False");
+        builder.AddAttribute(28, "disabled", IsSyncOnlyJob);
+        builder.AddAttribute(29, "onchange", EventCallback.Factory.Create<ChangeEventArgs>(this, e => _formOverwrite = bool.Parse(e.Value?.ToString() ?? "False")));
+        builder.AddMarkupContent(30, "<option value=\"False\">No — append documents to existing target</option><option value=\"True\">Yes — drop target first, then migrate</option>");
         builder.CloseElement();
+        if (IsSyncOnlyJob) builder.AddMarkupContent(31, "<small class=\"form-text text-muted\">Sync Only skips the data copy, so only append is available.</small>");
         builder.CloseElement();
 
         if (!IsRuOptimizedCopyJob)
