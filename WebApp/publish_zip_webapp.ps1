@@ -2,8 +2,7 @@ param (
     [string]$resourceGroupName = "<Replace with Existing Resource Group Name>",
     [string]$webAppName = "<Replace with Web App Name>",
     [string]$zipFileName = "app.zip",
-    [bool]$SupportMongoDump = $true,
-    [string]$EncryptionKeySeed = ""
+    [bool]$SupportMongoDump = $true
 )
 
 # Calculate full zip path based on parent folder
@@ -50,12 +49,5 @@ if (-not $SupportMongoDump) {
 # Deploy zip contents to Azure Web App
 Write-Host "Deploying to Azure Web App..."
 az webapp deploy --resource-group $resourceGroupName --name $webAppName --src-path $zipPath --type zip
-
-# Configure the per-install encryption key seed when supplied.
-# When omitted, the app keeps using its legacy built-in seed for backward compatibility.
-if (-not [string]::IsNullOrEmpty($EncryptionKeySeed)) {
-    Write-Host "Setting EncryptionKeySeed application setting..."
-    az webapp config appsettings set --resource-group $resourceGroupName --name $webAppName --settings "EncryptionKeySeed=$EncryptionKeySeed" | Out-Null
-}
 
 Write-Host "Deployment completed successfully!"

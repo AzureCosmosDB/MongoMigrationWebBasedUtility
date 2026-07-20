@@ -252,8 +252,6 @@ Remove-Variable connString, secureConnString
 | `InfrastructureSubnetResourceId` | string | `""` (empty) | Resource ID of the subnet for VNet integration. **Must be provided at environment creation time**. See [VNet Integration](#vnet-integration) section. |
 | `UseEntraIdForAzureStorage` | switch | `$false` | Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When enabled, no volume is mounted and the app uses `BlobServiceClient` with Managed Identity. **Required when using `StorageAccountResourceId`.** **Recommended when your organization blocks storage account key-based access**. |
 
-> **Encryption key seed:** The script securely prompts (input hidden, not shown on screen) for a per-install secret seed used to derive the AES-256 key that encrypts the stored app password. It is stored as a Container App secret and exposed to the app via the `EncryptionKeySeed` environment variable. Press Enter at the prompt to keep the legacy built-in seed (not recommended for production). Provide a strong, unique value per install so the compiled binary/source cannot be used to decrypt your stored password.
-
 ## Naming Constraints
 
 **Important**: Azure resources have specific naming requirements:
