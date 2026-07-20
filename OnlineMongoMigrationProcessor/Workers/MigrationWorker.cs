@@ -1603,7 +1603,14 @@ namespace OnlineMongoMigrationProcessor.Workers
 
                         await ValidateTargetCollectionExistsAsync(mu);
 
-                        if (mu.MigrationChunks == null || mu.MigrationChunks.Count == 0)
+                        // Sync Only mode (and any unit whose offline copy is already complete) never
+                        // runs a bulk copy, so there is nothing to partition. Skip target prep and
+                        // partitioning — which would otherwise probe the source for the _id data
+                        // type(s) — and let the change-stream fast-path in MigrateUnitEndToEndAsync
+                        // take over.
+                        bool offlineAlreadyComplete = mu.DumpComplete && mu.RestoreComplete;
+
+                        if (!offlineAlreadyComplete && (mu.MigrationChunks == null || mu.MigrationChunks.Count == 0))
                         {
                             // Keep behavior aligned with the previous prep path.
                             var prepContext = new PartitionPrepContext
