@@ -2738,14 +2738,29 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"GetCollectionInfoAsync: db={databaseName}, coll={collectionName}");
 
-            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName, cancellationToken);
-            long documentCount = stats.DocumentCount;
-            long totalCollectionSizeBytes = stats.CollectionSizeBytes;
-
-            _log.WriteLine($"{databaseName}.{collectionName} - docCount: {documentCount}, size: {totalCollectionSizeBytes} bytes", LogType.Debug);
-            
             var database = _sourceClient!.GetDatabase(databaseName);
             var collection = database.GetCollection<BsonDocument>(collectionName);
+
+            long documentCount;
+            long totalCollectionSizeBytes;
+            try
+            {
+                var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName, cancellationToken);
+                documentCount = stats.DocumentCount;
+                totalCollectionSizeBytes = stats.CollectionSizeBytes;
+            }
+            catch (Exception ex)
+            {
+                // collStats can fail on some sources (e.g. DocumentDB connection resets). Rather than aborting the whole
+                // collection, fall back to a metadata-only EstimatedDocumentCount so partitioning still proceeds. Size is
+                // unknown in this path and is only used for logging, so leave it at 0.
+                _log.WriteLine($"collStats failed for {databaseName}.{collectionName}; falling back to EstimatedDocumentCount. Details: {ex.Message}", LogType.Warning);
+                documentCount = await collection.EstimatedDocumentCountAsync(
+                    new EstimatedDocumentCountOptions { MaxTime = TimeSpan.FromSeconds(300) }, cancellationToken);
+                totalCollectionSizeBytes = 0;
+            }
+
+            _log.WriteLine($"{databaseName}.{collectionName} - docCount: {documentCount}, size: {totalCollectionSizeBytes} bytes", LogType.Debug);
 
             return (documentCount, totalCollectionSizeBytes, collection);
         }

@@ -155,8 +155,23 @@ namespace OnlineMongoMigrationProcessor
                     log.WriteLine($"Exception occurred while counting documents in {collection.CollectionNamespace}. Details: {ex}", LogType.Warning);//don't show call stack
                     if (userFilter == null || userFilter.ElementCount == 0)
                     {
-                        log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace} due to error in counting documents.");
-                        docCountByType = GetDocumentCountByDataType(collection, dataType, true, userFilter, skipDataTypeFilter);
+                        // A filtered count is a full scan that can reset the connection on some sources.
+                        // Fall back to an estimated count so partitioning still proceeds with multiple chunks instead of
+                        // collapsing to a single partition. Prefer the collection-level count already computed during setup
+                        // (collStats/estimatedDocumentCount) to avoid another server round-trip; otherwise get a metadata-only
+                        // estimate (skipDataTypeFilter forces the scan-free estimate path). Over-estimating the per-type count
+                        // is harmless because the value only decides how many chunks to create.
+                        long seededCount = migrationUnit.EstimatedDocCount > 0 ? migrationUnit.EstimatedDocCount : migrationUnit.ActualDocCount;
+                        if (seededCount > 0)
+                        {
+                            docCountByType = seededCount;
+                            log.WriteLine($"Using previously computed collection document count ({docCountByType}) for {collection.CollectionNamespace} due to error in counting documents.");
+                        }
+                        else
+                        {
+                            log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace} due to error in counting documents.");
+                            docCountByType = GetDocumentCountByDataType(collection, dataType, true, null, true);
+                        }
                         MigrationJobContext.AddVerboseLog($"SamplePartitioner.GetDocumentCountByDataType in Ex: collection={collection.CollectionNamespace}, docCountByType={docCountByType}, dataType={dataType}, optimizeForObjectId={optimizeForObjectId}, userFilter={userFilter}");
                     }
                     else
