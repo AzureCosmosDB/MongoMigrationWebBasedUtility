@@ -29,6 +29,13 @@ namespace OnlineMongoMigrationProcessor
        
         public CDCMode CDCMode { get; set; } = CDCMode.Offline;
 
+        /// <summary>
+        /// User-specified change stream start time (UTC) for Sync Only (<see cref="CDCMode.SyncOnly"/>) jobs.
+        /// When the job runs, the offline dump/restore phase is skipped (every unit is flagged complete)
+        /// and change stream processing begins from this time. Only applies to DumpAndRestore jobs.
+        /// </summary>
+        public DateTime? SyncOnlyChangeStreamStartTime { get; set; }
+
         public bool IsSimulatedRun { get; set; }
         public bool SyncBackEnabled { get; set; }
         public bool ProcessingSyncBack { get; set; }

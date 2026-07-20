@@ -19,6 +19,10 @@ namespace MongoMigrationWebApp.Components
     {
         private bool IsRuOptimizedCopyJob => MigrationJob?.JobType == JobType.RUOptimizedCopy;
 
+        // Sync Only jobs skip the data copy entirely, so dropping/overwriting the target is not
+        // meaningful — only append is allowed. Overwrite is forced FALSE across Add/Edit and Bulk.
+        private bool IsSyncOnlyJob => MigrationJob?.CDCMode == CDCMode.SyncOnly;
+
         // Curated list of _id BSON types the user can pin (excludes the catch-all DataType.Other).
         // Null/empty selection in the UI represents "Unknown / Multiple" and leaves DataTypeForId unset.
         private static readonly DataType[] IdDataTypeOptions = new[]
@@ -340,13 +344,16 @@ namespace MongoMigrationWebApp.Components
                 return false;
             }
 
+            // Sync Only skips the data copy — never overwrite/drop the target, only append.
+            var formOverwrite = IsSyncOnlyJob ? false : _formOverwrite;
+
             var normalized = DraftOptionRules.Normalize(
-                _formOverwrite, _formIndexing, _formSharding, _formMoveToShard,
+                formOverwrite, _formIndexing, _formSharding, _formMoveToShard,
                 MigrationJob.IsSimulatedRun);
 
             if (IsRuOptimizedCopyJob)
             {
-                normalized = new DraftOptionRules.Normalized(_formOverwrite, IndexingStrategy.DontIndex, null, null);
+                normalized = new DraftOptionRules.Normalized(formOverwrite, IndexingStrategy.DontIndex, null, null);
                 filter = null;
             }
 
@@ -449,12 +456,14 @@ namespace MongoMigrationWebApp.Components
 
             // Update draft with new values (create new record since it's immutable).
             // Run through the central rules helper so disabled-form fields don't leak stale values.
+            // Sync Only skips the data copy — never overwrite/drop the target, only append.
+            var formOverwrite = IsSyncOnlyJob ? false : _formOverwrite;
             var normalized = DraftOptionRules.Normalize(
-                _formOverwrite, _formIndexing, _formSharding, _formMoveToShard,
+                formOverwrite, _formIndexing, _formSharding, _formMoveToShard,
                 MigrationJob.IsSimulatedRun);
             if (IsRuOptimizedCopyJob)
             {
-                normalized = new DraftOptionRules.Normalized(_formOverwrite, IndexingStrategy.DontIndex, null, null);
+                normalized = new DraftOptionRules.Normalized(formOverwrite, IndexingStrategy.DontIndex, null, null);
             }
             var index = _drafts.IndexOf(draft);
             _drafts[index] = draft with
@@ -574,8 +583,9 @@ namespace MongoMigrationWebApp.Components
                 var draft = _drafts.FirstOrDefault(d => d.Id == id);
                 if (draft == null) continue;
 
+                // Sync Only skips the data copy — never overwrite/drop the target, only append.
                 var normalized = DraftOptionRules.Normalize(
-                    value, draft.IndexingStrategy, draft.ShardingStrategy, draft.MoveToShard,
+                    IsSyncOnlyJob ? false : value, draft.IndexingStrategy, draft.ShardingStrategy, draft.MoveToShard,
                     MigrationJob.IsSimulatedRun);
                 var index = _drafts.IndexOf(draft);
                 _drafts[index] = draft with

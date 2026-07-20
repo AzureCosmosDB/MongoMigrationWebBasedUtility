@@ -311,6 +311,19 @@ namespace OnlineMongoMigrationProcessor
                     Directory.CreateDirectory(dumpRoot);
                     Directory.CreateDirectory(restoreRoot);
 
+                    // Skip re-download when the tools are already present from a previous job.
+                    var existingDumpBin = Directory.GetFiles(dumpRoot, "mongodump.exe", SearchOption.AllDirectories).FirstOrDefault();
+                    var existingRestoreBin = Directory.GetFiles(restoreRoot, "mongorestore.exe", SearchOption.AllDirectories).FirstOrDefault();
+
+                    if (!string.IsNullOrEmpty(existingDumpBin) && !string.IsNullOrEmpty(existingRestoreBin))
+                    {
+                        config.MongoDumpToolPath = existingDumpBin;
+                        config.MongoRestoreToolPath = existingRestoreBin;
+                        _ = config.Save(out _);
+                        log.WriteLine("Environment is ready to use.");
+                        return toolsRoot;
+                    }
+
                     string dumpZipPath = Path.Combine(toolsDestinationFolder, "mongo-tools-dump.zip");
                     string restoreZipPath = Path.Combine(toolsDestinationFolder, "mongo-tools-restore.zip");
 

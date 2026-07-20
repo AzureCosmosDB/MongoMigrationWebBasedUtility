@@ -26,7 +26,6 @@ namespace OnlineMongoMigrationProcessor
     {
         // Server-level processors use MigrationJob properties directly for global resume tokens
         protected override bool UseResumeTokenCache => false;
-        protected OrderedUniqueList<string> _uniqueCollectionKeys;
         private readonly ConcurrentDictionary<string, BsonDocument> _userFilterCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, IMongoCollection<BsonDocument>> _targetCollectionCache = new(StringComparer.OrdinalIgnoreCase);
         private bool _namespaceFilterApplied = false;
@@ -101,12 +100,10 @@ namespace OnlineMongoMigrationProcessor
         }
 
 
-        private bool _monitorAllCollections = false;
         public ServerLevelChangeStreamProcessor(Log log, MongoClient sourceClient, MongoClient targetClient, ActiveMigrationUnitsCache muCache, MigrationSettings config, bool syncBack = false, MigrationWorker? migrationWorker = null)
             : base(log, sourceClient, targetClient, muCache, config, syncBack, migrationWorker)
         {
             MigrationJobContext.AddVerboseLog($"ServerLevelChangeStreamProcessor: Constructor called, syncBack={syncBack}");
-            _uniqueCollectionKeys = new OrderedUniqueList<string>();
         }
 
         protected override async Task ProcessChangeStreamsAsync(CancellationToken token)
@@ -121,7 +118,7 @@ namespace OnlineMongoMigrationProcessor
 
             }
 
-            ConfigureMonitoringMode();
+            _log.WriteLine($"{_syncBackPrefix}Starting server-level change stream processing for {_migrationUnitsToProcess.Count} collection(s).");
 
             long loop = 0;
             while (!token.IsCancellationRequested && !ExecutionCancelled && !MigrationJobContext.ControlledPauseRequested)
@@ -153,19 +150,6 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private void ConfigureMonitoringMode()
-        {
-            bool found = _migrationUnitsToProcess.TryGetValue("DUMMY.DUMMY", out var dummyMu);
-            if (_migrationUnitsToProcess.Count == 1 && MigrationJobContext.CurrentlyActiveJob.ChangeStreamLevel == ChangeStreamLevel.Server && found && dummyMu != null)
-            {
-                _monitorAllCollections = true;
-                _log.WriteLine($"{_syncBackPrefix}Special mode: Starting server-level change stream processing for all collections.", LogType.Warning);
-                return;
-            }
-
-            _log.WriteLine($"{_syncBackPrefix}Starting server-level change stream processing for {_migrationUnitsToProcess.Count} collection(s).");
-        }
-
         private async Task ProcessServerLevelRoundAsync(long loop)
         {
             int seconds = GetBatchDurationInSeconds(1.0f); // Use full duration for server-level
@@ -180,7 +164,7 @@ namespace OnlineMongoMigrationProcessor
             string curTokenHash = ShortHash(resumeToken);
             string curTokenTs = TryDecodeResumeTokenTimestamp(resumeToken);
             _log.WriteLine(
-                $"{_syncBackPrefix}[PBRT] round={loop} resumeToken[hash={curTokenHash} ts={curTokenTs}] originalToken[hash={origTokenHash}] tokenEqualsOriginal={(curTokenHash == origTokenHash)} muCount={_migrationUnitsToProcess.Count} monitorAll={_monitorAllCollections} useClientSideFilter={job.UseClientSideCSFilter} initialReplayed={GetInitialDocumentReplayedStatus()}",
+                $"{_syncBackPrefix}[PBRT] round={loop} resumeToken[hash={curTokenHash} ts={curTokenTs}] originalToken[hash={origTokenHash}] tokenEqualsOriginal={(curTokenHash == origTokenHash)} muCount={_migrationUnitsToProcess.Count} useClientSideFilter={job.UseClientSideCSFilter} initialReplayed={GetInitialDocumentReplayedStatus()}",
                 LogType.Debug);
 
             if (!string.IsNullOrEmpty(resumeToken))
@@ -739,7 +723,7 @@ namespace OnlineMongoMigrationProcessor
             {
                 bool isQueued = TryResolveQueuedMigrationUnit(state.CollectionKey, out _);
                 _log.WriteLine(
-                    $"{_syncBackPrefix}[PBRT] First event this round ns={state.CollectionKey} op={change.OperationType} isQueuedMu={isQueued} monitorAll={_monitorAllCollections} nsFilterApplied={_namespaceFilterApplied} eventTs={state.LatestTimestamp:o}",
+                    $"{_syncBackPrefix}[PBRT] First event this round ns={state.CollectionKey} op={change.OperationType} isQueuedMu={isQueued} nsFilterApplied={_namespaceFilterApplied} eventTs={state.LatestTimestamp:o}",
                     LogType.Debug);
             }
 
@@ -775,7 +759,7 @@ namespace OnlineMongoMigrationProcessor
                 _accumulatedChangesPerCollection[latencyKey].CSTotalReadDurationInMS += (long)Math.Round(readDurationShareMs);
             }
 
-            if (!(_monitorAllCollections || _namespaceFilterApplied || TryResolveQueuedMigrationUnit(state.CollectionKey, out _)))
+            if (!(_namespaceFilterApplied || TryResolveQueuedMigrationUnit(state.CollectionKey, out _)))
             {
                 // [PBRT] Event arrived but is being dropped — ns not in queued MUs and no server-side filter. Sample-log first few per round.
                 if (state.CursorEventsRead <= 5)
@@ -841,12 +825,6 @@ namespace OnlineMongoMigrationProcessor
 
         private bool BuildServerLevelNamespaceFilterPipeline(List<BsonDocument> pipeline)
         {
-            // In monitor-all mode, keep full stream visibility.
-            if (_monitorAllCollections)
-            {
-                return false;
-            }
-
             // If a previous cursor creation timed out with server-side filtering,
             // or PBRT was stuck for PbrtStuckRoundsThreshold consecutive rounds,
             // skip the pipeline and use client-side filtering for subsequent rounds.
@@ -1051,43 +1029,34 @@ namespace OnlineMongoMigrationProcessor
 
                 MigrationUnit migrationUnit=null;
 
-                //if monitoring all collections, use a dummy key to report all changes, no filtering of collections and data
-                if (_monitorAllCollections)
+                if (_namespaceFilterApplied)
                 {
-                    //add to _allCollectionsAsMigrationUnit dynamically
-                    _uniqueCollectionKeys.Add(collectionKey);
-                }
-                else
-                {
-                    if (_namespaceFilterApplied)
+                    if (!TryGetMigrationUnitFromSourceNamespace(databaseName, collectionName, out migrationUnit) || migrationUnit == null)
                     {
-                        if (!TryGetMigrationUnitFromSourceNamespace(databaseName, collectionName, out migrationUnit) || migrationUnit == null)
+                        // Defensive fallback: if filtered stream still yields an unexpected namespace.
+                        if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
                         {
-                            // Defensive fallback: if filtered stream still yields an unexpected namespace.
-                            if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
-                            {
-                                return (true, counter);
-                            }
+                            return (true, counter);
                         }
                     }
-                    else if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
-                    {
-                        return (true, counter); // Skip changes for collections not in our job
-                    }
+                }
+                else if (!TryResolveQueuedMigrationUnit(collectionKey, out migrationUnit) || migrationUnit == null)
+                {
+                    return (true, counter); // Skip changes for collections not in our job
+                }
 
-                    // Check user filter condition               
-                    var userFilterDoc = GetCachedUserFilterDoc(migrationUnit);
+                // Check user filter condition               
+                var userFilterDoc = GetCachedUserFilterDoc(migrationUnit);
 
-                    if (change.OperationType != ChangeStreamOperationType.Delete)
-                    {
-                        // Under OFLD, fullDocument is stripped by the $unset pipeline stage and will be hydrated
-                        // before bulk-write. Skip the filter check here when the body is absent; if a user filter
-                        // is configured, it will need to be re-applied post-hydration.
-                        if (userFilterDoc.Elements.Count() > 0
-                            && change.FullDocument != null && !change.FullDocument.IsBsonNull
-                            && !MongoHelper.CheckForUserFilterMatch(change.FullDocument, userFilterDoc))
-                            return (true, counter); // Skip if doesn't match user filter
-                    }
+                if (change.OperationType != ChangeStreamOperationType.Delete)
+                {
+                    // Under OFLD, fullDocument is stripped by the $unset pipeline stage and will be hydrated
+                    // before bulk-write. Skip the filter check here when the body is absent; if a user filter
+                    // is configured, it will need to be re-applied post-hydration.
+                    if (userFilterDoc.Elements.Count() > 0
+                        && change.FullDocument != null && !change.FullDocument.IsBsonNull
+                        && !MongoHelper.CheckForUserFilterMatch(change.FullDocument, userFilterDoc))
+                        return (true, counter); // Skip if doesn't match user filter
                 }
                 counter++;
 
@@ -1098,14 +1067,6 @@ namespace OnlineMongoMigrationProcessor
 
                 // Get target collection
                 IMongoCollection<BsonDocument> targetCollection = GetCachedTargetCollection(databaseName, collectionName);
-
-                
-                if (_monitorAllCollections)
-                {
-                    migrationUnit = MigrationJobContext.GetMigrationUnit(Helper.GenerateMigrationUnitId("DUMMY", "DUMMY"));
-                    migrationUnit.ParentJob = MigrationJobContext.CurrentlyActiveJob;
-                    
-                }
 
                 var keyForUI= $"{migrationUnit.DatabaseName}.{migrationUnit.CollectionName}";
                 InitializeAccumulatedChangesTracker(keyForUI);
@@ -1174,13 +1135,6 @@ namespace OnlineMongoMigrationProcessor
                     continue;
 
                 var targetCollection = GetCachedTargetCollection(mu.DatabaseName, mu.CollectionName);
-
-                if (_monitorAllCollections)
-                {
-                    var muId = Helper.GenerateMigrationUnitId("DUMMY.DUMMY");
-                    mu = MigrationJobContext.GetMigrationUnit(muId);
-                    mu.ParentJob = MigrationJobContext.CurrentlyActiveJob;
-                }
 
                 entriesToProcess.Add((collectionKey, docs, mu, targetCollection));
             }
