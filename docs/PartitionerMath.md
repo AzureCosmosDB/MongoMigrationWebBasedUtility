@@ -22,13 +22,12 @@ Collections under **1,000,000** docs short-circuit to `(chunks=1, segments=1)` a
 | `MaxSegments` | `max(20, ParallelThreads)` — defaults to `max(20, Environment.ProcessorCount × 5)` if `ParallelThreads` is unset |
 | `DriverMultiplier` | `10` — MongoDriver wants 10× the sub-ranges that the matching DumpAndRestore plan would produce. **Dropped** when `useSampleCommand && hasMatchBeforeSample` because the absolute 3 K `$sample` cap means we can't get more usable boundaries than that |
 | `SampleOversampleFactor` | `10` — `$sample` requests this many samples per desired boundary; quantile selection collapses the result back to the boundary count for equally-sized partitions. Effective oversample drops below `10` when the filter cap binds |
-| `LargeCollectionThreshold` | `100,000,000` — collections strictly greater than this use the "large" tier for both `MinDocsPerChunk` and `MinDocsPerSegment` |
+| `LargeCollectionThreshold` | `100,000,000` — collections strictly greater than this use the "large" tier chunk floor (`MinDocsPerChunkLarge`); the segment floor is derived from the chunk floor |
 | `MinDocsPerChunk` | `100,000` — small/medium tier (`docCount ≤ 100 M`). Every chunk that runs as a single unit of work (DumpAndRestore always, or MongoDriver when segments collapse to 1) must hold at least this many documents |
 | `MinDocsPerChunkLarge` | `1,000,000` — large tier (`docCount > 100 M`). Coarser chunks keep chunk metadata manageable on multi-billion-doc collections |
-| `GetMinDocsPerChunk(docCount)` | `docCount > LargeCollectionThreshold ? MinDocsPerChunkLarge : MinDocsPerChunk` |
-| `MinDocsPerSegment` | `10,000` — small/medium tier (`docCount ≤ 100 M`). Every driver segment must process at least this many documents; segments per chunk drop below `MaxSegments` if the chunk would split into smaller slices |
-| `MinDocsPerSegmentLarge` | `100,000` — large tier (`docCount > 100 M`). Coarser segments keep per-segment work meaningful on multi-billion-doc collections |
-| `GetMinDocsPerSegment(docCount)` | `docCount > LargeCollectionThreshold ? MinDocsPerSegmentLarge : MinDocsPerSegment` |
+| `PartitionFactor` | `MigrationSettings` value (percentage, clamped to `25`-`100`, default `100`). `GetMinDocsPerChunk` multiplies the tiered floor by `PartitionFactor / 100`, so `100` keeps the full floor and `25` shrinks chunks to a quarter (producing roughly 4× more of them). The derived segment floor scales with it |
+| `GetMinDocsPerChunk(docCount)` | `max(1, (docCount > LargeCollectionThreshold ? MinDocsPerChunkLarge : MinDocsPerChunk) × (PartitionFactor / 100))` |
+| `GetMinDocsPerSegment(docCount)` | `max(1, GetMinDocsPerChunk(docCount) × 0.1)` — segments stay one order of magnitude finer than chunks and honor `PartitionFactor` through the chunk floor |
 | Job-type bucket | `DumpAndRestore` vs `MongoDriver`. **`RUOptimizedCopy` is out of scope** for this document — see note above |
 
 ## General formulas
@@ -71,7 +70,8 @@ These analytical partitioners do **not** use MongoDB `$sample`; boundaries come 
 Assumptions for all tables:
 
 - `ParallelThreads = 40` → `MaxSegments = max(20, 40) = 40`.
-- Tier breakpoint: `100 M` docs and below use `MinDocsPerChunk = 100 K`, `MinDocsPerSegment = 10 K`. Above `100 M` uses `MinDocsPerChunkLarge = 1 M`, `MinDocsPerSegmentLarge = 100 K`.
+- Tier breakpoint: `100 M` docs and below use `MinDocsPerChunk = 100 K` (segment floor `10 K`). Above `100 M` uses `MinDocsPerChunkLarge = 1 M` (segment floor `100 K`). The segment floor is always `0.1 × GetMinDocsPerChunk`.
+- `PartitionFactor = 100` (default) for every table below. Lowering it toward `25` scales each `GetMinDocsPerChunk`/`GetMinDocsPerSegment` value by `PartitionFactor / 100` (e.g. `25` → `0.25`, roughly quadrupling the resulting chunk and segment counts).
 - For `MongoDriver`, the **effective** per-chunk floor is `max(MinDocsPerChunk, MaxSegments × MinDocsPerSegment)`: `400 K` for `≤ 100 M` docs (`40 × 10 K`), `4 M` for `> 100 M` docs (`40 × 100 K`).
 
 ### `UseSampleCommand`, **no `$match` before `$sample`** (single `_id` type and no `UserFilter`)
@@ -140,9 +140,9 @@ Doc-count-driven seed `dumpSubRanges = max(1, docCount / GetMinDocsPerChunk(docC
 The 100 M-doc breakpoint reflects two practical limits:
 
 - **`MinDocsPerChunk` tier (100 K → 1 M)**: At 100 K docs/chunk, a 1 B-doc collection produces 10,000 chunks of work-item metadata, and a 2 B-doc collection produces 20,000. Coarsening chunks to 1 M docs each on large collections keeps the chunk catalogue an order of magnitude smaller without losing meaningful parallelism (chunks remain ≥ `MaxSegments × something useful`).
-- **`MinDocsPerSegment` tier (10 K → 100 K)**: At 10 K docs/segment, a single segment on a multi-billion-doc collection processes too little work to amortize the per-segment overhead (cursor creation, bulk-write batching, retry/checkpoint bookkeeping). Coarsening to 100 K docs/segment keeps segments meaningful while still giving the driver path 40-way parallelism per chunk.
+- **Segment floor tier (10 K → 100 K)**: At 10 K docs/segment, a single segment on a multi-billion-doc collection processes too little work to amortize the per-segment overhead (cursor creation, bulk-write batching, retry/checkpoint bookkeeping). Coarsening to 100 K docs/segment keeps segments meaningful while still giving the driver path 40-way parallelism per chunk. The segment floor is not a standalone constant — it is `0.1 × GetMinDocsPerChunk`, so it tracks the chunk tier automatically.
 
-Both tiers switch at the same `LargeCollectionThreshold = 100,000,000` so they move in lockstep — a single helper per metric (`GetMinDocsPerChunk`, `GetMinDocsPerSegment`) is the only place the policy lives.
+The segment floor is derived directly from the chunk floor (`GetMinDocsPerSegment = 0.1 × GetMinDocsPerChunk`), so both move in lockstep at the same `LargeCollectionThreshold = 100,000,000` breakpoint, and `PartitionFactor` scales them together. `GetMinDocsPerChunk` is the single source of truth for the policy.
 
 ## Segment-saturation policy (MongoDriver)
 

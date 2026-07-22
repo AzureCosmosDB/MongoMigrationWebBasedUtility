@@ -527,6 +527,10 @@ These settings are persisted per app instance and affect all jobs:
 - Split large partitions automatically
     - When enabled, oversized chunks discovered during dump query planning are split further before processing. Helps even out worker load when a single chunk would otherwise dominate runtime.
 
+- Partition factor (%)
+    - Range: 25–100. Default: 100. Scales the minimum documents-per-chunk floor by this percentage. At 100 the tool uses its default chunk sizing; lowering the value produces smaller chunks (and more of them) — for example 25 quarters the floor, yielding roughly 4× as many chunks. Use a lower value to increase parallelism and even out worker load on collections that produce a few very large chunks; keep it at 100 for the standard sizing.
+    - Also helps when you hit **timeouts during per-chunk document counting**: smaller chunks span a narrower key range, so the count query does less work and is less likely to hit the same timeout.
+
 - Optimize for large docs
     - Tunes the change-stream pipeline for collections with large documents (lower batch fan-out, smaller in-flight windows) to avoid pressure on driver buffers and worker memory.
 

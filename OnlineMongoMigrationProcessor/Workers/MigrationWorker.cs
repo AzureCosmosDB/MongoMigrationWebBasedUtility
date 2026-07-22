@@ -2798,7 +2798,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             else
             {
-                dumpSubRanges = Math.Max(1L, documentCount / SamplePartitioner.GetMinDocsPerChunk(documentCount));
+                dumpSubRanges = Math.Max(1L, documentCount / SamplePartitioner.GetMinDocsPerChunk(documentCount, _config!.PartitionFactor));
             }
 
             // Step 2: derive driver/dump sub-ranges per job type.
@@ -2837,7 +2837,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
 
             // Universal chunk floor: docs/chunk >= MinDocsPerChunk (tiered).
-            long perChunkFloor = SamplePartitioner.GetMinDocsPerChunk(documentCount);
+            long perChunkFloor = SamplePartitioner.GetMinDocsPerChunk(documentCount, _config!.PartitionFactor);
 
             // MongoDriver: never drop segment count below MaxSegments just because chunks
             // are too small to hold MaxSegments segments. Instead, raise the per-chunk
@@ -2848,7 +2848,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (isMongoDriver)
             {
                 long perChunkFloorForFullSegments =
-                    (long)SamplePartitioner.GetMaxSegments() * SamplePartitioner.GetMinDocsPerSegment(documentCount);
+                    (long)SamplePartitioner.GetMaxSegments() * SamplePartitioner.GetMinDocsPerSegment(documentCount, _config!.PartitionFactor);
                 perChunkFloor = Math.Max(perChunkFloor, perChunkFloorForFullSegments);
             }
 
