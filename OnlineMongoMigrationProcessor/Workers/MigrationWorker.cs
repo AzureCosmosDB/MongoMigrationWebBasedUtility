@@ -2738,14 +2738,29 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"GetCollectionInfoAsync: db={databaseName}, coll={collectionName}");
 
-            var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName, cancellationToken);
-            long documentCount = stats.DocumentCount;
-            long totalCollectionSizeBytes = stats.CollectionSizeBytes;
-
-            _log.WriteLine($"{databaseName}.{collectionName} - docCount: {documentCount}, size: {totalCollectionSizeBytes} bytes", LogType.Debug);
-            
             var database = _sourceClient!.GetDatabase(databaseName);
             var collection = database.GetCollection<BsonDocument>(collectionName);
+
+            long documentCount;
+            long totalCollectionSizeBytes;
+            try
+            {
+                var stats = await MongoHelper.GetCollectionStatsAsync(_sourceClient!, databaseName, collectionName, cancellationToken);
+                documentCount = stats.DocumentCount;
+                totalCollectionSizeBytes = stats.CollectionSizeBytes;
+            }
+            catch (Exception ex)
+            {
+                // collStats can fail on some sources (e.g. DocumentDB connection resets). Rather than aborting the whole
+                // collection, fall back to a metadata-only EstimatedDocumentCount so partitioning still proceeds. Size is
+                // unknown in this path and is only used for logging, so leave it at 0.
+                _log.WriteLine($"collStats failed for {databaseName}.{collectionName}; falling back to EstimatedDocumentCount. Details: {ex.Message}", LogType.Warning);
+                documentCount = await collection.EstimatedDocumentCountAsync(
+                    new EstimatedDocumentCountOptions { MaxTime = TimeSpan.FromSeconds(300) }, cancellationToken);
+                totalCollectionSizeBytes = 0;
+            }
+
+            _log.WriteLine($"{databaseName}.{collectionName} - docCount: {documentCount}, size: {totalCollectionSizeBytes} bytes", LogType.Debug);
 
             return (documentCount, totalCollectionSizeBytes, collection);
         }
@@ -2783,7 +2798,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
             else
             {
-                dumpSubRanges = Math.Max(1L, documentCount / SamplePartitioner.GetMinDocsPerChunk(documentCount));
+                dumpSubRanges = Math.Max(1L, documentCount / SamplePartitioner.GetMinDocsPerChunk(documentCount, _config!.PartitionFactor));
             }
 
             // Step 2: derive driver/dump sub-ranges per job type.
@@ -2822,7 +2837,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             }
 
             // Universal chunk floor: docs/chunk >= MinDocsPerChunk (tiered).
-            long perChunkFloor = SamplePartitioner.GetMinDocsPerChunk(documentCount);
+            long perChunkFloor = SamplePartitioner.GetMinDocsPerChunk(documentCount, _config!.PartitionFactor);
 
             // MongoDriver: never drop segment count below MaxSegments just because chunks
             // are too small to hold MaxSegments segments. Instead, raise the per-chunk
@@ -2833,7 +2848,7 @@ namespace OnlineMongoMigrationProcessor.Workers
             if (isMongoDriver)
             {
                 long perChunkFloorForFullSegments =
-                    (long)SamplePartitioner.GetMaxSegments() * SamplePartitioner.GetMinDocsPerSegment(documentCount);
+                    (long)SamplePartitioner.GetMaxSegments() * SamplePartitioner.GetMinDocsPerSegment(documentCount, _config!.PartitionFactor);
                 perChunkFloor = Math.Max(perChunkFloor, perChunkFloorForFullSegments);
             }
 

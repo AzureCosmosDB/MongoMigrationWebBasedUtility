@@ -139,8 +139,6 @@ The script will:
 | `Namespace` | string | `mongomigration` | Kubernetes namespace |
 | `KubernetesVersion` | string | latest | Optional AKS version |
 
-> **Encryption key seed:** The script securely prompts (input hidden, not shown on screen) for a per-install secret seed used to derive the AES-256 key that encrypts the stored app password. It is stored as a Kubernetes secret and passed to the container via the `EncryptionKeySeed` environment variable. Press Enter at the prompt to keep the legacy built-in seed (not recommended for production).
-
 CIDR guidance:
 - Check the subnet CIDR before deployment when using BYO subnet (`InfrastructureSubnetResourceId`).
 - Pick a non-overlapping service CIDR range such as `10.250.0.0/16` or `172.31.0.0/16`.

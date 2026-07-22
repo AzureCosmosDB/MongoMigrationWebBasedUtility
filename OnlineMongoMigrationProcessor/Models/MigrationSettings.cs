@@ -29,6 +29,12 @@ namespace OnlineMongoMigrationProcessor
         public bool EnableCSWatchLog { get; set; }
         public bool OptimizeForLargeDocs { get; set; }
 
+        /// <summary>
+        /// Percentage (25-100) applied to the tiered per-chunk document floor. 100 keeps the
+        /// default floor; lower values shrink chunks (and produce more of them). Clamped to 25-100.
+        /// </summary>
+        public int PartitionFactor { get; set; }
+
         private string _filePath = string.Empty;
 
         public MigrationSettings()
@@ -83,6 +89,7 @@ namespace OnlineMongoMigrationProcessor
                     ContinuousDuplicateThresholdInSeconds = loadedObject.ContinuousDuplicateThresholdInSeconds <= 0 ? 300 : loadedObject.ContinuousDuplicateThresholdInSeconds;
                     EnableCSWatchLog = loadedObject.EnableCSWatchLog;
                     OptimizeForLargeDocs = loadedObject.OptimizeForLargeDocs;
+                    PartitionFactor = loadedObject.PartitionFactor <= 0 ? 100 : Math.Min(100, Math.Max(25, loadedObject.PartitionFactor));
 
                     initialized = true;
                     if (ChangeStreamMaxDocsInBatch > 10000)
@@ -116,6 +123,7 @@ namespace OnlineMongoMigrationProcessor
                 ContinuousDuplicateThresholdInSeconds = 2;
                 EnableCSWatchLog = false;
                 OptimizeForLargeDocs = false;
+                PartitionFactor = 100;
             }
         }
 

@@ -51,24 +51,6 @@ This option involves cloning the repository and building the C# project source f
    $location = "<Replace with Azure Region (e.g., WestUs3, EastUS, WestEurope)>"
    $projectFolderPath = Split-Path (Get-Location) -Parent
 
-   # Per-install secret seed used to derive the AES-256 key that encrypts the stored app password.
-   # Entered securely so it is not shown on screen. Press Enter to keep the legacy built-in seed (not recommended).
-   $secureSeed = Read-Host -Prompt "Enter the encryption key for the application (press Enter to skip or use existing)" -AsSecureString
-   $encryptionKeySeed = ""
-   if ($secureSeed -and $secureSeed.Length -gt 0) {
-       $isWindowsPlatform = ($env:OS -eq 'Windows_NT') -or ((Get-Variable IsWindows -ErrorAction SilentlyContinue) -and $IsWindows)
-       $seedBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSeed)
-       try {
-           if ($isWindowsPlatform) {
-               $encryptionKeySeed = [Runtime.InteropServices.Marshal]::PtrToStringAuto($seedBstr)
-           } else {
-               $encryptionKeySeed = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($seedBstr)
-           }
-       } finally {
-           [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($seedBstr)
-       }
-   }
-
    # Paths - No changes required
    $projectFilePath = "$projectFolderPath\MongoMigrationWebApp\MongoMigrationWebApp.csproj"
    $publishFolder = "$projectFolderPath\publish"
@@ -108,15 +90,8 @@ This option involves cloning the repository and building the C# project source f
    Write-Host "Deploying to Azure Web App..."
    az webapp deploy --resource-group $resourceGroupName --name $webAppName --src-path $zipPath --type zip
 
-   # Configure the per-install encryption key seed (skip if left empty)
-   if (-not [string]::IsNullOrEmpty($encryptionKeySeed)) {
-       az webapp config appsettings set --resource-group $resourceGroupName --name $webAppName --settings "EncryptionKeySeed=$encryptionKeySeed"
-   }
-   Remove-Variable encryptionKeySeed, secureSeed -ErrorAction Ignore
-
    Write-Host "Deployment has completed successfully"
-   Write-Host "You can visit your app at: https://$webAppName.azurewebsites.net"
-   ```
+
 
 3. **Access the Application**
    - Open `https://<WebAppName>.azurewebsites.net` in your browser
@@ -139,24 +114,6 @@ This option uses pre-built binaries from the latest release, eliminating the nee
    $location = "<Replace with Azure Region (e.g., WestUs3, EastUS, WestEurope)>"
    $zipPath = "<Replace with full path of downloaded latest release zip file on local>"
 
-   # Per-install secret seed used to derive the AES-256 key that encrypts the stored app password.
-   # Entered securely so it is not shown on screen. Press Enter to keep the legacy built-in seed (not recommended).
-   $secureSeed = Read-Host -Prompt "Enter the encryption key for the application (press Enter to skip or use existing)" -AsSecureString
-   $encryptionKeySeed = ""
-   if ($secureSeed -and $secureSeed.Length -gt 0) {
-       $isWindowsPlatform = ($env:OS -eq 'Windows_NT') -or ((Get-Variable IsWindows -ErrorAction SilentlyContinue) -and $IsWindows)
-       $seedBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSeed)
-       try {
-           if ($isWindowsPlatform) {
-               $encryptionKeySeed = [Runtime.InteropServices.Marshal]::PtrToStringAuto($seedBstr)
-           } else {
-               $encryptionKeySeed = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($seedBstr)
-           }
-       } finally {
-           [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($seedBstr)
-       }
-   }
-
    # Login to Azure
    az login
 
@@ -171,14 +128,8 @@ This option uses pre-built binaries from the latest release, eliminating the nee
    Write-Host "Deploying to Azure Web App..."
    az webapp deploy --resource-group $resourceGroupName --name $webAppName --src-path $zipPath --type zip
 
-   # Configure the per-install encryption key seed (skip if left empty)
-   if (-not [string]::IsNullOrEmpty($encryptionKeySeed)) {
-       az webapp config appsettings set --resource-group $resourceGroupName --name $webAppName --settings "EncryptionKeySeed=$encryptionKeySeed"
-   }
-   Remove-Variable encryptionKeySeed, secureSeed -ErrorAction Ignore
-
    Write-Host "Deployment has completed successfully"
-   Write-Host "You can visit your app at: https://$webAppName.azurewebsites.net"
+  
    ```
 
 3. **Access the Application**
@@ -191,16 +142,6 @@ This option uses pre-built binaries from the latest release, eliminating the nee
 The Web App deployed using the above steps will be publicly accessible to anyone with the URL. To secure the application, enable App Service Authentication.
 
 **Documentation**: [Add app authentication to your web app](https://learn.microsoft.com/en-us/azure/app-service/scenario-secure-app-authentication-app-service?tabs=workforce-configuration)
-
-### Set a Per-Install Encryption Key Seed
-
-The app password is stored encrypted with an AES-256 key. By default the key is derived from a built-in seed compiled into the app, which is insecure because the source is public. Set the `EncryptionKeySeed` application setting to a strong, unique value per install so the key is derived from your own secret:
-
-```powershell
-az webapp config appsettings set --resource-group $resourceGroupName --name $webAppName --settings "EncryptionKeySeed=<your-strong-random-seed>"
-```
-
-Both `publish_code_webapp.ps1` and `publish_zip_webapp.ps1` accept an optional `-EncryptionKeySeed` parameter that applies this setting automatically. If omitted, the app keeps using the legacy built-in seed for backward compatibility (not recommended for production). Changing the seed after a password has been saved will invalidate the stored password; reset it afterward.
 
 ### VNet Integration and Single Public IP (Optional)
 

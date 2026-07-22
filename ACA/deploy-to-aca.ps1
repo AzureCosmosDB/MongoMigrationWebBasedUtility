@@ -215,25 +215,6 @@ if ($isWindowsPlatform) {
     }
 }
 
-Write-Host "`nStep 3b: Prompting for encryption key seed (optional)..." -ForegroundColor Yellow
-$secureSeed = Read-Host -Prompt "Enter the encryption key for the application. Press Enter to keep the existing or default." -AsSecureString
-$encryptionKeySeed = ""
-if ($secureSeed -and $secureSeed.Length -gt 0) {
-    $seedBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSeed)
-    try {
-        if ($isWindowsPlatform) {
-            $encryptionKeySeed = [Runtime.InteropServices.Marshal]::PtrToStringAuto($seedBstr)
-        } else {
-            $encryptionKeySeed = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($seedBstr)
-        }
-    } catch {
-        Write-Host "`nError: Failed to read the encryption key seed: $_" -ForegroundColor Red
-        exit 1
-    } finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($seedBstr)
-    }
-}
-
 Write-Host "`nStep 4: Deploying Container App with application image..." -ForegroundColor Yellow
 
 $finalBicepParams = @(
@@ -259,13 +240,6 @@ $finalBicepParams = @(
         "fileShareSizeGB=$FileShareSizeGB"
 )
 
-# Pass the per-install encryption key seed only when supplied.
-# When omitted, the app keeps using its legacy built-in seed for backward compatibility.
-if (-not [string]::IsNullOrEmpty($encryptionKeySeed)) {
-    Write-Host "Using a custom per-install encryption key seed" -ForegroundColor Cyan
-    $finalBicepParams += "encryptionKeySeed=$encryptionKeySeed"
-}
-
 # Add VNet configuration if provided
 if (-not [string]::IsNullOrEmpty($InfrastructureSubnetResourceId)) {
     $finalBicepParams += "infrastructureSubnetResourceId=$InfrastructureSubnetResourceId"
@@ -275,11 +249,11 @@ az @finalBicepParams
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nError: Container App deployment failed" -ForegroundColor Red
-    Remove-Variable connString, secureConnString, encryptionKeySeed, secureSeed -ErrorAction Ignore
+    Remove-Variable connString, secureConnString -ErrorAction Ignore
     exit 1
 }
 
-Remove-Variable connString, secureConnString, encryptionKeySeed, secureSeed -ErrorAction Ignore
+Remove-Variable connString, secureConnString -ErrorAction Ignore
 
 Write-Host "`n=== Deployment Complete ===" -ForegroundColor Cyan
 

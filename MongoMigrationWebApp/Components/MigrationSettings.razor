@@ -66,6 +66,12 @@
                         </label>
                     </div>
                     <div class="mb-3">
+                        <label for="partition-factor" class="form-label" title="Percentage (25-100) applied to the minimum documents-per-chunk floor. 100 keeps the default floor; lower values produce smaller chunks (and more of them).">
+                            Partition factor (%)
+                        </label>
+                        <input type="number" id="partition-factor" class="form-control" min="25" max="100" step="5" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).PartitionFactor" />
+                    </div>
+                    <div class="mb-3">
                         <label for="ignore-duplicates-and-continue-restore" class="form-label" title="When enabled, MongoRestore will continue after the duplicate-key threshold is reached instead of stopping and queuing duplicate cleanup.">
                             <input type="checkbox" id="ignore-duplicates-and-continue-restore" @bind="(_configurationBackup ??= new OnlineMongoMigrationProcessor.MigrationSettings()).IgnoreDuplicatesAndContinueRestore" />
                             Ignore duplicates during Restore (not recommended).
@@ -244,7 +250,13 @@
     protected override void OnInitialized()
     {
         _configurationBackup = (OnlineMongoMigrationProcessor.MigrationSettings?)(_configuration?.Clone()) ?? new OnlineMongoMigrationProcessor.MigrationSettings();
-        
+
+        // Legacy/unset configs may have PartitionFactor == 0; treat that as the default 100.
+        if (_configurationBackup.PartitionFactor <= 0)
+        {
+            _configurationBackup.PartitionFactor = 100;
+        }
+
         // Initialize the selected partitioner from the configuration
         SelectedObjectIdPartitioner = _configurationBackup.ObjectIdPartitioner.ToString();
         SelectedNonObjectIdPartitioner = _configurationBackup.NonObjectIdPartitioner.ToString();
@@ -292,6 +304,12 @@
     if ((_configurationBackup?.MongoCopyPageSize ?? 0) < 50 || (_configurationBackup?.MongoCopyPageSize ?? 0) > 40000)
         {
             errorMessage = "Page size should be between 50 and 40000.";
+            return;
+        }
+
+    if ((_configurationBackup?.PartitionFactor ?? 0) < 25 || (_configurationBackup?.PartitionFactor ?? 0) > 100)
+        {
+            errorMessage = "Partition factor should be between 25 and 100.";
             return;
         }
 

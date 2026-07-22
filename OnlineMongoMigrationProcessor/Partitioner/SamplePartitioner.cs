@@ -27,28 +27,14 @@ namespace OnlineMongoMigrationProcessor
         public const int SampleOversampleFactor = 10;
 
         /// <summary>
-        /// Minimum number of documents per segment for small-to-medium collections
-        /// (<see cref="LargeCollectionThreshold"/> or fewer docs) when the MongoDriver
-        /// path subdivides a chunk for parallel writes. Chunks smaller than this
-        /// collapse to 1 segment.
+        /// Returns the per-collection segment floor: 0.1x of the per-chunk floor
+        /// (<see cref="GetMinDocsPerChunk"/>), so segments stay an order of magnitude
+        /// finer than chunks. Honors <paramref name="partitionFactor"/> via the
+        /// underlying chunk floor.
         /// </summary>
-        public const int MinDocsPerSegment = 10_000;
-
-        /// <summary>
-        /// Minimum number of documents per segment for large collections (more than
-        /// <see cref="LargeCollectionThreshold"/> docs). Coarser segments keep the
-        /// per-segment work meaningful on multi-billion-doc collections.
-        /// </summary>
-        public const int MinDocsPerSegmentLarge = 100_000;
-
-        /// <summary>
-        /// Returns the per-collection segment floor: <see cref="MinDocsPerSegmentLarge"/>
-        /// for collections over <see cref="LargeCollectionThreshold"/>, otherwise
-        /// <see cref="MinDocsPerSegment"/>.
-        /// </summary>
-        public static int GetMinDocsPerSegment(long documentCount)
+        public static int GetMinDocsPerSegment(long documentCount, int partitionFactor = 100)
         {
-            return documentCount > LargeCollectionThreshold ? MinDocsPerSegmentLarge : MinDocsPerSegment;
+            return Math.Max(1, (int)(GetMinDocsPerChunk(documentCount, partitionFactor) * 0.1));
         }
 
         /// <summary>
@@ -75,11 +61,15 @@ namespace OnlineMongoMigrationProcessor
         /// <summary>
         /// Returns the per-collection chunk floor: <see cref="MinDocsPerChunkLarge"/>
         /// for collections over <see cref="LargeCollectionThreshold"/>, otherwise
-        /// <see cref="MinDocsPerChunk"/>.
+        /// <see cref="MinDocsPerChunk"/>. The tiered floor is scaled by
+        /// <paramref name="partitionFactor"/> (a percentage clamped to 25-100): 100
+        /// keeps the full floor, lower values shrink chunks (and produce more of them).
         /// </summary>
-        public static int GetMinDocsPerChunk(long documentCount)
+        public static int GetMinDocsPerChunk(long documentCount, int partitionFactor = 100)
         {
-            return documentCount > LargeCollectionThreshold ? MinDocsPerChunkLarge : MinDocsPerChunk;
+            int baseValue = documentCount > LargeCollectionThreshold ? MinDocsPerChunkLarge : MinDocsPerChunk;
+            double factor = Math.Min(100, Math.Max(25, partitionFactor)) / 100.0;
+            return Math.Max(1, (int)(baseValue * factor));
         }
 
         public static int GetMaxSegments()
@@ -155,8 +145,23 @@ namespace OnlineMongoMigrationProcessor
                     log.WriteLine($"Exception occurred while counting documents in {collection.CollectionNamespace}. Details: {ex}", LogType.Warning);//don't show call stack
                     if (userFilter == null || userFilter.ElementCount == 0)
                     {
-                        log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace} due to error in counting documents.");
-                        docCountByType = GetDocumentCountByDataType(collection, dataType, true, userFilter, skipDataTypeFilter);
+                        // A filtered count is a full scan that can reset the connection on some sources.
+                        // Fall back to an estimated count so partitioning still proceeds with multiple chunks instead of
+                        // collapsing to a single partition. Prefer the collection-level count already computed during setup
+                        // (collStats/estimatedDocumentCount) to avoid another server round-trip; otherwise get a metadata-only
+                        // estimate (skipDataTypeFilter forces the scan-free estimate path). Over-estimating the per-type count
+                        // is harmless because the value only decides how many chunks to create.
+                        long seededCount = migrationUnit.EstimatedDocCount > 0 ? migrationUnit.EstimatedDocCount : migrationUnit.ActualDocCount;
+                        if (seededCount > 0)
+                        {
+                            docCountByType = seededCount;
+                            log.WriteLine($"Using previously computed collection document count ({docCountByType}) for {collection.CollectionNamespace} due to error in counting documents.");
+                        }
+                        else
+                        {
+                            log.WriteLine($"Using Estimated document count for {collection.CollectionNamespace} due to error in counting documents.");
+                            docCountByType = GetDocumentCountByDataType(collection, dataType, true, null, true);
+                        }
                         MigrationJobContext.AddVerboseLog($"SamplePartitioner.GetDocumentCountByDataType in Ex: collection={collection.CollectionNamespace}, docCountByType={docCountByType}, dataType={dataType}, optimizeForObjectId={optimizeForObjectId}, userFilter={userFilter}");
                     }
                     else
@@ -227,7 +232,7 @@ namespace OnlineMongoMigrationProcessor
                     // Segments=1 means the chunk IS the unit of work, so MinDocsPerSegment
                     // applies to the chunk directly.
                     chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
-                    int dumpChunkFloor = (int)Math.Max(1L, docCountByType / GetMinDocsPerChunk(docCountByType));
+                    int dumpChunkFloor = (int)Math.Max(1L, docCountByType / GetMinDocsPerChunk(docCountByType, config.PartitionFactor));
                     if (chunkCount > dumpChunkFloor)
                     {
                         chunkCount = dumpChunkFloor;
@@ -256,9 +261,9 @@ namespace OnlineMongoMigrationProcessor
                     //   2. Universal MinDocsPerChunk floor (tiered) as a backstop.
                     chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
                     int maxSegmentsForColl = GetMaxSegments();
-                    int minDocsPerSegmentForColl = GetMinDocsPerSegment(docCountByType);
+                    int minDocsPerSegmentForColl = GetMinDocsPerSegment(docCountByType, config.PartitionFactor);
                     long perChunkFloorForFullSegments = (long)maxSegmentsForColl * minDocsPerSegmentForColl;
-                    long perChunkFloor = Math.Max(perChunkFloorForFullSegments, GetMinDocsPerChunk(docCountByType));
+                    long perChunkFloor = Math.Max(perChunkFloorForFullSegments, GetMinDocsPerChunk(docCountByType, config.PartitionFactor));
                     int chunkFloor = (int)Math.Max(1L, docCountByType / perChunkFloor);
                     if (chunkCount > chunkFloor)
                     {
