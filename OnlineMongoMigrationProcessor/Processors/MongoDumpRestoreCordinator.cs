@@ -66,6 +66,10 @@ namespace OnlineMongoMigrationProcessor
         private string? _mongoRestoreToolPath;
         private string _processorRunId = string.Empty;
 
+        // Source CA cert contents (uploaded in settings) used to materialize a real CA file for the
+        // external mongo tools when the connection string references a CA path that doesn't exist locally.
+        private string? _sourceCaCertContents;
+
         private string _mongoDumpOutputFolder = Path.Combine(Helper.GetWorkingFolder(), "mongodump");
         private readonly SemaphoreSlim _uploadLock = new(1, 1);
 
@@ -391,6 +395,12 @@ namespace OnlineMongoMigrationProcessor
                     _onPendingTasksCompleted = onPendingTasksCompleted;
                     _processNewTasks = true;
                     _stopped = false;
+
+                    // Cache the uploaded source CA cert once so BuildDumpArgumentsAsync can materialize a real
+                    // CA file for the mongo tools when the source connection string points at a missing CA path.
+                    var caSettings = new MigrationSettings();
+                    caSettings.Load();
+                    _sourceCaCertContents = caSettings.CACertContentsForSourceServer;
 
                     // Resolve worker counts (use persisted value if set, otherwise auto-calculate)
                     int maxDumpWorkers, maxRestoreWorkers;
@@ -1556,6 +1566,13 @@ namespace OnlineMongoMigrationProcessor
             string colName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.BuildDumpArgumentsAsync: collection={dbName}.{colName}, chunkIndex={chunkIndex}");
+            // Repoint any missing CA file in the source connection string at a materialized temp cert (or
+            // strip it) so the external mongodump tool doesn't fail loading a CA path that only the .NET
+            // driver knows to ignore. Also translate insecure TLS URI options into explicit CLI flags the
+            // tools honor reliably (e.g. tlsAllowInvalidHostnames when connecting to DocumentDB by IP).
+            var sourceToolConn = Helper.NormalizeConnectionStringForMongoTools(sourceConnectionString, _sourceCaCertContents);
+            sourceConnectionString = sourceToolConn.ConnectionString;
+            string tlsToolArgs = sourceToolConn.ExtraToolArguments;
             // Build base dump arguments
             string args;
 
@@ -1569,6 +1586,8 @@ namespace OnlineMongoMigrationProcessor
             {
                 args = $" --uri={QuoteMongoToolArgument(sourceConnectionString)} --gzip --db={QuoteMongoToolArgument(dbName)} --collection={QuoteMongoToolArgument(colName)} --archive";
             }
+
+            args = $"{args}{tlsToolArgs}";
 
 
             // Build query and get doc count
@@ -2182,7 +2201,9 @@ namespace OnlineMongoMigrationProcessor
         private IMongoCollection<BsonDocument> GetSourceCollection(string sourceConnectionString, string dbName, string colName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.GetSourceCollection: database={dbName}, collection={colName}");
-            var sourceClient = MongoClientFactory.Create(_log, sourceConnectionString);
+            // Pass the uploaded source CA so the driver validates the chain via the custom callback instead
+            // of default validation, which fails for DocumentDB reached by IP (name mismatch + untrusted CA).
+            var sourceClient = MongoClientFactory.Create(_log, sourceConnectionString, false, _sourceCaCertContents);
             var sourceDb = sourceClient.GetDatabase(dbName);
             return sourceDb.GetCollection<BsonDocument>(colName);
         }
@@ -2429,8 +2450,13 @@ namespace OnlineMongoMigrationProcessor
             string targetCollectionName)
         {
             MigrationJobContext.AddVerboseLog($"MongoDumpRestoreCordinator.BuildRestoreArguments: source={sourceDatabaseName}.{sourceCollectionName}, target={targetDatabaseName}.{targetCollectionName}, chunkIndex={chunkIndex}");
+            // Strip a missing CA file path from the target connection string so mongorestore doesn't fail
+            // trying to load it (no target CA upload exists, so there's nothing to materialize). Also
+            // translate insecure TLS URI options into explicit CLI flags the tools honor reliably.
+            var targetToolConn = Helper.NormalizeConnectionStringForMongoTools(targetConnectionString, null);
+            targetConnectionString = targetToolConn.ConnectionString;
             // Always --noIndexRestore: collection + indexes are pre-created upfront so mongorestore stays a pure data path; lets every chunk run in parallel without index-build contention on the target.
-            string args = $" --uri={QuoteMongoToolArgument(targetConnectionString)} --gzip --archive --noIndexRestore";
+            string args = $" --uri={QuoteMongoToolArgument(targetConnectionString)} --gzip --archive --noIndexRestore{targetToolConn.ExtraToolArguments}";
             args = $"{args} --nsFrom={QuoteMongoToolArgument($"{sourceDatabaseName}.{sourceCollectionName}")} --nsTo={QuoteMongoToolArgument($"{targetDatabaseName}.{targetCollectionName}")}";
 
             //removed as we built indexes and collections earlier

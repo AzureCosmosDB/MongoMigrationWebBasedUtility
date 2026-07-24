@@ -34,6 +34,11 @@ namespace OnlineMongoMigrationProcessor.Context
 
         private static Log _log;
 
+        // Read-only access to the initialized log so static helpers (e.g. namespace resolution
+        // in Helper/MongoHelper) can route MongoClient creation through MongoClientFactory, which
+        // needs a Log to report source-server certificate validation failures.
+        public static Log? Logger => _log;
+
         public static ActiveMigrationUnitsCache MigrationUnitsCache { get; set; }
 
         // Reference to the active MigrationProcessor (registered by MigrationWorker when a job starts).

@@ -18,7 +18,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         // to avoid exhausting logical sessions on the server (TooManyLogicalSessions)
         private static readonly ConcurrentDictionary<string, MongoClient> _clientCache = new();
 
-        public static MongoClient Create(Log log,string connectionString, bool ReadConcernMajority=false, string? PEMFileContents=null)
+        public static MongoClient Create(Log? log,string connectionString, bool ReadConcernMajority=false, string? PEMFileContents=null)
         {
             
             var cleanConnStr = RemovePemPathFromConnectionString(connectionString);
@@ -74,7 +74,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             return string.IsNullOrWhiteSpace(newQuery) ? baseConnStr : $"{baseConnStr}?{newQuery}";
         }
 
-        private static RemoteCertificateValidationCallback ValidateAmazonDocDbCertificate(Log log,string pem)
+        private static RemoteCertificateValidationCallback ValidateAmazonDocDbCertificate(Log? log,string pem)
         {
             return (sender, certificate, chain, sslPolicyErrors) =>
             {
@@ -111,7 +111,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 }
                 catch (Exception ex)
                 {
-                    log.WriteLine($"Certificate validation failed: { ex}", LogType.Error);
+                    log?.WriteLine($"Certificate validation failed: { ex}", LogType.Error);
                     
                     return false;
                 }

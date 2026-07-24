@@ -299,7 +299,15 @@ namespace MongoMigrationWebApp.Components
             }
             catch (Exception ex)
             {
-                _error = $"Failed to resolve namespaces: {ex.Message}";
+                // Surface the full exception detail (including nested inner exceptions) so the root cause
+                // — e.g. an invalid source connection string / unreachable cluster — is visible to the user.
+                var details = new System.Text.StringBuilder();
+                for (var current = ex; current != null; current = current.InnerException)
+                {
+                    if (details.Length > 0) details.Append(" → ");
+                    details.Append(current.Message);
+                }
+                _error = $"Failed to resolve namespaces: {details}";
                 return;
             }
 

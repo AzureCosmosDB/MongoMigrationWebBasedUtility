@@ -135,12 +135,15 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 		/// </summary>
 		/// <param name="connectionString">MongoDB connection string</param>
 		/// <returns>List of database names, excluding system databases</returns>
-		public static async Task<List<string>> ListDatabasesAsync(string connectionString)
+		public static async Task<List<string>> ListDatabasesAsync(string connectionString, string? pemFileContents = null)
 		{
 			var databases = new List<string>();
 			try
 			{
-				var client = new MongoClient(connectionString);
+				// Route through the factory so the source CA (.pem uploaded in Settings) is applied via the
+				// custom certificate validation callback. The .NET driver ignores tlsCAFile in the connection
+				// string, so a bare "new MongoClient(connectionString)" cannot trust an AWS DocumentDB CA.
+				var client = MongoClientFactory.Create(MigrationJobContext.Logger, connectionString, false, pemFileContents);
 				var databasesCursor = await client.ListDatabasesAsync();
 				var databasesDocument = await databasesCursor.ToListAsync();
 
@@ -156,7 +159,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 			}
 			catch (Exception)
 			{
-				// Return empty list if connection fails
+				// Re-throw so the caller (Add Collections UI) can surface the real cause (e.g. an
+				// invalid source connection string) instead of silently returning an empty list, which
+				// previously masked the failure as "no collections matched".
+				throw;
 			}
 			return databases;
 		}
@@ -167,12 +173,14 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 		/// <param name="connectionString">MongoDB connection string</param>
 		/// <param name="databaseName">Database name</param>
 		/// <returns>List of collection names, excluding system collections, views, and other non-collection types</returns>
-		public static async Task<List<string>> ListCollectionsAsync(string connectionString, string databaseName)
+		public static async Task<List<string>> ListCollectionsAsync(string connectionString, string databaseName, string? pemFileContents = null)
 		{
 			var collections = new List<string>();
 			try
 			{
-				var client = new MongoClient(connectionString);
+				// Route through the factory so the source CA (.pem uploaded in Settings) is applied. See
+				// ListDatabasesAsync for why the raw connection string alone cannot trust an AWS DocumentDB CA.
+				var client = MongoClientFactory.Create(MigrationJobContext.Logger, connectionString, false, pemFileContents);
 				var database = client.GetDatabase(databaseName);
 				
 				// Get all collections (system collections will be filtered below)
@@ -197,7 +205,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 			}
 			catch (Exception)
 			{
-				// Return empty list if connection fails
+				// Re-throw so the caller (Add Collections UI) can surface the real cause (e.g. an
+				// invalid source connection string) instead of silently returning an empty list, which
+				// previously masked the failure as "no collections matched".
+				throw;
 			}
 			return collections;
 		}
@@ -2600,7 +2611,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             
             try
             {
-                var client = new MongoClient(connectionString);
+                // Route through the factory for connection reuse (avoids TooManyLogicalSessions) and so
+                // a source CA would be honored if this is ever called against a custom-CA source. Callers
+                // currently pass the target connection string, which uses a publicly trusted CA.
+                var client = MongoClientFactory.Create(MigrationJobContext.Logger, connectionString);
                 
                 // 1. vCore: db.adminCommand({ listShards: 1 }) -> { shards: [ { _id, host, ... } ], ok: 1 }
                 if (IsDocumentDBEndpoint(client))
