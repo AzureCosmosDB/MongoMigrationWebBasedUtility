@@ -169,6 +169,156 @@ namespace OnlineMongoMigrationProcessor
             );
         }
 
+        // Connection string CA-file options understood by the external mongo tools (mongodump/mongorestore).
+        // pemPath is the app's own custom option; the tools don't understand it, so it is always dropped.
+        private static readonly string[] MongoToolCaFileOptions = { "tlsCAFile", "sslCAFile", "pemPath" };
+        private static readonly object _toolCaFileLock = new object();
+
+        // URI TLS "insecure" options that the Go-based mongo tools frequently ignore when supplied in the
+        // connection string (especially when connecting by IP). Translating them to explicit CLI flags makes
+        // the tools honor them reliably. Maps the lower-cased URI option to its mongodump/mongorestore flag.
+        private static readonly (string UriOption, string ToolFlag)[] MongoToolInsecureTlsOptions =
+        {
+            ("tlsallowinvalidhostnames", "--sslAllowInvalidHostnames"),
+            ("tlsallowinvalidcertificates", "--sslAllowInvalidCertificates"),
+            ("tlsinsecure", "--tlsInsecure"),
+        };
+
+        /// <summary>
+        /// Result of normalizing a connection string for the external mongo tools: the URI to pass via --uri
+        /// plus any extra command-line flags that must be appended (TLS options the tools ignore in the URI).
+        /// </summary>
+        public sealed class MongoToolConnectionInfo
+        {
+            public string ConnectionString { get; set; } = string.Empty;
+            public string ExtraToolArguments { get; set; } = string.Empty;
+        }
+
+        /// <summary>
+        /// Normalizes a connection string for the external mongo tools (mongodump/mongorestore).
+        /// Three problems are handled:
+        ///  1. Default database in the path: the tools address databases/collections explicitly via
+        ///     --db / --nsFrom / --nsTo, and mongodump errors if the URI database differs from --db. The
+        ///     path database (e.g. /admin) is removed.
+        ///  2. CA file: the tools read tlsCAFile/sslCAFile from the URI and fail if the referenced file is
+        ///     missing. The .NET driver instead applies the CA from uploaded PEM contents via a validation
+        ///     callback, so a user-supplied CA path may not exist on the machine running the tools. When the
+        ///     referenced file is missing this repoints the option at a temp .pem materialized from
+        ///     <paramref name="caCertContents"/>, or removes the CA options entirely if no contents are available.
+        ///  3. Insecure TLS options: tlsAllowInvalidHostnames/tlsAllowInvalidCertificates/tlsInsecure are often
+        ///     ignored by the tools when set in the URI (notably when connecting by IP, whose cert has no IP
+        ///     SANs). Those are stripped from the URI and returned as explicit CLI flags instead.
+        /// </summary>
+        public static MongoToolConnectionInfo NormalizeConnectionStringForMongoTools(string connectionString, string? caCertContents)
+        {
+            var result = new MongoToolConnectionInfo { ConnectionString = connectionString };
+
+            if (string.IsNullOrWhiteSpace(connectionString))
+                return result;
+
+            var parts = connectionString.Split(new[] { '?' }, 2);
+            string baseConnStr = parts[0];
+            string queryString = parts.Length > 1 ? parts[1] : string.Empty;
+
+            bool modified = false;
+
+            // Remove any default database from the path (e.g. .../27017/admin -> .../27017/). The tools address
+            // databases/collections explicitly via --db / --nsFrom / --nsTo, and mongodump rejects a URI database
+            // that differs from the --db option ("Cannot specify different database in connection URI and command-line option").
+            string strippedBase = Regex.Replace(baseConnStr, @"^(mongodb(?:\+srv)?://[^/]+).*$", "$1/", RegexOptions.IgnoreCase);
+            if (!string.Equals(strippedBase, baseConnStr, StringComparison.Ordinal))
+            {
+                baseConnStr = strippedBase;
+                modified = true;
+            }
+
+            if (string.IsNullOrWhiteSpace(queryString))
+            {
+                if (modified)
+                    result.ConnectionString = baseConnStr;
+                return result;
+            }
+
+            // Preserve the original order and raw encoding of every option; the tools accept raw
+            // paths (with spaces/backslashes) inside a quoted --uri, so untouched options pass through verbatim.
+            var pairs = queryString
+                .Split('&')
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p =>
+                {
+                    var kv = p.Split(new[] { '=' }, 2);
+                    return (Key: kv[0], Value: kv.Length > 1 ? kv[1] : string.Empty);
+                })
+                .ToList();
+
+            bool IsCaOption(string key) => MongoToolCaFileOptions.Any(n => string.Equals(n, key, StringComparison.OrdinalIgnoreCase));
+
+            // --- CA file handling ---
+            var caPair = pairs.FirstOrDefault(p => IsCaOption(p.Key));
+            if (caPair.Key != null && !(!string.IsNullOrWhiteSpace(caPair.Value) && File.Exists(caPair.Value)))
+            {
+                // Referenced CA file is missing: drop every CA option and re-add a valid tlsCAFile only if we
+                // can materialize the cert from the uploaded contents.
+                pairs = pairs.Where(p => !IsCaOption(p.Key)).ToList();
+                if (!string.IsNullOrWhiteSpace(caCertContents))
+                {
+                    string materializedPath = MaterializeMongoToolCaFile(caCertContents!);
+                    pairs.Add(("tlsCAFile", materializedPath));
+                }
+                modified = true;
+            }
+
+            // --- Insecure TLS option handling (translate URI option -> CLI flag) ---
+            var flags = new List<string>();
+            foreach (var (uriOption, toolFlag) in MongoToolInsecureTlsOptions)
+            {
+                var match = pairs.FirstOrDefault(p => string.Equals(p.Key, uriOption, StringComparison.OrdinalIgnoreCase));
+                if (match.Key != null && string.Equals(match.Value?.Trim(), "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    pairs = pairs.Where(p => !string.Equals(p.Key, uriOption, StringComparison.OrdinalIgnoreCase)).ToList();
+                    flags.Add(toolFlag);
+                    modified = true;
+                }
+            }
+
+            if (modified)
+            {
+                var query = string.Join("&", pairs.Select(p => $"{p.Key}={p.Value}"));
+                result.ConnectionString = string.IsNullOrWhiteSpace(query) ? baseConnStr : $"{baseConnStr}?{query}";
+            }
+
+            if (flags.Count > 0)
+                result.ExtraToolArguments = " " + string.Join(" ", flags);
+
+            return result;
+        }
+
+        // Writes the CA cert contents to a stable file named by content hash so repeated calls (one per
+        // dump chunk) reuse the same file instead of littering the working folder with temp files.
+        private static string MaterializeMongoToolCaFile(string caCertContents)
+        {
+            string hash;
+            using (var sha = SHA256.Create())
+            {
+                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(caCertContents));
+                hash = Convert.ToHexString(bytes).Substring(0, 16);
+            }
+
+            string dir = Path.Combine(GetWorkingFolder(), "toolcerts");
+            string filePath = Path.Combine(dir, $"{hash}.pem");
+
+            lock (_toolCaFileLock)
+            {
+                if (!File.Exists(filePath))
+                {
+                    Directory.CreateDirectory(dir);
+                    File.WriteAllText(filePath, caCertContents);
+                }
+            }
+
+            return filePath;
+        }
+
         public static string EncodeMongoPasswordInConnectionString(string connectionString)
         {
        
@@ -595,6 +745,21 @@ namespace OnlineMongoMigrationProcessor
         {
             MigrationJobContext.AddVerboseLog($"PopulateJobCollectionsAsync: jobId={job?.Id}");
 
+            // Wildcard/JSON namespace resolution hits the source cluster. Load the source CA (.pem)
+            // uploaded in Settings so the MongoClient trusts custom CAs (e.g. AWS DocumentDB); the
+            // .NET driver ignores tlsCAFile in the connection string, so this is the only way it works.
+            string pemFileContents = string.Empty;
+            try
+            {
+                var config = new MigrationSettings();
+                config.Load();
+                pemFileContents = config.CACertContentsForSourceServer ?? string.Empty;
+            }
+            catch
+            {
+                // Best-effort; fall back to no custom CA (publicly trusted source CAs still work).
+            }
+
             List<MigrationUnit> unitsToAdd = new List<MigrationUnit>();
             if (string.IsNullOrWhiteSpace(namespacesToMigrate))
             {
@@ -627,7 +792,7 @@ namespace OnlineMongoMigrationProcessor
                         ? sourceCollectionName
                         : item.TargetCollectionName.Trim();
 
-                    var tmpList = await PopulateJobCollectionsFromCSVAsync(job,$"{sourceDatabaseName}.{sourceCollectionName}", connectionString,false);
+                    var tmpList = await PopulateJobCollectionsFromCSVAsync(job,$"{sourceDatabaseName}.{sourceCollectionName}", connectionString,false, pemFileContents);
                     if (tmpList.Count > 0)
                     {
                         foreach (var mu in tmpList)
@@ -646,9 +811,7 @@ namespace OnlineMongoMigrationProcessor
             }
             else
             {
-                unitsToAdd = await PopulateJobCollectionsFromCSVAsync(job,namespacesToMigrate, connectionString);
-                
-                
+                unitsToAdd = await PopulateJobCollectionsFromCSVAsync(job,namespacesToMigrate, connectionString, true, pemFileContents);
             }
 
             foreach (var mu in unitsToAdd)
@@ -759,7 +922,7 @@ namespace OnlineMongoMigrationProcessor
             job.MigrationUnitBasics.Add(mu.GetBasic());
         }
 
-        private static async Task<List<MigrationUnit>> PopulateJobCollectionsFromCSVAsync(MigrationJob job,string namespacesToMigrate, string connectionString, bool split=true)
+        private static async Task<List<MigrationUnit>> PopulateJobCollectionsFromCSVAsync(MigrationJob job,string namespacesToMigrate, string connectionString, bool split=true, string? pemFileContents=null)
         {
             List<MigrationUnit> unitsToAdd = new List<MigrationUnit>();
 
@@ -795,10 +958,10 @@ namespace OnlineMongoMigrationProcessor
                 if (dbName == "*" && colName == "*")
                 {
                     // Get all databases and all collections from each database
-                    var databases = await MongoHelper.ListDatabasesAsync(connectionString);
+                    var databases = await MongoHelper.ListDatabasesAsync(connectionString, pemFileContents);
                     foreach (var database in databases)
                     {
-                        var collections = await MongoHelper.ListCollectionsAsync(connectionString, database);
+                        var collections = await MongoHelper.ListCollectionsAsync(connectionString, database, pemFileContents);
                         foreach (var collection in collections)
                         {
                             if (!unitsToAdd.Any(x => x.DatabaseName == database && x.CollectionName == collection))
@@ -812,10 +975,10 @@ namespace OnlineMongoMigrationProcessor
                 else if (dbName == "*" && colName != "*")
                 {
                     // Get all databases and find the specific collection in each
-                    var databases = await MongoHelper.ListDatabasesAsync(connectionString);
+                    var databases = await MongoHelper.ListDatabasesAsync(connectionString, pemFileContents);
                     foreach (var database in databases)
                     {
-                        var collections = await MongoHelper.ListCollectionsAsync(connectionString, database);
+                        var collections = await MongoHelper.ListCollectionsAsync(connectionString, database, pemFileContents);
                         if (collections.Contains(colName, StringComparer.OrdinalIgnoreCase))
                         {
                             if (!unitsToAdd.Any(x => x.DatabaseName == database && x.CollectionName == colName))
@@ -829,7 +992,7 @@ namespace OnlineMongoMigrationProcessor
                 else if (dbName != "*" && colName == "*")
                 {
                     // Get all collections from the specific database
-                    var collections = await MongoHelper.ListCollectionsAsync(connectionString, dbName);
+                    var collections = await MongoHelper.ListCollectionsAsync(connectionString, dbName, pemFileContents);
                     foreach (var collection in collections)
                     {
                         if (!unitsToAdd.Any(x => x.DatabaseName == dbName && x.CollectionName == collection))

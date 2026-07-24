@@ -475,6 +475,14 @@ namespace OnlineMongoMigrationProcessor.Processors
                         return false;
                     }
 
+                    // Completion may have been flagged by the resume path or another monitor; stop polling
+                    // so we don't keep logging status after the build is already done.
+                    if (mu.IndexBuildComplete)
+                    {
+                        _log.WriteLine($"Blocking index build wait exiting for {namespaceForLog}: already marked complete", LogType.Debug);
+                        return true;
+                    }
+
                     // Use IndexesExpected as the denominator. IndexesMigrated may be 0 after a
                     // resume that skipped re-running createIndexes (target already has the index docs).
                     int denom = mu.IndexesExpected > 0 ? mu.IndexesExpected : mu.IndexesMigrated;
@@ -553,9 +561,18 @@ namespace OnlineMongoMigrationProcessor.Processors
                         stallChecks = 0;
                     }
 
-                    // Log every poll (~1 minute)
-                    _log.WriteLine($"Index build in progress for {namespaceForLog}: {activeBuilds} active, {progress:F1}% complete", LogType.Debug);
-                    _log.ShowInMonitor($"Index build in progress for {namespaceForLog}: {activeBuilds} active build(s), {progress:F1}% complete.");
+                    // Log every poll (~1 minute). With no active builds we're only confirming completion,
+                    // so avoid the misleading "in progress ... 100%" wording that contradicts the final status.
+                    if (activeBuilds > 0)
+                    {
+                        _log.WriteLine($"Index build in progress for {namespaceForLog}: {activeBuilds} active, {progress:F1}% complete", LogType.Debug);
+                        _log.ShowInMonitor($"Index build in progress for {namespaceForLog}: {activeBuilds} active build(s), {progress:F1}% complete.");
+                    }
+                    else
+                    {
+                        _log.WriteLine($"Verifying index build completion for {namespaceForLog}", LogType.Debug);
+                        _log.ShowInMonitor($"Verifying index build completion for {namespaceForLog}...");
+                    }
 
                     await Task.Delay(pollIntervalMs, _cts.Token);
                 }
@@ -580,7 +597,7 @@ namespace OnlineMongoMigrationProcessor.Processors
             const int pollIntervalMs = 60000;
             const int maxAttempts = 4320; // ~12 hours at 10s intervals
             const int maxStallChecks = 3; // unblock after repeated stalls so a failed build doesn't keep monitoring forever
-            bool seenAnyBuild = false;
+            int consecutiveZeroPolls = 0;
             int stallChecks = 0;
             int lastBuiltOnTarget = -1;
 
@@ -594,6 +611,14 @@ namespace OnlineMongoMigrationProcessor.Processors
                         return;
                     }
 
+                    // Completion may have been flagged by the resume path or another monitor; stop polling
+                    // so we don't keep logging status after the build is already done.
+                    if (mu.IndexBuildComplete)
+                    {
+                        _log.WriteLine($"Non-blocking index build monitor exiting for {namespaceForLog}: already marked complete", LogType.Debug);
+                        return;
+                    }
+
                     // Use IndexesExpected as the denominator. IndexesMigrated may be 0 after a
                     // resume that skipped re-running createIndexes (target already has the index docs).
                     int denom = mu.IndexesExpected > 0 ? mu.IndexesExpected : mu.IndexesMigrated;
@@ -601,7 +626,7 @@ namespace OnlineMongoMigrationProcessor.Processors
 
                     if (activeBuilds > 0)
                     {
-                        seenAnyBuild = true;
+                        consecutiveZeroPolls = 0;
                         stallChecks = 0;
                     }
 
@@ -612,62 +637,78 @@ namespace OnlineMongoMigrationProcessor.Processors
                     MigrationJobContext.SaveMigrationUnit(mu, true);
 
                     // activeBuilds < 0 = currentOp parse error; do not treat as complete.
-                    // activeBuilds == 0 with seenAnyBuild=false = warm-up window before queued ops appear; keep waiting.
-                    if (activeBuilds == 0 && seenAnyBuild)
+                    // Require two consecutive "no active build" polls before trusting the zero reading (queued
+                    // ops can momentarily report zero), then verify against the target. This also catches builds
+                    // that finish so fast no poll ever observes them active (otherwise the monitor would poll
+                    // until the 12h timeout while the UI already shows Success).
+                    if (activeBuilds == 0)
                     {
-                        // Verify with target listIndexes before flipping complete.
-                        int builtOnTarget = -1;
-                        try
+                        consecutiveZeroPolls++;
+                        if (consecutiveZeroPolls >= 2)
                         {
-                            var verifyClient = MongoClientFactory.Create(_log, targetConnStr);
-                            builtOnTarget = await Helpers.Mongo.IndexCopier.CountNonUniqueIndexesOnTargetAsync(verifyClient, databaseName, collectionName, _log);
-                        }
-                        catch { }
-                        if (mu.IndexesExpected <= 0 || (builtOnTarget >= 0 && builtOnTarget >= mu.IndexesExpected))
-                        {
-                            mu.IndexPercent = 100;
-                            mu.IndexBuildComplete = true;
-                            MigrationJobContext.SaveMigrationUnit(mu, true);
-                            _log.WriteLine($"Non-blocking index builds completed for {namespaceForLog}");
-                            _log.ShowInMonitor($"Index builds completed for {namespaceForLog} ({builtOnTarget}/{mu.IndexesExpected}).");
-                            return;
-                        }
-
-                        if (builtOnTarget >= 0)
-                        {
-                            if (builtOnTarget > lastBuiltOnTarget)
+                            // Verify with target listIndexes before flipping complete.
+                            int builtOnTarget = -1;
+                            try
                             {
-                                stallChecks = 0;
-                                lastBuiltOnTarget = builtOnTarget;
+                                var verifyClient = MongoClientFactory.Create(_log, targetConnStr);
+                                builtOnTarget = await Helpers.Mongo.IndexCopier.CountNonUniqueIndexesOnTargetAsync(verifyClient, databaseName, collectionName, _log);
                             }
-                            else
+                            catch { }
+                            if (mu.IndexesExpected <= 0 || (builtOnTarget >= 0 && builtOnTarget >= mu.IndexesExpected))
                             {
-                                stallChecks++;
-                            }
-
-                            if (mu.IndexesExpected > 0)
-                            {
-                                var partial = Math.Min(99, builtOnTarget * 100.0 / mu.IndexesExpected);
-                                mu.IndexPercent = Math.Max(mu.IndexPercent, partial);
-                                MigrationJobContext.SaveMigrationUnit(mu, true);
-                            }
-
-                            if (stallChecks >= maxStallChecks)
-                            {
-                                var failedCount = Math.Max(0, mu.IndexesExpected - builtOnTarget);
-                                _log.WriteLine($"Non-blocking index builds for {namespaceForLog} stalled at {builtOnTarget}/{mu.IndexesExpected} (no active builds, no progress for {maxStallChecks} checks). Ending monitor; any missing indexes must be created manually on the target.", LogType.Warning);
-                                _log.ShowInMonitor($"Index builds stalled for {namespaceForLog} at {builtOnTarget}/{mu.IndexesExpected}. {failedCount} index(es) may need to be created manually on the target.", LogType.Warning);
-                                mu.IndexesFailed = failedCount;
+                                mu.IndexPercent = 100;
                                 mu.IndexBuildComplete = true;
                                 MigrationJobContext.SaveMigrationUnit(mu, true);
+                                _log.WriteLine($"Non-blocking index builds completed for {namespaceForLog}");
+                                _log.ShowInMonitor($"Index builds completed for {namespaceForLog} ({builtOnTarget}/{mu.IndexesExpected}).");
                                 return;
+                            }
+
+                            if (builtOnTarget >= 0)
+                            {
+                                if (builtOnTarget > lastBuiltOnTarget)
+                                {
+                                    stallChecks = 0;
+                                    lastBuiltOnTarget = builtOnTarget;
+                                }
+                                else
+                                {
+                                    stallChecks++;
+                                }
+
+                                if (mu.IndexesExpected > 0)
+                                {
+                                    var partial = Math.Min(99, builtOnTarget * 100.0 / mu.IndexesExpected);
+                                    mu.IndexPercent = Math.Max(mu.IndexPercent, partial);
+                                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                                }
+
+                                if (stallChecks >= maxStallChecks)
+                                {
+                                    var failedCount = Math.Max(0, mu.IndexesExpected - builtOnTarget);
+                                    _log.WriteLine($"Non-blocking index builds for {namespaceForLog} stalled at {builtOnTarget}/{mu.IndexesExpected} (no active builds, no progress for {maxStallChecks} checks). Ending monitor; any missing indexes must be created manually on the target.", LogType.Warning);
+                                    _log.ShowInMonitor($"Index builds stalled for {namespaceForLog} at {builtOnTarget}/{mu.IndexesExpected}. {failedCount} index(es) may need to be created manually on the target.", LogType.Warning);
+                                    mu.IndexesFailed = failedCount;
+                                    mu.IndexBuildComplete = true;
+                                    MigrationJobContext.SaveMigrationUnit(mu, true);
+                                    return;
+                                }
                             }
                         }
                     }
 
-                    // Log every poll (~1 minute)
-                    _log.WriteLine($"Index build in progress (non-blocking) for {namespaceForLog}: {activeBuilds} active, {progress:F1}% complete", LogType.Debug);
-                    _log.ShowInMonitor($"Index build in progress for {namespaceForLog}: {activeBuilds} active build(s), {progress:F1}% complete.");
+                    // Log every poll (~1 minute). With no active builds we're only confirming completion,
+                    // so avoid the misleading "in progress ... 100%" wording that contradicts the final status.
+                    if (activeBuilds > 0)
+                    {
+                        _log.WriteLine($"Index build in progress (non-blocking) for {namespaceForLog}: {activeBuilds} active, {progress:F1}% complete", LogType.Debug);
+                        _log.ShowInMonitor($"Index build in progress for {namespaceForLog}: {activeBuilds} active build(s), {progress:F1}% complete.");
+                    }
+                    else
+                    {
+                        _log.WriteLine($"Verifying index build completion (non-blocking) for {namespaceForLog}", LogType.Debug);
+                        _log.ShowInMonitor($"Verifying index build completion for {namespaceForLog}...");
+                    }
 
                     await Task.Delay(pollIntervalMs, _cts.Token);
                 }

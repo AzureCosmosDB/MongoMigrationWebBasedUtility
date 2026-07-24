@@ -523,7 +523,15 @@ namespace OnlineMongoMigrationProcessor.Workers
                 MigrationJobContext.SaveMigrationJob(MigrationJobContext.CurrentlyActiveJob);
             }
 
-            mu.SetChangeStreamStartedOn(false, MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value);
+            // Server-level jobs watch every collection through a single shared cursor, so each MU
+            // must anchor to the job's ChangeStreamStartedOn. Collection-level jobs open a per-collection
+            // cursor, so a collection added after the job started must anchor to when it was added (now),
+            // not the job's original start time. SetChangeStreamStartedOn is set-when-empty, so an existing
+            // per-collection anchor is preserved on resume.
+            if (useServerLevel)
+                mu.SetChangeStreamStartedOn(false, MigrationJobContext.CurrentlyActiveJob.ChangeStreamStartedOn.Value);
+            else
+                mu.SetChangeStreamStartedOn(false, DateTime.UtcNow);
            
 
             if (mu.MigrationChunks!=null && mu.MigrationChunks.Count>0)
@@ -2770,10 +2778,14 @@ namespace OnlineMongoMigrationProcessor.Workers
         {
             MigrationJobContext.AddVerboseLog($"CalculatePartitioningStrategy: docCount={documentCount}, db={databaseName}, coll={collectionName}, forceSkipDataTypeFilter={forceSkipDataTypeFilter}");
 
-            // Small collections under 1M docs: skip partitioning, process as a single chunk.
-            if (documentCount < 1_000_000)
+            // Small collections: skip partitioning, process as a single chunk. The 1M threshold
+            // scales with PartitionFactor (25-100%) so a lower factor (finer partitioning) also
+            // lowers the single-partition cutoff — e.g. factor 25 => 250K, factor 100 => 1M.
+            int singlePartitionFactor = Math.Min(100, Math.Max(25, _config!.PartitionFactor <= 0 ? 100 : _config!.PartitionFactor));
+            long singlePartitionThreshold = (long)(1_000_000L * (singlePartitionFactor / 100.0));
+            if (documentCount < singlePartitionThreshold)
             {
-                _log.WriteLine($"{databaseName}.{collectionName} has {documentCount} docs (< 1M). Skipping partitioning.", LogType.Debug);
+                _log.WriteLine($"{databaseName}.{collectionName} has {documentCount} docs (< {singlePartitionThreshold} threshold at PartitionFactor {singlePartitionFactor}%). Skipping partitioning.", LogType.Debug);
                 return (1, documentCount);
             }
 
