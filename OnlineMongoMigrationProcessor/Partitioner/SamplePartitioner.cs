@@ -120,10 +120,15 @@ namespace OnlineMongoMigrationProcessor
             {
                 log.WriteLine($"Skipping DataType filtering for {collection.CollectionNamespace} as only one _id type is present: {dataType}", LogType.Info);
             }
+
+            // Surface the counting step in the monitor so a long-running count on a large or
+            // filtered collection isn't mistaken for a hang. This runs before $sample.
+            if (hasUserFilter)
+                log.WriteLine($"Counting documents in {collection.CollectionNamespace} matching the user filter; this can take a while on large collections...");
+            else if (skipDataTypeFilter)
+                log.WriteLine($"Counting documents in {collection.CollectionNamespace}; this can take a while on large collections...");
             else
-            {
-                log.ShowInMonitor($"Counting documents in {collection.CollectionNamespace}. Sampling data where _id is {dataType}");
-            }
+                log.WriteLine($"Counting documents in {collection.CollectionNamespace} where _id is {dataType}...");
             try
             {
                 docCountByType = 0;
@@ -165,7 +170,27 @@ namespace OnlineMongoMigrationProcessor
                         MigrationJobContext.AddVerboseLog($"SamplePartitioner.GetDocumentCountByDataType in Ex: collection={collection.CollectionNamespace}, docCountByType={docCountByType}, dataType={dataType}, optimizeForObjectId={optimizeForObjectId}, userFilter={userFilter}");
                     }
                     else
-                        return null;
+                    {
+                        // A filtered exact count is a full scan that can time out on very large
+                        // collections. The count only sizes partitioning (how many chunks/samples to
+                        // create), so an approximate value is acceptable — degrade to the previously
+                        // computed collection count (estimatedDocumentCount/collStats seed) and continue
+                        // instead of aborting. This may over-estimate because the seed counts the whole
+                        // collection rather than the filtered subset; that only creates extra chunks and
+                        // sparse/empty ranges are skipped downstream, so no data is lost.
+                        long seededCount = migrationUnit.EstimatedDocCount > 0 ? migrationUnit.EstimatedDocCount : migrationUnit.ActualDocCount;
+                        if (seededCount > 0)
+                        {
+                            docCountByType = seededCount;
+                            log.WriteLine($"Using previously computed collection document count ({docCountByType}) for {collection.CollectionNamespace} due to error/timeout counting filtered documents.");
+                            MigrationJobContext.AddVerboseLog($"SamplePartitioner.GetDocumentCountByDataType filtered fallback: collection={collection.CollectionNamespace}, docCountByType={docCountByType}, dataType={dataType}, userFilter={userFilter}");
+                        }
+                        else
+                        {
+                            log.WriteLine($"Unable to count filtered documents in {collection.CollectionNamespace} and no seed count is available; skipping partitioning.", LogType.Warning);
+                            return null;
+                        }
+                    }
                 }
 
                 if (docCountByType == 0)
@@ -815,7 +840,10 @@ namespace OnlineMongoMigrationProcessor
             }
             else
             {
-                var options = new CountOptions { MaxTime = TimeSpan.FromSeconds(60000) }; //keep it very high for large collections
+                // Bounded so a filtered/unfiltered exact count on a very large collection can't block
+                // partitioning indefinitely. Callers degrade to an estimated/seed count on timeout;
+                // an approximate count is fine because it only sizes chunk/sample counts.
+                var options = new CountOptions { MaxTime = TimeSpan.FromSeconds(600) };
 #pragma warning disable CS0618 // Type or member is obsolete
                 var count = collection.Count(matchCondition, options); //using count as its faster, we don't need accurate numbers
 #pragma warning restore CS0618 // Type or member is obsolete

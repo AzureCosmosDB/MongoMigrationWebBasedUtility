@@ -214,124 +214,122 @@ namespace OnlineMongoMigrationProcessor.Helpers
         public static double CalculateOverallPercentFromAllChunks(MigrationUnit mu, bool isRestore, Log log)
         {
             MigrationJobContext.AddVerboseLog($"PercentageUpdater.CalculateOverallPercentFromAllChunks: mu={mu.DatabaseName}.{mu.CollectionName}, isRestore={isRestore} isDumpComplete={mu.DumpComplete} isRestoreComplete={mu.RestoreComplete} dumpPercent={mu.DumpPercent} restorePercent={mu.RestorePercent}");
-            double totalPercent = 0;
 
-            // Calculate effective doc count per chunk: use DumpQueryDocCount, falling back to
-            // RestoredSuccessDocCount or DumpResultDocCount for chunks that completed without
-            // a persisted DumpQueryDocCount (e.g. paused before save on a prior run).
+            int totalChunks = mu.MigrationChunks?.Count ?? 0;
+            if (totalChunks == 0) return 0;
+
+            // Tally how many chunks have a usable document count and their running total.
             long totalDocsFromChunks = 0;
             long chunksWithDocCount = 0;
-            if (mu.MigrationChunks != null)
+            foreach (var c in mu.MigrationChunks)
             {
-                foreach (var c in mu.MigrationChunks)
+                long eff = GetEffectiveDocCount(c);
+                if (eff > 0)
                 {
-                    long eff = c.DumpQueryDocCount;
-                    if (eff == 0)
-                        eff = Math.Max(c.RestoredSuccessDocCount, c.DumpResultDocCount);
-                    if (eff > 0)
-                    {
-                        chunksWithDocCount++;
-                        totalDocsFromChunks += eff;
-                    }
+                    chunksWithDocCount++;
+                    totalDocsFromChunks += eff;
                 }
             }
-            long totalDocsFromUnit = Helper.GetMigrationUnitDocCount(mu);
 
-            // Use the collection-level doc count when not all chunks have DumpQueryDocCount set yet.
-            // Otherwise the percentage inflates to 100% based on only the started chunks.
-            long totalDocs;
-            if (chunksWithDocCount > 0 && chunksWithDocCount < (mu.MigrationChunks?.Count ?? 0))
+            // When not every chunk has reported a document count yet, the doc-count denominator is
+            // incomplete. Doc-weighting would then be non-monotonic — it can momentarily reach 100%
+            // using only the chunks started so far, then regress as later chunks report their sizes
+            // (common on filtered migrations where ActualDocCount is 0 and many chunks fall outside
+            // the filter range). Fall back to equal-weight, chunk-count based progress, which climbs
+            // monotonically. This applies equally to dump (download) and restore (upload).
+            if (chunksWithDocCount < totalChunks)
             {
-                totalDocs = Math.Max(totalDocsFromChunks, totalDocsFromUnit);
-            }
-            else if (totalDocsFromChunks > 0)
-            {
-                totalDocs = totalDocsFromChunks;
-            }
-            else
-            {
-                totalDocs = totalDocsFromUnit;
+                return CalculateChunkWeightedPercent(mu, isRestore);
             }
 
-            if (totalDocs == 0) return 0;
+            // Every chunk has a document count: weight by real document counts for an accurate
+            // percentage. (totalDocsFromChunks is guaranteed > 0 here since every chunk has eff > 0.)
+            return CalculateDocWeightedPercent(mu, isRestore, totalDocsFromChunks);
+        }
 
-            string strLog;
+        /// <summary>
+        /// Effective document count for a chunk: the queried count, falling back to the restored or
+        /// dumped count for chunks that completed on a prior run without persisting DumpQueryDocCount.
+        /// </summary>
+        private static long GetEffectiveDocCount(MigrationChunk c)
+        {
+            long eff = c.DumpQueryDocCount;
+            if (eff == 0)
+                eff = Math.Max(c.RestoredSuccessDocCount, c.DumpResultDocCount);
+            return eff;
+        }
+
+        /// <summary>
+        /// Whether a chunk has finished the given operation (restore = uploaded, dump = downloaded).
+        /// </summary>
+        private static bool IsChunkComplete(MigrationChunk c, bool isRestore)
+            => isRestore ? c.IsUploaded == true : c.IsDownloaded == true;
+
+        /// <summary>
+        /// Progress of a single chunk (0-100) for the given operation. Completed chunks return 100,
+        /// in-progress chunks are prorated by processed/effective document count, and not-started or
+        /// empty chunks return 0.
+        /// </summary>
+        private static double GetChunkProgressPercent(MigrationChunk c, bool isRestore)
+        {
+            if (IsChunkComplete(c, isRestore))
+                return 100;
+
+            long effectiveDocCount = GetEffectiveDocCount(c);
+            if (effectiveDocCount == 0)
+                return 0;
+
             if (isRestore)
             {
-                strLog = "RestoredSuccessDocCount/DumpQueryDocCount - ChunkPercent - Contrib - TotalPercent";
+                if (c.RestoredSuccessDocCount <= 0)
+                    return 0;
+                // Restore target is bounded by what was actually dumped for this chunk.
+                long chunkTarget = Math.Min(effectiveDocCount, c.DumpResultDocCount > 0 ? c.DumpResultDocCount : effectiveDocCount);
+                return Math.Min(100, (double)c.RestoredSuccessDocCount / chunkTarget * 100);
             }
-            else
+
+            if (c.DumpResultDocCount <= 0)
+                return 0;
+            return Math.Min(100, (double)c.DumpResultDocCount / effectiveDocCount * 100);
+        }
+
+        /// <summary>
+        /// Equal-weight, chunk-count based progress: each chunk contributes 1/totalChunks of the
+        /// overall percentage. Used when the document-count denominator is incomplete so the result
+        /// stays monotonic. Works for both dump and restore via <paramref name="isRestore"/>.
+        /// </summary>
+        private static double CalculateChunkWeightedPercent(MigrationUnit mu, bool isRestore)
+        {
+            int totalChunks = mu.MigrationChunks?.Count ?? 0;
+            if (totalChunks == 0) return 0;
+
+            double totalPercent = 0;
+            foreach (var c in mu.MigrationChunks)
             {
-                strLog = "DumpResultDocCount/DumpQueryDocCount - ChunkPercent - Contrib - TotalPercent";
+                totalPercent += GetChunkProgressPercent(c, isRestore) / totalChunks;
             }
+            return Math.Min(100, totalPercent);
+        }
 
-            for (int i = 0; i < mu.MigrationChunks.Count; i++)
+        /// <summary>
+        /// Document-weighted progress: each chunk contributes its share of the total document count.
+        /// Used when every chunk has reported a document count so the denominator is complete and the
+        /// percentage is accurate. Works for both dump and restore via <paramref name="isRestore"/>.
+        /// </summary>
+        private static double CalculateDocWeightedPercent(MigrationUnit mu, bool isRestore, long totalDocs)
+        {
+            if (totalDocs <= 0 || mu.MigrationChunks == null) return 0;
+
+            double totalPercent = 0;
+            foreach (var c in mu.MigrationChunks)
             {
-                var c = mu.MigrationChunks[i];
-
-                // Determine effective doc count for this chunk.
-                // DumpQueryDocCount can be 0 if the chunk was dumped/restored by a prior run
-                // whose DumpQueryDocCount was never persisted (e.g. paused before save).
-                // Fall back to RestoredSuccessDocCount or DumpResultDocCount so completed
-                // chunks still contribute to the overall percentage.
-                long effectiveDocCount = c.DumpQueryDocCount;
+                long effectiveDocCount = GetEffectiveDocCount(c);
                 if (effectiveDocCount == 0)
-                {
-                    effectiveDocCount = Math.Max(c.RestoredSuccessDocCount, c.DumpResultDocCount);
-                }
-
-                if (effectiveDocCount == 0)
-                {
-                    strLog = $"{strLog}\n [{i}] Empty";
-                    continue;
-                }
+                    continue; // genuinely empty chunk: contributes no documents
 
                 double chunkContrib = (double)effectiveDocCount / totalDocs;
-                double chunkPercent = 0;
-
-                if (isRestore)
-                {
-                    if (c.IsUploaded == true)
-                    {
-                        // Completed chunk: 100%
-                        totalPercent += 100 * chunkContrib;
-                        chunkPercent = 100;
-                    }
-                    else if (c.RestoredSuccessDocCount > 0)
-                    {
-                        // In-progress chunk: calculate from restored count
-                        long chunkTarget = Math.Min(effectiveDocCount, c.DumpResultDocCount > 0 ? c.DumpResultDocCount : effectiveDocCount);
-                        chunkPercent = Math.Min(100, (double)c.RestoredSuccessDocCount / chunkTarget * 100);
-                        totalPercent += chunkPercent * chunkContrib;
-                    }
-                    // else: not started, contributes 0%
-
-                    strLog = $"{strLog}\n [{i}] {c.RestoredSuccessDocCount}/{effectiveDocCount} - {chunkPercent:F2} - {chunkContrib:F4} - {totalPercent:F2}";
-                }
-                else // Dump
-                {
-                    if (c.IsDownloaded == true)
-                    {
-                        // Completed chunk: 100%
-                        totalPercent += 100 * chunkContrib;
-                        chunkPercent = 100;
-                    }
-                    else if (c.DumpResultDocCount > 0)
-                    {
-                        // In-progress chunk: calculate from dumped count
-                        chunkPercent = Math.Min(100, (double)c.DumpResultDocCount / effectiveDocCount * 100);
-                        totalPercent += chunkPercent * chunkContrib;
-                    }
-                    // else: not started, contributes 0%
-
-                    strLog = $"{strLog}\n [{i}] {c.DumpResultDocCount}/{effectiveDocCount} - {chunkPercent:F2} - {chunkContrib:F4} - {totalPercent:F2}";
-                }
+                totalPercent += GetChunkProgressPercent(c, isRestore) * chunkContrib;
             }
-
-            string operationType = isRestore ? "Restore" : "Dump";
-            // Uncomment the line below to enable detailed logging of percentage calculations for each chunk
-            //MigrationJobContext.AddVerboseLog($"{mu.DatabaseName}.{mu.CollectionName} {operationType} Total: {totalPercent:F2}%\n{strLog}");
-
             return Math.Min(100, totalPercent);
         }
 
