@@ -219,68 +219,26 @@ namespace OnlineMongoMigrationProcessor
                     && !usePaginationPartitioner;
                 int oversampleFactor = willUseDollarSample ? SampleOversampleFactor : 1;
 
-                // chunkCount and segmentCount are derived purely from the per-job math that
-                // MigrationWorker.CalculatePartitioningStrategy already encoded into
-                // minDocsPerChunk. The 5% $sample cap lives in CalculatePartitioningStrategy;
-                // here we only enforce MinDocsPerSegment (drive segments down when a chunk
-                // is too small to split MaxSegments ways).
-                if (optimizeForMongoDump)
-                {
-                    // DumpAndRestore: 1 segment per chunk. $sample oversamples 10x when
-                    // the $sample path is in use; the quantile-select step in
-                    // GetChunkBoundariesGeneral collapses it back down to chunkCount.
-                    // Segments=1 means the chunk IS the unit of work, so MinDocsPerSegment
-                    // applies to the chunk directly.
-                    chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
-                    int dumpChunkFloor = (int)Math.Max(1L, docCountByType / GetMinDocsPerChunk(docCountByType, config.PartitionFactor));
-                    if (chunkCount > dumpChunkFloor)
-                    {
-                        chunkCount = dumpChunkFloor;
-                    }
-                    segmentCount = 1;
-                    sampleCount = (int)Math.Min((long)chunkCount * oversampleFactor, int.MaxValue);
-                    if (willUseDollarSample && hasUserFilter)
-                    {
-                        // $sample size hard-capped to keep top-k sort bounded; effective
-                        // oversample factor drops (down to 1x) as chunks*segs approaches the cap.
-                        sampleCount = Math.Min(sampleCount, GetMaxSamples(true));
-                    }
+                // chunkCount / segmentCount / sampleCount are derived from the per-type
+                // document count via the shared DeriveChunkStrategy helper (DumpAndRestore vs
+                // MongoDriver rules). The same helper is reused by GetChunkBoundariesGeneral's
+                // timeout fallback so an unfiltered re-sample reproduces the exact partitioning
+                // the collection would get with no filter at all. With a user filter the $sample
+                // size is capped small because a filtered $sample is an expensive full-scan +
+                // top-k sort.
+                bool applyFilteredSampleCap = willUseDollarSample && hasUserFilter;
+                var strategy = DeriveChunkStrategy(docCountByType, minDocsPerChunk, optimizeForMongoDump, oversampleFactor, applyFilteredSampleCap, config);
+                chunkCount = strategy.chunkCount;
+                segmentCount = strategy.segmentCount;
+                sampleCount = strategy.sampleCount;
 
-                    MigrationJobContext.AddVerboseLog($"SamplePartitioner DumpAndRestore: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, sampleCount={sampleCount}, oversample={oversampleFactor}");
-                }
-                else
-                {
-                    // MongoDriver: chunkCount comes from the pre-divided dump count
-                    // (minDocsPerChunk already reflects the /MaxSegments grouping done in
-                    // CalculatePartitioningStrategy). Two floors apply, both reducing
-                    // chunkCount rather than dropping segmentCount:
-                    //   1. Every chunk must be big enough to saturate MaxSegments parallel
-                    //      segments at the tier's MinDocsPerSegment minimum, so segs stays
-                    //      pinned at MaxSegments whenever the collection itself is large
-                    //      enough to support it.
-                    //   2. Universal MinDocsPerChunk floor (tiered) as a backstop.
-                    chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCountByType / minDocsPerChunk));
-                    int maxSegmentsForColl = GetMaxSegments();
-                    int minDocsPerSegmentForColl = GetMinDocsPerSegment(docCountByType, config.PartitionFactor);
-                    long perChunkFloorForFullSegments = (long)maxSegmentsForColl * minDocsPerSegmentForColl;
-                    long perChunkFloor = Math.Max(perChunkFloorForFullSegments, GetMinDocsPerChunk(docCountByType, config.PartitionFactor));
-                    int chunkFloor = (int)Math.Max(1L, docCountByType / perChunkFloor);
-                    if (chunkCount > chunkFloor)
-                    {
-                        chunkCount = chunkFloor;
-                    }
-                    long docsPerChunk = docCountByType / chunkCount;
-                    int segmentByDocsFloor = (int)Math.Max(1L, docsPerChunk / minDocsPerSegmentForColl);
-                    segmentCount = Math.Min(maxSegmentsForColl, segmentByDocsFloor);
+                MigrationJobContext.AddVerboseLog($"SamplePartitioner strategy ({(optimizeForMongoDump ? "DumpAndRestore" : "MongoDriver")}): collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, segmentCount={segmentCount}, sampleCount={sampleCount}, oversample={oversampleFactor}, filteredSampleCap={applyFilteredSampleCap}");
 
-                    sampleCount = (int)Math.Min((long)chunkCount * segmentCount * oversampleFactor, int.MaxValue);
-                    if (willUseDollarSample && hasUserFilter)
-                    {
-                        sampleCount = Math.Min(sampleCount, GetMaxSamples(true));
-                    }
-
-                    MigrationJobContext.AddVerboseLog($"SamplePartitioner MongoDriver: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}, segmentCount={segmentCount}, sampleCount={sampleCount}, oversample={oversampleFactor}, docsPerChunk={docsPerChunk}");
-                }
+                // Collection-level count seed handed to GetChunkBoundariesGeneral. If a filtered
+                // $sample times out, the fallback needs the full (unfiltered) document count; when
+                // the exact per-type count for that also fails/times out, this seed is used as a
+                // last resort (harmless over-estimate — it only decides how many chunks to create).
+                long fullDocCountSeed = migrationUnit.EstimatedDocCount > 0 ? migrationUnit.EstimatedDocCount : migrationUnit.ActualDocCount;
 
                 MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating chunkCount: collection={collection.CollectionNamespace}, dataType={dataType}, chunkCount={chunkCount}");
 
@@ -302,7 +260,7 @@ namespace OnlineMongoMigrationProcessor
                     {
                         log.WriteLine($"Falling back to general sampler for {collection.CollectionNamespace} as ObjectId sampler failed. Details:  {ex}", LogType.Warning);
                         MigrationJobContext.AddVerboseLog($"SamplePartitioner.Calculating chunkCount: collection={collection.CollectionNamespace}, dataType={dataType}, userFilter={userFilter}, skipDataTypeFilter={skipDataTypeFilter}, sampleCount={sampleCount}, chunkCount={chunkCount}, segmentCount={segmentCount}");
-                        resultBoundaries = GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
+                        resultBoundaries = GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount, minDocsPerChunk, config, fullDocCountSeed);
                     }
                 }
                 else
@@ -315,7 +273,7 @@ namespace OnlineMongoMigrationProcessor
                     if (usePaginationPartitioner)
                         resultBoundaries = GetChunkBoundariesGeneralWithPagination(log, collection, dataType, userFilter, skipDataTypeFilter, sampleCount, segmentCount, chunkCount, docCountByType);
                     else
-                        resultBoundaries = GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount);
+                        resultBoundaries = GetChunkBoundariesGeneral(log, collection, optimizeForMongoDump, dataType, userFilter, skipDataTypeFilter, sampleCount, chunkCount, segmentCount, minDocsPerChunk, config, fullDocCountSeed);
 
                 }
 
@@ -344,7 +302,62 @@ namespace OnlineMongoMigrationProcessor
 
         }
 
-        private static ChunkBoundaries? GetChunkBoundariesGeneral(Log log, IMongoCollection<BsonDocument> collection, bool optimizeForMongoDump, DataType dataType, BsonDocument userFilter, bool skipDataTypeFilter, long sampleCount, long chunkCount, int segmentCount)
+        // Derives (chunkCount, segmentCount, sampleCount) from a document count using the same
+        // DumpAndRestore vs MongoDriver rules for both the primary path and the timeout fallback.
+        // applySampleCap caps the $sample size for the expensive filtered path (GetMaxSamples(true));
+        // pass false for the cheap unfiltered path so the full oversample is used.
+        private static (int chunkCount, int segmentCount, int sampleCount) DeriveChunkStrategy(long docCount, long minDocsPerChunk, bool optimizeForMongoDump, int oversampleFactor, bool applySampleCap, MigrationSettings config)
+        {
+            int chunkCount;
+            int segmentCount;
+            int sampleCount;
+
+            if (optimizeForMongoDump)
+            {
+                // DumpAndRestore: 1 segment per chunk. $sample oversamples 10x when the $sample
+                // path is in use; the quantile-select step in GetChunkBoundariesGeneral collapses
+                // it back down to chunkCount. Segments=1 means the chunk IS the unit of work.
+                chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCount / minDocsPerChunk));
+                int dumpChunkFloor = (int)Math.Max(1L, docCount / GetMinDocsPerChunk(docCount, config.PartitionFactor));
+                if (chunkCount > dumpChunkFloor)
+                {
+                    chunkCount = dumpChunkFloor;
+                }
+                segmentCount = 1;
+                sampleCount = (int)Math.Min((long)chunkCount * oversampleFactor, int.MaxValue);
+            }
+            else
+            {
+                // MongoDriver: two floors apply, both reducing chunkCount rather than dropping
+                // segmentCount: (1) every chunk must saturate MaxSegments parallel segments at the
+                // tier's MinDocsPerSegment minimum; (2) universal MinDocsPerChunk floor as backstop.
+                chunkCount = Math.Max(1, (int)Math.Ceiling((double)docCount / minDocsPerChunk));
+                int maxSegmentsForColl = GetMaxSegments();
+                int minDocsPerSegmentForColl = GetMinDocsPerSegment(docCount, config.PartitionFactor);
+                long perChunkFloorForFullSegments = (long)maxSegmentsForColl * minDocsPerSegmentForColl;
+                long perChunkFloor = Math.Max(perChunkFloorForFullSegments, GetMinDocsPerChunk(docCount, config.PartitionFactor));
+                int chunkFloor = (int)Math.Max(1L, docCount / perChunkFloor);
+                if (chunkCount > chunkFloor)
+                {
+                    chunkCount = chunkFloor;
+                }
+                long docsPerChunk = docCount / chunkCount;
+                int segmentByDocsFloor = (int)Math.Max(1L, docsPerChunk / minDocsPerSegmentForColl);
+                segmentCount = Math.Min(maxSegmentsForColl, segmentByDocsFloor);
+                sampleCount = (int)Math.Min((long)chunkCount * segmentCount * oversampleFactor, int.MaxValue);
+            }
+
+            if (applySampleCap)
+            {
+                // $sample size hard-capped to keep the filtered top-k sort bounded; effective
+                // oversample factor drops (down to 1x) as chunks*segs approaches the cap.
+                sampleCount = Math.Min(sampleCount, GetMaxSamples(true));
+            }
+
+            return (chunkCount, segmentCount, sampleCount);
+        }
+
+        private static ChunkBoundaries? GetChunkBoundariesGeneral(Log log, IMongoCollection<BsonDocument> collection, bool optimizeForMongoDump, DataType dataType, BsonDocument userFilter, bool skipDataTypeFilter, long sampleCount, long chunkCount, int segmentCount, long minDocsPerChunk, MigrationSettings config, long fullDocCountSeed)
         {
             ChunkBoundaries chunkBoundaries = new ChunkBoundaries();
 
@@ -369,32 +382,24 @@ namespace OnlineMongoMigrationProcessor
                 return chunkBoundaries;
             }
 
+            bool hasUserFilter = userFilter != null && userFilter.ElementCount > 0;
             BsonDocument matchCondition = BuildDataTypeCondition(dataType, userFilter, skipDataTypeFilter);
 
             // Step 2: Sample the data
+            // NOTE: The "Sampling ... with N samples" line is logged per attempt inside the
+            // loop below (not here), so that after a timeout fallback it reflects the updated
+            // (uncapped) sample size actually used rather than the initial capped value.
 
-            if (skipDataTypeFilter)
-            {
-                log.WriteLine($"Sampling {collection.CollectionNamespace} (DataType filtering bypassed) with {sampleCount} samples, Chunk Count: {chunkCount}");
-            }
-            else
-            {
-                log.WriteLine($"Sampling {collection.CollectionNamespace} for data where _id is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
-            }
+            // Builds the $sample pipeline from a match condition. Used to swap the filtered
+            // pipeline for an unfiltered one if the filtered $sample times out (see below).
+            var pipeline = BuildSamplePipeline(matchCondition, sampleCount);
 
-
-            var pipelineStages = new List<BsonDocument>();
-
-            // Only add $match stage if matchCondition is not empty
-            if (matchCondition != null && matchCondition.ElementCount > 0)
-            {
-                pipelineStages.Add(new BsonDocument("$match", matchCondition));
-            }
-
-            pipelineStages.Add(new BsonDocument("$sample", new BsonDocument("size", sampleCount)));
-            pipelineStages.Add(new BsonDocument("$project", new BsonDocument("_id", 1)));
-
-            var pipeline = pipelineStages.ToArray();
+            // With a user filter, $sample falls back to a full-scan + top-k sort that can run
+            // for hours on very large collections. Cap that path at 20 minutes; on timeout we
+            // drop the user filter and sample the whole collection instead. The unfiltered
+            // samples are still queried with the user filter downstream, so there is no loss
+            // of functionality. Without a user filter, keep the original long window.
+            bool droppedUserFilterForSampling = false;
 
             List<BsonValue> partitionValues = new List<BsonValue>();
             for (int i = 0; i < 10; i++)
@@ -403,10 +408,23 @@ namespace OnlineMongoMigrationProcessor
                 {
                     AggregateOptions options = new AggregateOptions
                     {
-                        MaxTime = TimeSpan.FromSeconds(3600 * 10)
+                        MaxTime = hasUserFilter && !droppedUserFilterForSampling
+                            ? TimeSpan.FromMinutes(20)
+                            : TimeSpan.FromSeconds(3600 * 10)
                     };
+
+                    if (skipDataTypeFilter)
+                    {
+                        log.WriteLine($"Sampling {collection.CollectionNamespace} (DataType filtering bypassed) with {sampleCount} samples, Chunk Count: {chunkCount}");
+                    }
+                    else
+                    {
+                        log.WriteLine($"Sampling {collection.CollectionNamespace} for data where _id is {dataType} with {sampleCount} samples, Chunk Count: {chunkCount}");
+                    }
+
                     log.ShowInMonitor($"Running $sample on {collection.CollectionNamespace} (size={sampleCount}); this can take several minutes for large collections...");
                     var sampleStartedAt = DateTime.UtcNow;
+
                     var sampledData = collection.Aggregate<BsonDocument>(pipeline, options).ToList();
                     var sampleElapsed = DateTime.UtcNow - sampleStartedAt;
                     log.ShowInMonitor($"$sample on {collection.CollectionNamespace} returned {sampledData.Count} document(s) in {sampleElapsed.TotalSeconds:F1}s; computing chunk boundaries...");
@@ -421,6 +439,62 @@ namespace OnlineMongoMigrationProcessor
                 }
                 catch (Exception ex)
                 {
+                    // If the filtered $sample timed out, drop the user filter and retry against
+                    // the whole collection. Boundaries may be slightly less aligned with the
+                    // filtered subset, but the samples are re-filtered when the chunks are read.
+                    if (hasUserFilter && !droppedUserFilterForSampling && IsTimeoutError(ex))
+                    {
+                        droppedUserFilterForSampling = true;
+
+                        // The filtered $sample was capped small (GetMaxSamples(true)) and its chunk
+                        // count reflected only the filtered subset. Now that we sample the whole
+                        // collection the $sample is cheap again, so re-derive the partitioning from
+                        // the FULL, unfiltered document count — this reproduces the exact chunk /
+                        // sample counts the collection would get with no filter at all (rather than
+                        // the coarser filtered chunk count). The unfiltered samples are re-filtered
+                        // downstream, so there is no loss of functionality.
+                        //
+                        // We must NOT use the collection-level estimated count when a dataType filter
+                        // is active (skipDataTypeFilter == false), because the estimate spans all _id
+                        // types and would overcount this type. Do an exact per-type count in that
+                        // case; only when the dataType filter is bypassed is the metadata estimate
+                        // (whole-collection count) safe to use.
+                        //
+                        // That exact per-type count is itself a full scan (high MaxTime) that can time
+                        // out on the same very large collection whose filtered $sample just timed out.
+                        // Mirror the initial-count fallback: on failure use the collection-level
+                        // estimate seed rather than aborting. Over-estimating is harmless here — it
+                        // only decides how many chunks to create.
+                        long fullDocCount = 0;
+                        try
+                        {
+                            fullDocCount = GetDocumentCountByDataType(collection, dataType, useEstimate: skipDataTypeFilter, userFilter: null, skipDataTypeFilter: skipDataTypeFilter);
+                        }
+                        catch (Exception countEx)
+                        {
+                            log.WriteLine($"{collection.CollectionNamespace} exact unfiltered count for the $sample timeout fallback failed; using estimated count {fullDocCountSeed}. Details: {countEx.Message}", LogType.Warning);
+                            fullDocCount = fullDocCountSeed;
+                        }
+                        if (fullDocCount <= 0)
+                        {
+                            fullDocCount = fullDocCountSeed;
+                        }
+
+                        if (fullDocCount > 0)
+                        {
+                            var fallback = DeriveChunkStrategy(fullDocCount, minDocsPerChunk, optimizeForMongoDump, SampleOversampleFactor, applySampleCap: false, config);
+                            chunkCount = fallback.chunkCount;
+                            segmentCount = fallback.segmentCount;
+                            sampleCount = fallback.sampleCount;
+                        }
+
+                        matchCondition = BuildDataTypeCondition(dataType, null, skipDataTypeFilter);
+                        pipeline = BuildSamplePipeline(matchCondition, sampleCount);
+                        log.WriteLine($"{collection.CollectionNamespace} filtered $sample timed out after 20 minutes. Retrying without the user filter using the full document count {fullDocCount} (chunks {chunkCount}, sample size {sampleCount}); unfiltered samples are re-filtered downstream.", LogType.Warning);
+                        log.ShowInMonitor($"Filtered $sample on {collection.CollectionNamespace} timed out; retrying without the user filter (chunks {chunkCount}, sample size {sampleCount})...", LogType.Warning);
+                        continue;
+                    }
+
                     if (skipDataTypeFilter)
                     {
                         log.WriteLine($"{collection.CollectionNamespace} encountered error in attempt {i} while sampling data (DataType filtering bypassed): {ex}");
@@ -626,6 +700,33 @@ namespace OnlineMongoMigrationProcessor
             var message = ex.ToString();
             return message.IndexOf("UuidLegacy", StringComparison.OrdinalIgnoreCase) >= 0
                 && message.IndexOf("Length must be 16", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // Detects a server-side MaxTime ($sample MaxTimeMS) timeout so the caller can fall
+        // back to an unfiltered sample.
+        private static bool IsTimeoutError(Exception ex)
+        {
+            if (ex is MongoExecutionTimeoutException)
+                return true;
+
+            var message = ex.ToString();
+            return message.IndexOf("MaxTimeMSExpired", StringComparison.OrdinalIgnoreCase) >= 0
+                || message.IndexOf("operation exceeded time limit", StringComparison.OrdinalIgnoreCase) >= 0
+                || message.IndexOf("ExceededTimeLimit", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        // Builds the $sample pipeline from a match condition. Used to swap the filtered
+        // pipeline for an unfiltered one if the filtered $sample times out.
+        private static BsonDocument[] BuildSamplePipeline(BsonDocument condition, long sampleCount)
+        {
+            var stages = new List<BsonDocument>();
+            if (condition != null && condition.ElementCount > 0)
+            {
+                stages.Add(new BsonDocument("$match", condition));
+            }
+            stages.Add(new BsonDocument("$sample", new BsonDocument("size", sampleCount)));
+            stages.Add(new BsonDocument("$project", new BsonDocument("_id", 1)));
+            return stages.ToArray();
         }
 
         private static ChunkBoundaries? GetChunkBoundariesForObjectId(Log log, IMongoCollection<BsonDocument> collection, bool optimizeForMongoDump, int sampleCount, int segmentCount, BsonDocument userFilter, MigrationSettings config, long collectionTotalDocCount)
