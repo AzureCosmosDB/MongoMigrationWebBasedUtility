@@ -22,7 +22,7 @@ Two PowerShell scripts are provided for different deployment scenarios:
 
 ## Prerequisites
 
-**Note**: This guide assumes you have cloned the repository to `c:\Work\GitHub\repos\MongoMigrationWebBasedUtility`.
+**Note**: Run the commands from your local clone of this repository.
 
 - Azure CLI installed and logged in (`az login`)
 - An Azure subscription with appropriate permissions
@@ -54,53 +54,53 @@ For a streamlined deployment experience, use the provided PowerShell script:
 
 ```powershell
 # Navigate to the repository directory
-cd c:\Work\GitHub\repos\MongoMigrationWebBasedUtility
+cd <repository-path>
 
 # Minimal deployment (auto-generates ACR, Storage, StateStoreAppID, and AcrRepository)
 # NOTE: ContainerAppName must use lowercase letters, numbers, and hyphens only (no underscores)
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "MongoMigrationRGTest" `
-  -ContainerAppName "mongomigration" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -Location "<location>" `
   -OwnerTag "yourname@company.com"
 
 # Full deployment with custom names and existing resources
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "MongoMigrationRGTest" `
-  -ContainerAppName "mongomigration" `
-  -AcrName "mongomigrationacr" `
-  -AcrRepository "myapp" `
-  -StorageAccountName "mongomigstg" `
-  -StateStoreAppID "aca_server1" `
-  -Location "eastus" `
-  -ImageTag "latest" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrRepository "<acr-repository>" `
+  -StorageAccountName "<storage-account-name>" `
+  -StateStoreAppID "<state-store-app-id>" `
+  -Location "<location>" `
+  -ImageTag "<image-tag>" `
   -OwnerTag "yourname@company.com"
 
 # Deployment with VNet integration (Environment must be created with VNet from day one)
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "MongoMigrationRGTest" `
-  -ContainerAppName "mongomigration" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -Location "<location>" `
   -OwnerTag "yourname@company.com" `
   -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
 
 # Deployment with Entra ID (Managed Identity) for Azure Blob Storage
 # Use this when your organization blocks storage account key-based access
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "MongoMigrationRGTest" `
-  -ContainerAppName "mongomigration" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -Location "<location>" `
   -OwnerTag "yourname@company.com" `
   -UseEntraIdForAzureStorage
 
 # Deployment with existing ACR in different region
 # Use this when you have a centralized ACR in one region but want to deploy Container App to another region
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "MongoMigrationRGTest" `
-  -ContainerAppName "mongomigration-westus" `
-  -AcrName "centralizedacr" `
-  -AcrLocation "eastus" `
-  -Location "westus2" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrLocation "<acr-location>" `
+  -Location "<location>" `
   -OwnerTag "yourname@company.com"
 ```
 
@@ -108,7 +108,7 @@ cd c:\Work\GitHub\repos\MongoMigrationWebBasedUtility
 - If ACR exists, the script uses it; otherwise creates a new one
 - If Storage Account exists, the script uses it; otherwise creates a new one
 - If the specified image:tag exists in ACR, the script skips building and uses it directly
-- Auto-generated names use the format: `<ContainerAppName><suffix>` (e.g., `mongomigrationacr`, `mongomigrationstg`)
+- Auto-generated names use the format: `<container-app-name><suffix>`.
 
 The script will:
 1. Deploy infrastructure using Bicep (ACR, Container Apps Environment, Storage Account)
@@ -124,17 +124,25 @@ After initial deployment, use the update script for faster deployments:
 ```powershell
 # Minimal update (uses same ACR and repository as initial deployment)
 .\update-aca-app.ps1 `
-  -ResourceGroupName "MongoMigrationRGProd" `
-  -ContainerAppName "mongomigration-prod" `
-  -AcrName "mongomigprod1234"
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>"
 
 # Update with custom repository and tag
 .\update-aca-app.ps1 `
-  -ResourceGroupName "MongoMigrationRGProd" `
-  -ContainerAppName "mongomigration-prod" `
-  -AcrName "mongomigprod1234" `
-  -AcrRepository "customrepo" `
-  -ImageTag "v1.1"
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrRepository "<acr-repository>" `
+  -ImageTag "<image-tag>"
+
+# Update through an existing ACR private endpoint
+.\update-aca-app.ps1 `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -ImageTag "<image-tag>" `
+  -UsePrivateAcr
 ```
 
 **Using Existing Images:**
@@ -195,7 +203,7 @@ Build your Docker image directly in Azure Container Registry:
 
 ```powershell
 # Navigate to the repository root
-cd c:\Work\GitHub\repos\MongoMigrationWebBasedUtility
+cd <repository-path>
 
 # Build and push the image to ACR
 az acr build `
@@ -231,9 +239,9 @@ Remove-Variable connString, secureConnString
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `ResourceGroupName` | Name of the Azure resource group | `MongoMigrationRG` |
-| `ContainerAppName` | Name of the Container App | `mongomigration` |
-| `Location` | Azure region (must support Container Apps) | `eastus` |
+| `ResourceGroupName` | Name of the Azure resource group | `<resource-group-name>` |
+| `ContainerAppName` | Name of the Container App | `<container-app-name>` |
+| `Location` | Azure region (must support Container Apps) | `<location>` |
 | `OwnerTag` | Owner tag required by Azure Policy | `yourname@company.com` |
 
 ### Optional Parameters
@@ -251,6 +259,13 @@ Remove-Variable connString, secureConnString
 | `MemoryGB` | int | `32` (range: 2-64) | Memory in GB for the container. |
 | `InfrastructureSubnetResourceId` | string | `""` (empty) | Resource ID of the subnet for VNet integration. **Must be provided at environment creation time**. See [VNet Integration](#vnet-integration) section. |
 | `UseEntraIdForAzureStorage` | switch | `$false` | Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When enabled, no volume is mounted and the app uses `BlobServiceClient` with Managed Identity. **Required when using `StorageAccountResourceId`.** **Recommended when your organization blocks storage account key-based access**. |
+| `UsePrivateAcr` | switch | `$false` | Create an ACR private endpoint and configure private DNS after the initial image is deployed. Uses the Premium ACR SKU. |
+| `AcrPrivateEndpointSubnetResourceId` | string | `""` (empty) | Dedicated private-endpoint subnet resource ID. Required with `UsePrivateAcr` and must differ from the Container Apps infrastructure subnet. |
+| `AcrPrivateDnsVnetResourceId` | string | Container Apps VNet | VNet resource ID to link to `privatelink.azurecr.io`. Override for hub/spoke networking. |
+| `AcrPrivateDnsZoneResourceGroup` | string | `ResourceGroupName` | Resource group in which to create or reuse the ACR private DNS zone. |
+| `DisableAcrPublicAccess` | switch | `$false` | Disable ACR public network access after Private Link is configured. Requires `UsePrivateAcr`. |
+
+The update script also accepts `-UsePrivateAcr` to require an approved ACR private endpoint, verify that `privatelink.azurecr.io` is linked to the Container Apps VNet, and validate the new revision. Private endpoint and DNS resources must already have been configured by the initial deployment. Public ACR access remains enabled for image publishing unless `-DisableAcrPublicAccess` is explicitly supplied.
 
 ## Naming Constraints
 
@@ -272,15 +287,9 @@ Remove-Variable connString, secureConnString
   - Alphanumeric characters only
   - Must be globally unique
 
-**Example Valid Names:**
+**Name format:**
 ```powershell
-# ✅ Valid
--ContainerAppName "mongomigration-prod"        # Generates env: mongomigration-prod-env-D8
--ContainerAppName "mongo-mig-app-01"           # Generates env: mongo-mig-app-01-env-D16
-
-# ❌ Invalid
--ContainerAppName "mongo_migration"            # Underscore not allowed
--ContainerAppName "MongoMigration"             # Uppercase not recommended
+-ContainerAppName "<lowercase-container-app-name>"
 ```
 
 ## Resource Configurations
@@ -332,24 +341,24 @@ Azure Container Apps with Dedicated Plan provides configurable high-performance 
 ```powershell
 # Minimal deployment - auto-generates ACR, Storage, and StateStore names
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-dev" `
-  -ContainerAppName "mongomigration-dev" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -Location "<location>" `
   -VCores 4 `
   -MemoryGB 16 `
-  -ImageTag "dev"
+  -ImageTag "<image-tag>"
 
 # Or with custom names to use existing resources
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-dev" `
-  -ContainerAppName "mongomigration-dev" `
-  -AcrName "mongomigdevacr" `
-  -StorageAccountName "mongomigdevstg" `
-  -StateStoreAppID "dev-migration-01" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -StorageAccountName "<storage-account-name>" `
+  -StateStoreAppID "<state-store-app-id>" `
+  -Location "<location>" `
   -VCores 4 `
   -MemoryGB 16 `
-  -ImageTag "dev"
+  -ImageTag "<image-tag>"
 ```
 
 ### High-Performance Migration Setup (Large Workload)
@@ -357,51 +366,51 @@ Azure Container Apps with Dedicated Plan provides configurable high-performance 
 ```powershell
 # Deploy with maximum resources - reuse existing ACR and storage
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-perf" `
-  -ContainerAppName "mongomigration-perf" `
-  -AcrName "sharedproductionacr" `
-  -AcrRepository "mongomig-perf" `
-  -StorageAccountName "sharedprodstg" `
-  -StateStoreAppID "perf-migration-01" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrRepository "<acr-repository>" `
+  -StorageAccountName "<storage-account-name>" `
+  -StateStoreAppID "<state-store-app-id>" `
+  -Location "<location>" `
   -VCores 32 `
   -MemoryGB 64 `
-  -ImageTag "v1.0"
+  -ImageTag "<image-tag>"
 
 # With VNet integration for enhanced security
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-perf" `
-  -ContainerAppName "mongomigration-perf" `
-  -AcrName "sharedproductionacr" `
-  -AcrRepository "mongomig-perf" `
-  -StorageAccountName "sharedprodstg" `
-  -StateStoreAppID "perf-migration-01" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrRepository "<acr-repository>" `
+  -StorageAccountName "<storage-account-name>" `
+  -StateStoreAppID "<state-store-app-id>" `
+  -Location "<location>" `
   -VCores 32 `
   -MemoryGB 64 `
-  -ImageTag "v1.0" `
+  -ImageTag "<image-tag>" `
   -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
 
 # With Entra ID for Blob Storage (no mounted volume, uses Managed Identity)
 # Use when organization policy blocks storage account keys
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-perf" `
-  -ContainerAppName "mongomigration-perf" `
-  -AcrName "sharedproductionacr" `
-  -AcrRepository "mongomig-perf" `
-  -StorageAccountName "sharedprodstg" `
-  -StateStoreAppID "perf-migration-01" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrRepository "<acr-repository>" `
+  -StorageAccountName "<storage-account-name>" `
+  -StateStoreAppID "<state-store-app-id>" `
+  -Location "<location>" `
   -VCores 32 `
   -MemoryGB 64 `
-  -ImageTag "v1.0" `
+  -ImageTag "<image-tag>" `
   -UseEntraIdForAzureStorage
 
 # Script will:
-# - Use existing ACR "sharedproductionacr" (no creation needed)
-# - Store image in "mongomig-perf" repository within the ACR
-# - Use existing storage account "sharedprodstg" (no creation needed)
-# - Check if image v1.0 exists; if yes, skip build and deploy directly
+# - Use the existing ACR (no creation needed)
+# - Store the image in the specified repository within the ACR
+# - Use the existing storage account (no creation needed)
+# - Skip the build when the requested image tag already exists
 # - Create environment with VNet integration (if subnet provided)
 ```
 
@@ -413,31 +422,31 @@ For organizations with a centralized Azure Container Registry in one region serv
 # Deploy Container Apps in multiple regions using a centralized ACR
 # Container App in westus2, ACR in centralus
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-westus" `
-  -ContainerAppName "mongomigration-westus" `
-  -AcrName "centralizedacr" `
-  -AcrLocation "centralus" `
-  -Location "westus2" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrLocation "<acr-location>" `
+  -Location "<location>" `
   -VCores 16 `
   -MemoryGB 64 `
-  -ImageTag "v1.0" `
+  -ImageTag "<image-tag>" `
   -OwnerTag "yourname@company.com"
 
 # Container App in northeurope, same centralized ACR
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-eu" `
-  -ContainerAppName "mongomigration-eu" `
-  -AcrName "centralizedacr" `
-  -AcrLocation "centralus" `
-  -Location "northeurope" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrLocation "<acr-location>" `
+  -Location "<location>" `
   -VCores 16 `
   -MemoryGB 64 `
-  -ImageTag "v1.0" `
+  -ImageTag "<image-tag>" `
   -OwnerTag "yourname@company.com"
 
 # Script will:
-# - Use existing ACR "centralizedacr" in "centralus"
-# - Deploy Container App Environment in "westus2" (or "northeurope")
+# - Use the existing ACR in its configured region
+# - Deploy the Container App Environment in the requested region
 # - Pull container images from the centralized ACR across regions
 # - Build/push images to the ACR in centralus (only once, reused by both deployments)
 ```
@@ -457,17 +466,72 @@ For organizations with a centralized Azure Container Registry in one region serv
 
 ### ACR with Private Endpoints
 
-The deployment script is fully compatible with ACR Private Endpoints. However, **if your ACR has Private Endpoints enabled and the public endpoint is disabled**, you must run the `deploy-to-aca.ps1` script from a machine that has network access to the ACR's private endpoint.
+Use this configuration when enterprise policy requires ACR Private Link or automatically disables ACR public network access. Without the private endpoint and DNS configuration, an existing revision can continue running from its cached image, but a restart, scale operation, or new revision can fail to pull the image and leave replicas unhealthy.
 
-**Scenario: PE-enabled ACR**
-- ACR must be accessible from the machine running the script
-- If running from outside the VNet, you'll receive connection errors when the script tries to run `az acr repository show-tags` and `az acr build`
-- **Solution**: Run the script from a machine within the same VNet as the ACR's private endpoint, or temporarily enable public endpoint access during deployment
+ACR Private Link requires the Premium SKU. The deployment script selects Premium automatically when `-UsePrivateAcr` is specified.
 
-**Scenario: ACR with public endpoint enabled (default)**
-- Script can run from any machine with internet access
-- No special network configuration needed
-- Container App at runtime properly resolves to private endpoint (via VNet integration and linked private DNS zones)
+The Container Apps Environment must be VNet-integrated from its initial creation. Pass `-InfrastructureSubnetResourceId` to `deploy-to-aca.ps1`. The private endpoint must use a **different subnet** from the delegated Container Apps infrastructure subnet.
+
+> **Publishing from a public network:** The deploy and update scripts do **not** automatically enable ACR public network access when it is disabled. If the script runs from a public VM or workstation and must publish an image, enable public access before running it:
+>
+> ```powershell
+> az acr update --name <acr-name> --resource-group <resource-group-name> --public-network-enabled true
+> ```
+>
+> Run the script with `-UsePrivateAcr`. Add `-DisableAcrPublicAccess` if public access should be revoked after the private image pull succeeds. If the publishing VM uses a VNet linked to `privatelink.azurecr.io` and resolves the registry to private IP addresses, it can publish through the private endpoint without enabling public access.
+
+#### 1. Deploy with ACR Private Link
+
+Pass the Container Apps infrastructure subnet and a separate private-endpoint subnet to the initial deployment:
+
+```powershell
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ContainerAppName <container-app-name> `
+  -AcrName <acr-name> `
+  -Location <location> `
+  -OwnerTag <owner> `
+  -InfrastructureSubnetResourceId <container-apps-subnet-resource-id> `
+  -UsePrivateAcr `
+  -AcrPrivateEndpointSubnetResourceId <private-endpoint-subnet-resource-id>
+```
+
+The script builds and publishes the image through ACR Tasks first, then creates the private endpoint and links `privatelink.azurecr.io` to the Container Apps VNet before deploying the ACR-backed revision. The revision therefore resolves the registry through Private Link. The script leaves public ACR access in its current state unless `-DisableAcrPublicAccess` is supplied. If the connection is created in `Pending` state, an ACR owner must approve it before the application deployment can continue.
+
+For hub/spoke networking, pass the workload VNet resource ID with `-AcrPrivateDnsVnetResourceId`. Use `-AcrPrivateDnsZoneResourceGroup` when the private DNS zone belongs in a central networking resource group.
+
+When the VNet uses custom DNS, configure conditional forwarding for `privatelink.azurecr.io` to Azure DNS (`168.63.129.16`) through an Azure-hosted DNS forwarder. On-premises clients need VPN or ExpressRoute connectivity plus the same DNS forwarding if they must access the private registry.
+
+#### 2. Update through Private Link
+
+Use the update script with a unique image tag. It publishes the image first, verifies the approved endpoint and Container Apps VNet DNS link, then deploys the image and requires the new ACA revision to become healthy:
+
+```powershell
+.\update-aca-app.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ContainerAppName <container-app-name> `
+  -AcrName <acr-name> `
+  -ImageTag <unique-image-tag> `
+  -UsePrivateAcr
+```
+
+The unique tag forces a new image pull rather than relying on an image that may already be cached. Public ACR access does not need to be disabled: private DNS causes requests from the Container Apps VNet to resolve to the private endpoint.
+
+#### 3. Disable ACR public network access (Optional)
+
+Add `-DisableAcrPublicAccess` to the update command. The script disables public access only after the fresh revision becomes healthy:
+
+```powershell
+.\update-aca-app.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ContainerAppName <container-app-name> `
+  -AcrName <acr-name> `
+  -ImageTag <unique-image-tag> `
+  -UsePrivateAcr `
+  -DisableAcrPublicAccess
+```
+
+Microsoft reference: [Connect privately to an Azure container registry using Azure Private Link](https://learn.microsoft.com/azure/container-registry/container-registry-private-link)
 
 ### High-Performance Migration with Pre-configured PE-enabled Storage
 
@@ -476,23 +540,23 @@ The deployment script is fully compatible with ACR Private Endpoints. However, *
 # Container App: westus2
 # Storage Account (with PE):
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "rg-mongomig-perf" `
-  -ContainerAppName "mongomigration-perf" `
-  -AcrName "sharedproductionacr" `
-  -AcrRepository "mongomig-perf" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrRepository "<acr-repository>" `
   -StorageAccountResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}" `
-  -StateStoreAppID "perf-migration-01" `
-  -Location "westus2" `
-  -AcrLocation "centralus" `
+  -StateStoreAppID "<state-store-app-id>" `
+  -Location "<location>" `
+  -AcrLocation "<acr-location>" `
   -VCores 32 `
   -MemoryGB 64 `
-  -ImageTag "v1.0" `
+  -ImageTag "<image-tag>" `
   -UseEntraIdForAzureStorage `
   -OwnerTag "yourname@company.com"
 
 # Script will:
-# - Use existing ACR "sharedproductionacr" in "centralus"
-# - Store image in "mongomig-perf" repository
+# - Use the existing ACR in its configured region
+# - Store the image in the specified repository
 # - Use existing storage account "{storage-account-name}" from "{rg-name}" resource group
 # - Automatically create Managed Identity and assign role for cross-RG access   
 # - Create Container App Environment in westus2 with Blob SDK access to PE-enabled storage
@@ -531,9 +595,9 @@ Use the `-InfrastructureSubnetResourceId` parameter during initial deployment:
 ```powershell
 # Deploy with VNet integration
 .\deploy-to-aca.ps1 `
-  -ResourceGroupName "MongoMigrationRG" `
-  -ContainerAppName "mongomigration-prod" `
-  -Location "eastus" `
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -Location "<location>" `
   -VCores 16 `
   -MemoryGB 64 `
   -InfrastructureSubnetResourceId "/subscriptions/{sub-id}/resourceGroups/{rg-name}/providers/Microsoft.Network/virtualNetworks/{vnet-name}/subnets/{subnet-name}"
@@ -550,16 +614,16 @@ Use the `-InfrastructureSubnetResourceId` parameter during initial deployment:
 ```powershell
 # List all subnets in a VNet
 az network vnet subnet list `
-  --resource-group "MyRG" `
-  --vnet-name "my-vnet" `
+  --resource-group "<resource-group-name>" `
+  --vnet-name "<vnet-name>" `
   --query "[].{Name:name, Id:id}" `
   --output table
 
 # Get specific subnet ID
 az network vnet subnet show `
-  --resource-group "MyRG" `
-  --vnet-name "my-vnet" `
-  --name "aca-subnet" `
+  --resource-group "<resource-group-name>" `
+  --vnet-name "<vnet-name>" `
+  --name "<subnet-name>" `
   --query "id" `
   --output tsv
 ```
@@ -807,8 +871,8 @@ Instead of `-StorageAccountName`, use `-StorageAccountResourceId` with the full 
 # Deploy with pre-configured PE-enabled storage account
 .\deploy-to-aca.ps1 `
   -ResourceGroupName "{rg-name}" `
-  -ContainerAppName "mongomigration-prod" `
-  -Location "westus2" `
+  -ContainerAppName "<container-app-name>" `
+  -Location "<location>" `
   -StorageAccountResourceId "/subscriptions/{sub-id}/resourceGroups/{storage-rg}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}" `
   -UseEntraIdForAzureStorage `
   -VCores 16 `
@@ -866,9 +930,9 @@ Deploy Container App in one resource group using storage from another resource g
 # Storage Account in "{storage-rg}" (different RG, same subscription)
 .\deploy-to-aca.ps1 `
   -ResourceGroupName "{deployment-rg}" `
-  -ContainerAppName "mongomigration-prod" `
-  -Location "westus2" `
-  -AcrName "myacr" `
+  -ContainerAppName "<container-app-name>" `
+  -Location "<location>" `
+  -AcrName "<acr-name>" `
   -StorageAccountResourceId "/subscriptions/{sub-id}/resourceGroups/{storage-rg}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}" `
   -UseEntraIdForAzureStorage `
   -VCores 16 `
@@ -897,8 +961,8 @@ az role assignment list `
 # Check Container App can access storage
 # Look for successful Blob SDK initialization in Container App logs
 az containerapp logs show `
-  --name "mongomigration-prod" `
-  --resource-group "MongoMigrationRGTestACA" `
+  --name "<container-app-name>" `
+  --resource-group "<resource-group-name>" `
   --follow
 
 # Should show: "Using Entra ID (Managed Identity) for Azure Blob Storage" or similar
@@ -955,18 +1019,18 @@ For updating only the application image without resetting environment variables 
 ```powershell
 # Update using existing image (no rebuild if image exists)
 .\update-aca-app.ps1 `
-  -ResourceGroupName "MongoMigrationRGTest" `
-  -ContainerAppName "mongomigration" `
-  -AcrName "mongomigrationacr" `
-  -ImageTag "v1.1"
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -ImageTag "<image-tag>"
 
 # Update with custom repository
 .\update-aca-app.ps1 `
-  -ResourceGroupName "MongoMigrationRGTest" `
-  -ContainerAppName "mongomigration" `
-  -AcrName "sharedacr" `
-  -AcrRepository "myapp" `
-  -ImageTag "v1.1"
+  -ResourceGroupName "<resource-group-name>" `
+  -ContainerAppName "<container-app-name>" `
+  -AcrName "<acr-name>" `
+  -AcrRepository "<acr-repository>" `
+  -ImageTag "<image-tag>"
 ```
 
 The update script will:
@@ -1082,7 +1146,7 @@ If you use `update-aca-app.ps1`, these environment variables are preserved durin
 Before deploying, you can run the troubleshooting script to check for common issues:
 
 ```powershell
-./troubleshoot-aca.ps1 -ResourceGroupName "my-rg" -Location "eastus"
+./troubleshoot-aca.ps1 -ResourceGroupName "<resource-group-name>" -Location "<location>"
 ```
 
 This script will:

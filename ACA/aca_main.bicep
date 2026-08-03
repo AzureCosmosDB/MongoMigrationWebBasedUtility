@@ -13,6 +13,14 @@ param acrLocation string = location
 @description('Name of the Azure Container Registry')
 param acrName string
 
+@description('SKU of the Azure Container Registry. Premium is required for Private Link.')
+@allowed([
+  'Basic'
+  'Standard'
+  'Premium'
+])
+param acrSku string = 'Basic'
+
 @description('ACR repository name for the container image')
 param acrRepository string = containerAppName
 
@@ -84,7 +92,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: acrName
   location: acrLocation
   sku: {
-    name: 'Basic'
+    name: acrSku
   }
   properties: {
     adminUserEnabled: false
@@ -305,7 +313,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               value: managedIdentity.properties.clientId
             }
           ] : [])
-          probes: [
+          probes: stateStoreAppID == '' ? [] : [
             {
               type: 'Startup'
               httpGet: {

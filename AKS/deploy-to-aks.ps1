@@ -56,15 +56,144 @@ param(
     [string]$Namespace = "mongomigration",
 
     [Parameter(Mandatory=$false)]
-    [string]$KubernetesVersion = ""
+    [string]$KubernetesVersion = "",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$UsePrivateAcr,
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateEndpointSubnetResourceId = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsVnetResourceId = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsZoneResourceGroup = "",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$DisableAcrPublicAccess
 )
 
 $ErrorActionPreference = "Stop"
+
+  function Invoke-AzChecked {
+    param([Parameter(Mandatory=$true)][string[]]$Arguments)
+
+    $result = az @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "Azure CLI command failed: az $($Arguments -join ' ')"
+    }
+    return $result
+  }
+
+  function Get-VnetResourceIdFromSubnet {
+    param([Parameter(Mandatory=$true)][string]$SubnetResourceId)
+
+    if ($SubnetResourceId -notmatch '^(.*?/virtualNetworks/[^/]+)/subnets/[^/]+$') {
+      throw "Invalid subnet resource ID: '$SubnetResourceId'."
+    }
+    return $Matches[1]
+  }
+
+  function Get-AksVnetResourceId {
+    param(
+      [Parameter(Mandatory=$true)][string]$AksName,
+      [Parameter(Mandatory=$true)][string]$AksResourceGroup
+    )
+
+    $subnetId = Invoke-AzChecked @("aks", "show", "--name", $AksName, "--resource-group", $AksResourceGroup, "--query", "agentPoolProfiles[0].vnetSubnetId", "--output", "tsv")
+    if (-not [string]::IsNullOrWhiteSpace($subnetId)) {
+      return Get-VnetResourceIdFromSubnet $subnetId
+    }
+
+    $nodeResourceGroup = Invoke-AzChecked @("aks", "show", "--name", $AksName, "--resource-group", $AksResourceGroup, "--query", "nodeResourceGroup", "--output", "tsv")
+    $nodeVnets = @(Invoke-AzChecked @("network", "vnet", "list", "--resource-group", $nodeResourceGroup, "--query", "[].id", "--output", "tsv")) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    if ($nodeVnets.Count -ne 1) {
+      throw "Could not uniquely determine the AKS node VNet. Pass -AcrPrivateDnsVnetResourceId explicitly."
+    }
+    return $nodeVnets[0]
+  }
+
+  function Set-AcrPrivateLink {
+    param(
+      [Parameter(Mandatory=$true)][string]$RegistryName,
+      [Parameter(Mandatory=$true)][string]$RegistryResourceGroup,
+      [Parameter(Mandatory=$true)][string]$PrivateEndpointSubnetId,
+      [Parameter(Mandatory=$true)][string]$DnsVnetId,
+      [Parameter(Mandatory=$true)][string]$DnsZoneResourceGroup,
+      [Parameter(Mandatory=$true)][bool]$DisablePublicAccess
+    )
+
+    $privateDnsZoneName = "privatelink.azurecr.io"
+    $privateEndpointName = "$RegistryName-pe"
+    $dnsVnetName = $DnsVnetId.Split('/')[-1]
+    $dnsLinkName = "$dnsVnetName-acr-link"
+    $acrId = Invoke-AzChecked @("acr", "show", "--name", $RegistryName, "--resource-group", $RegistryResourceGroup, "--query", "id", "--output", "tsv")
+
+    Write-Host "`nConfiguring ACR Private Link..." -ForegroundColor Yellow
+    Invoke-AzChecked @("network", "vnet", "subnet", "update", "--ids", $PrivateEndpointSubnetId, "--private-endpoint-network-policies", "Disabled", "--output", "none") | Out-Null
+
+    $privateDnsZoneId = az network private-dns zone show --resource-group $DnsZoneResourceGroup --name $privateDnsZoneName --query id --output tsv 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      $privateDnsZoneId = Invoke-AzChecked @("network", "private-dns", "zone", "create", "--resource-group", $DnsZoneResourceGroup, "--name", $privateDnsZoneName, "--query", "id", "--output", "tsv")
+    }
+
+    az network private-dns link vnet show --resource-group $DnsZoneResourceGroup --zone-name $privateDnsZoneName --name $dnsLinkName --output none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Invoke-AzChecked @("network", "private-dns", "link", "vnet", "create", "--resource-group", $DnsZoneResourceGroup, "--zone-name", $privateDnsZoneName, "--name", $dnsLinkName, "--virtual-network", $DnsVnetId, "--registration-enabled", "false", "--output", "none") | Out-Null
+    }
+
+    $linkedVnetId = Invoke-AzChecked @("network", "private-dns", "link", "vnet", "show", "--resource-group", $DnsZoneResourceGroup, "--zone-name", $privateDnsZoneName, "--name", $dnsLinkName, "--query", "virtualNetwork.id", "--output", "tsv")
+    if ($linkedVnetId -ine $DnsVnetId) {
+      throw "Private DNS link '$dnsLinkName' targets '$linkedVnetId' instead of workload VNet '$DnsVnetId'."
+    }
+
+    az network private-endpoint show --name $privateEndpointName --resource-group $RegistryResourceGroup --output none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      Invoke-AzChecked @("network", "private-endpoint", "create", "--name", $privateEndpointName, "--resource-group", $RegistryResourceGroup, "--subnet", $PrivateEndpointSubnetId, "--private-connection-resource-id", $acrId, "--group-ids", "registry", "--connection-name", "$RegistryName-connection", "--output", "none") | Out-Null
+    }
+
+    $dnsZoneGroup = Invoke-AzChecked @("network", "private-endpoint", "dns-zone-group", "create", "--resource-group", $RegistryResourceGroup, "--endpoint-name", $privateEndpointName, "--name", "default", "--private-dns-zone", $privateDnsZoneId, "--zone-name", "privatelink-azurecr-io", "--output", "json") | ConvertFrom-Json
+    $dnsRecordSets = @($dnsZoneGroup.privateDnsZoneConfigs | ForEach-Object { $_.recordSets })
+    if ($dnsRecordSets.Count -lt 2) {
+      throw "ACR private DNS records were not created for private endpoint '$privateEndpointName'."
+    }
+
+    $connectionStatus = Invoke-AzChecked @("network", "private-endpoint", "show", "--name", $privateEndpointName, "--resource-group", $RegistryResourceGroup, "--query", "privateLinkServiceConnections[0].privateLinkServiceConnectionState.status", "--output", "tsv")
+    if ($connectionStatus -ne "Approved") {
+      Write-Warning "ACR private endpoint status is '$connectionStatus'. An ACR owner must approve it."
+      if ($DisablePublicAccess) {
+        throw "Public access was not disabled because the private endpoint is not approved."
+      }
+    } elseif ($DisablePublicAccess) {
+      Invoke-AzChecked @("acr", "update", "--name", $RegistryName, "--resource-group", $RegistryResourceGroup, "--public-network-enabled", "false", "--output", "none") | Out-Null
+    }
+
+    Write-Host "ACR Private Link configured. Connection status: $connectionStatus" -ForegroundColor Green
+    return $connectionStatus
+  }
 
 $useProvidedSubnet = -not [string]::IsNullOrEmpty($InfrastructureSubnetResourceId)
 $useProvidedStorage = -not [string]::IsNullOrEmpty($StorageAccountResourceId)
 $useProvidedWorkloadIdentity = -not [string]::IsNullOrEmpty($WorkloadIdentityResourceId)
 $serviceIsPublic = -not $useProvidedSubnet
+
+if ($DisableAcrPublicAccess -and -not $UsePrivateAcr) {
+  throw "-DisableAcrPublicAccess requires -UsePrivateAcr."
+}
+if ($UsePrivateAcr -and [string]::IsNullOrWhiteSpace($AcrPrivateEndpointSubnetResourceId)) {
+  throw "-AcrPrivateEndpointSubnetResourceId is required when -UsePrivateAcr is specified."
+}
+if ($UsePrivateAcr) {
+  if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsVnetResourceId)) {
+    if (-not [string]::IsNullOrWhiteSpace($InfrastructureSubnetResourceId)) {
+      $AcrPrivateDnsVnetResourceId = Get-VnetResourceIdFromSubnet $InfrastructureSubnetResourceId
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsZoneResourceGroup)) {
+    $AcrPrivateDnsZoneResourceGroup = $ResourceGroupName
+  }
+}
 
 if ($useProvidedStorage -and -not [string]::IsNullOrEmpty($StorageAccountName)) {
     Write-Host "Error: -StorageAccountResourceId and -StorageAccountName cannot be used together." -ForegroundColor Red
@@ -143,6 +272,7 @@ $infraCreateArgs = @(
         "ownerTag=$OwnerTag",
         "clusterName=$ClusterName",
         "acrName=$AcrName",
+        "acrSku=$(if ($UsePrivateAcr) { 'Premium' } else { 'Standard' })",
         "storageAccountName=$StorageAccountName",
         "storageAccountResourceId=$StorageAccountResourceId",
         "workloadIdentityName=$ManagedIdentityName",
@@ -279,6 +409,25 @@ if ($acrPullAssignment) {
     Write-Host "  Attaching ACR to AKS cluster..." -ForegroundColor Gray
     az aks update --name $ClusterName --resource-group $ResourceGroupName --attach-acr $AcrName | Out-Null
     Write-Host "  ACR attached to AKS." -ForegroundColor Green
+}
+
+if ($UsePrivateAcr) {
+  if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsVnetResourceId)) {
+    $AcrPrivateDnsVnetResourceId = Get-AksVnetResourceId -AksName $ClusterName -AksResourceGroup $ResourceGroupName
+  }
+  $privateLinkStatus = Set-AcrPrivateLink `
+    -RegistryName $AcrName `
+    -RegistryResourceGroup $ResourceGroupName `
+    -PrivateEndpointSubnetId $AcrPrivateEndpointSubnetResourceId `
+    -DnsVnetId $AcrPrivateDnsVnetResourceId `
+    -DnsZoneResourceGroup $AcrPrivateDnsZoneResourceGroup `
+    -DisablePublicAccess $DisableAcrPublicAccess.IsPresent
+
+  if ($privateLinkStatus -ne "Approved") {
+    throw "The ACR private endpoint must be approved before AKS workloads are deployed."
+  }
+  Invoke-AzChecked @("aks", "check-acr", "--name", $ClusterName, "--resource-group", $ResourceGroupName, "--acr", $acrLoginServer, "--output", "none") | Out-Null
+  Write-Host "  ACR public access remains enabled for image publishing unless explicitly disabled; AKS pulls resolve through Private Link." -ForegroundColor Green
 }
 
 # Step 6: Workload identity

@@ -15,10 +15,99 @@ param(
     [string]$AcrRepository = "",
     
     [Parameter(Mandatory=$false)]
-    [string]$ImageTag = "latest"
+    [string]$ImageTag = "latest",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$UsePrivateAcr,
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsVnetResourceId = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsZoneResourceGroup = "",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$DisableAcrPublicAccess
 )
 
 $ErrorActionPreference = "Stop"
+
+function Invoke-AzChecked {
+    param([Parameter(Mandatory=$true)][string[]]$Arguments)
+
+    $result = az @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Azure CLI command failed: az $($Arguments -join ' ')"
+    }
+    return $result
+}
+
+function Get-VnetResourceIdFromSubnet {
+    param([Parameter(Mandatory=$true)][string]$SubnetResourceId)
+
+    if ($SubnetResourceId -notmatch '^(.*?/virtualNetworks/[^/]+)/subnets/[^/]+$') {
+        throw "Invalid subnet resource ID: '$SubnetResourceId'."
+    }
+    return $Matches[1]
+}
+
+function Get-AcaVnetResourceId {
+    param(
+        [Parameter(Mandatory=$true)][string]$AppName,
+        [Parameter(Mandatory=$true)][string]$AppResourceGroup
+    )
+
+    $app = Invoke-AzChecked @("containerapp", "show", "--name", $AppName, "--resource-group", $AppResourceGroup, "--output", "json") | ConvertFrom-Json
+    $environmentId = if ($app.properties.managedEnvironmentId) { $app.properties.managedEnvironmentId } else { $app.properties.environmentId }
+    if ([string]::IsNullOrWhiteSpace($environmentId)) {
+        throw "Could not determine the Container Apps environment for '$AppName'."
+    }
+    $infrastructureSubnetId = Invoke-AzChecked @("containerapp", "env", "show", "--ids", $environmentId, "--query", "properties.vnetConfiguration.infrastructureSubnetId", "--output", "tsv")
+    if ([string]::IsNullOrWhiteSpace($infrastructureSubnetId)) {
+        throw "Container App '$AppName' is not in a VNet-integrated environment, so it cannot pull from an ACR private endpoint."
+    }
+    return Get-VnetResourceIdFromSubnet $infrastructureSubnetId
+}
+
+function Assert-AcrPrivateLinkApproved {
+    param(
+        [Parameter(Mandatory=$true)][string]$RegistryName,
+        [Parameter(Mandatory=$true)][string]$RegistryResourceGroup,
+        [Parameter(Mandatory=$true)][string]$DnsVnetId,
+        [Parameter(Mandatory=$true)][string]$DnsZoneResourceGroup
+    )
+
+    $acr = Invoke-AzChecked @("acr", "show", "--name", $RegistryName, "--resource-group", $RegistryResourceGroup, "--output", "json") | ConvertFrom-Json
+    if ($acr.sku.name -ne "Premium") {
+        throw "ACR '$RegistryName' must use the Premium SKU for Private Link."
+    }
+
+    $approvedConnection = Invoke-AzChecked @("acr", "private-endpoint-connection", "list", "--registry-name", $RegistryName, "--resource-group", $RegistryResourceGroup, "--query", "[?privateLinkServiceConnectionState.status=='Approved'] | [0].name", "--output", "tsv")
+    if ([string]::IsNullOrWhiteSpace($approvedConnection)) {
+        throw "ACR '$RegistryName' does not have an approved private endpoint connection."
+    }
+
+    $dnsLinks = Invoke-AzChecked @("network", "private-dns", "link", "vnet", "list", "--resource-group", $DnsZoneResourceGroup, "--zone-name", "privatelink.azurecr.io", "--output", "json") | ConvertFrom-Json
+    $matchingLink = $dnsLinks | Where-Object { $_.virtualNetwork.id -ieq $DnsVnetId } | Select-Object -First 1
+    if (-not $matchingLink) {
+        throw "Private DNS zone 'privatelink.azurecr.io' is not linked to the Container Apps VNet '$DnsVnetId'."
+    }
+    Write-Host "Approved ACR private endpoint and Container Apps VNet DNS link verified." -ForegroundColor Green
+}
+
+if ($DisableAcrPublicAccess -and -not $UsePrivateAcr) {
+    throw "-DisableAcrPublicAccess requires -UsePrivateAcr."
+}
+if ($UsePrivateAcr) {
+    if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsVnetResourceId)) {
+        $AcrPrivateDnsVnetResourceId = Get-AcaVnetResourceId -AppName $ContainerAppName -AppResourceGroup $ResourceGroupName
+    }
+    if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsZoneResourceGroup)) {
+        $AcrPrivateDnsZoneResourceGroup = $ResourceGroupName
+    }
+    Assert-AcrPrivateLinkApproved -RegistryName $AcrName -RegistryResourceGroup $ResourceGroupName -DnsVnetId $AcrPrivateDnsVnetResourceId -DnsZoneResourceGroup $AcrPrivateDnsZoneResourceGroup
+    Write-Host "ACR public access was not changed; Container Apps pulls resolve through Private Link." -ForegroundColor Green
+}
 
 # Generate ACR repository name if not provided
 if ([string]::IsNullOrEmpty($AcrRepository)) {
@@ -261,10 +350,18 @@ if (-not $isReady) {
     Write-Host "`nWarning: New image did not become fully active within expected time." -ForegroundColor Yellow
     Write-Host "Current state: Running=$runningState | Provisioning=$provisioningState | Health=$healthState | Replicas=$activeReplicaCount" -ForegroundColor Yellow
     Write-Host "The deployment may still be in progress. Please check the Azure Portal for more details." -ForegroundColor Yellow
+    if ($UsePrivateAcr) {
+        throw "Private ACR image pull validation failed because the updated revision did not become healthy."
+    }
 }
 
 $ErrorActionPreference = 'Stop'
 Write-Host ""
+
+if ($DisableAcrPublicAccess) {
+    Invoke-AzChecked @("acr", "update", "--name", $AcrName, "--resource-group", $ResourceGroupName, "--public-network-enabled", "false", "--output", "none") | Out-Null
+    Write-Host "ACR public network access disabled after successful image-pull validation." -ForegroundColor Green
+}
 
 # Retrieve and display the application URL
 Write-Host "Retrieving application URL..." -ForegroundColor Yellow

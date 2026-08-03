@@ -50,11 +50,141 @@ param(
     [ValidateRange(100, 102400)]
     [int]$FileShareSizeGB = 100,
 
+    [Parameter(Mandatory=$false)]
+    [switch]$UsePrivateAcr,
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateEndpointSubnetResourceId = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsVnetResourceId = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsZoneResourceGroup = "",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$DisableAcrPublicAccess,
+
     [Parameter(Mandatory=$true)]
     [string]$OwnerTag
 )
 
 $ErrorActionPreference = "Stop"
+
+function Invoke-AzChecked {
+    param([Parameter(Mandatory=$true)][string[]]$Arguments)
+
+    $result = az @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Azure CLI command failed: az $($Arguments -join ' ')"
+    }
+    return $result
+}
+
+function Get-VnetResourceIdFromSubnet {
+    param([Parameter(Mandatory=$true)][string]$SubnetResourceId)
+
+    if ($SubnetResourceId -notmatch '^(.*?/virtualNetworks/[^/]+)/subnets/[^/]+$') {
+        throw "Invalid subnet resource ID: '$SubnetResourceId'."
+    }
+    return $Matches[1]
+}
+
+function Set-AcrPrivateLink {
+    param(
+        [Parameter(Mandatory=$true)][string]$RegistryName,
+        [Parameter(Mandatory=$true)][string]$RegistryResourceGroup,
+        [Parameter(Mandatory=$true)][string]$PrivateEndpointSubnetId,
+        [Parameter(Mandatory=$true)][string]$DnsVnetId,
+        [Parameter(Mandatory=$true)][string]$DnsZoneResourceGroup
+    )
+
+    $privateDnsZoneName = "privatelink.azurecr.io"
+    $privateEndpointName = "$RegistryName-pe"
+    $dnsVnetName = $DnsVnetId.Split('/')[-1]
+    $dnsLinkName = "$dnsVnetName-acr-link"
+    $acrId = Invoke-AzChecked @("acr", "show", "--name", $RegistryName, "--resource-group", $RegistryResourceGroup, "--query", "id", "--output", "tsv")
+
+    Write-Host "`nConfiguring ACR Private Link..." -ForegroundColor Yellow
+    Invoke-AzChecked @("network", "vnet", "subnet", "update", "--ids", $PrivateEndpointSubnetId, "--private-endpoint-network-policies", "Disabled", "--output", "none") | Out-Null
+
+    $privateDnsZoneId = az network private-dns zone show --resource-group $DnsZoneResourceGroup --name $privateDnsZoneName --query id --output tsv 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $privateDnsZoneId = Invoke-AzChecked @("network", "private-dns", "zone", "create", "--resource-group", $DnsZoneResourceGroup, "--name", $privateDnsZoneName, "--query", "id", "--output", "tsv")
+    }
+
+    az network private-dns link vnet show --resource-group $DnsZoneResourceGroup --zone-name $privateDnsZoneName --name $dnsLinkName --output none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-AzChecked @("network", "private-dns", "link", "vnet", "create", "--resource-group", $DnsZoneResourceGroup, "--zone-name", $privateDnsZoneName, "--name", $dnsLinkName, "--virtual-network", $DnsVnetId, "--registration-enabled", "false", "--output", "none") | Out-Null
+    }
+
+    $linkedVnetId = Invoke-AzChecked @("network", "private-dns", "link", "vnet", "show", "--resource-group", $DnsZoneResourceGroup, "--zone-name", $privateDnsZoneName, "--name", $dnsLinkName, "--query", "virtualNetwork.id", "--output", "tsv")
+    if ($linkedVnetId -ine $DnsVnetId) {
+        throw "Private DNS link '$dnsLinkName' targets '$linkedVnetId' instead of workload VNet '$DnsVnetId'."
+    }
+
+    az network private-endpoint show --name $privateEndpointName --resource-group $RegistryResourceGroup --output none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-AzChecked @("network", "private-endpoint", "create", "--name", $privateEndpointName, "--resource-group", $RegistryResourceGroup, "--subnet", $PrivateEndpointSubnetId, "--private-connection-resource-id", $acrId, "--group-ids", "registry", "--connection-name", "$RegistryName-connection", "--output", "none") | Out-Null
+    }
+
+    $dnsZoneGroup = Invoke-AzChecked @("network", "private-endpoint", "dns-zone-group", "create", "--resource-group", $RegistryResourceGroup, "--endpoint-name", $privateEndpointName, "--name", "default", "--private-dns-zone", $privateDnsZoneId, "--zone-name", "privatelink-azurecr-io", "--output", "json") | ConvertFrom-Json
+    $dnsRecordSets = @($dnsZoneGroup.privateDnsZoneConfigs | ForEach-Object { $_.recordSets })
+    if ($dnsRecordSets.Count -lt 2) {
+        throw "ACR private DNS records were not created for private endpoint '$privateEndpointName'."
+    }
+
+    $connectionStatus = Invoke-AzChecked @("network", "private-endpoint", "show", "--name", $privateEndpointName, "--resource-group", $RegistryResourceGroup, "--query", "privateLinkServiceConnections[0].privateLinkServiceConnectionState.status", "--output", "tsv")
+    if ($connectionStatus -ne "Approved") {
+        Write-Warning "ACR private endpoint status is '$connectionStatus'. An ACR owner must approve it."
+    }
+
+    Write-Host "ACR Private Link configured. Connection status: $connectionStatus" -ForegroundColor Green
+    return $connectionStatus
+}
+
+function Test-AcaPrivateAcrPull {
+    param(
+        [Parameter(Mandatory=$true)][string]$AppName,
+        [Parameter(Mandatory=$true)][string]$AppResourceGroup
+    )
+
+    $revisionName = Invoke-AzChecked @("containerapp", "show", "--name", $AppName, "--resource-group", $AppResourceGroup, "--query", "properties.latestRevisionName", "--output", "tsv")
+    Write-Host "Validating the private ACR path by restarting revision '$revisionName'..." -ForegroundColor Yellow
+    Invoke-AzChecked @("containerapp", "revision", "restart", "--name", $AppName, "--resource-group", $AppResourceGroup, "--revision", $revisionName, "--output", "none") | Out-Null
+
+    for ($attempt = 1; $attempt -le 60; $attempt++) {
+        $revision = Invoke-AzChecked @("containerapp", "revision", "show", "--name", $AppName, "--resource-group", $AppResourceGroup, "--revision", $revisionName, "--output", "json") | ConvertFrom-Json
+        $runningState = $revision.properties.runningState
+        $healthState = $revision.properties.healthState
+        if (($runningState -eq "Running" -or $runningState -eq "RunningAtMaxScale") -and $healthState -eq "Healthy") {
+            Write-Host "Private ACR image pull validation succeeded." -ForegroundColor Green
+            return
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    throw "Private ACR image pull validation failed: revision '$revisionName' did not return to a healthy running state."
+}
+
+if ($DisableAcrPublicAccess -and -not $UsePrivateAcr) {
+    throw "-DisableAcrPublicAccess requires -UsePrivateAcr."
+}
+if ($UsePrivateAcr -and [string]::IsNullOrWhiteSpace($AcrPrivateEndpointSubnetResourceId)) {
+    throw "-AcrPrivateEndpointSubnetResourceId is required when -UsePrivateAcr is specified."
+}
+if ($UsePrivateAcr -and [string]::IsNullOrWhiteSpace($InfrastructureSubnetResourceId)) {
+    throw "-InfrastructureSubnetResourceId is required when -UsePrivateAcr is specified because Container Apps must be VNet-integrated to reach the private endpoint."
+}
+if ($UsePrivateAcr) {
+    if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsVnetResourceId)) {
+        $dnsSourceSubnetId = if ([string]::IsNullOrWhiteSpace($InfrastructureSubnetResourceId)) { $AcrPrivateEndpointSubnetResourceId } else { $InfrastructureSubnetResourceId }
+        $AcrPrivateDnsVnetResourceId = Get-VnetResourceIdFromSubnet $dnsSourceSubnetId
+    }
+    if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsZoneResourceGroup)) {
+        $AcrPrivateDnsZoneResourceGroup = $ResourceGroupName
+    }
+}
 
 # Generate ACR name if not provided
 if ([string]::IsNullOrEmpty($AcrName)) {
@@ -122,6 +252,7 @@ $bicepParams = @(
     "--parameters",
         "containerAppName=$ContainerAppName",
         "acrName=$AcrName",
+        "acrSku=$(if ($UsePrivateAcr) { 'Premium' } else { 'Basic' })",
         "acrRepository=$AcrRepository",
         "acrLocation=$AcrLocation",
         "location=$Location",
@@ -192,6 +323,20 @@ if ($imageExists -eq 'true') {
     Write-Host "Docker image built and pushed successfully." -ForegroundColor Green
 }
 
+if ($UsePrivateAcr) {
+    $privateLinkStatus = Set-AcrPrivateLink `
+        -RegistryName $AcrName `
+        -RegistryResourceGroup $ResourceGroupName `
+        -PrivateEndpointSubnetId $AcrPrivateEndpointSubnetResourceId `
+        -DnsVnetId $AcrPrivateDnsVnetResourceId `
+        -DnsZoneResourceGroup $AcrPrivateDnsZoneResourceGroup
+
+    if ($privateLinkStatus -ne "Approved") {
+        throw "The ACR private endpoint must be approved before the Container App image is deployed."
+    }
+    Write-Host "ACR public access was not changed; Container Apps pulls resolve through Private Link." -ForegroundColor Green
+}
+
 Write-Host "`nStep 3: Prompting for StateStore connection string..." -ForegroundColor Yellow
 $secureConnString = Read-Host -Prompt "The StateStore keeps track of migration job details in a DocumentDB. You may use the same database as the Target DocumentDB or a separate one. Enter the connection string for the StateStore." -AsSecureString
 $isWindowsPlatform = ($env:OS -eq 'Windows_NT') -or ((Get-Variable IsWindows -ErrorAction SilentlyContinue) -and $IsWindows)
@@ -224,6 +369,7 @@ $finalBicepParams = @(
     "--parameters",
         "containerAppName=$ContainerAppName",
         "acrName=$AcrName",
+        "acrSku=$(if ($UsePrivateAcr) { 'Premium' } else { 'Basic' })",
         "acrRepository=$AcrRepository",
         "acrLocation=$AcrLocation",
         "location=$Location",
@@ -437,4 +583,12 @@ if ($appUrl) {
     Write-Host ""
 } else {
     Write-Host "Unable to retrieve application URL. Please check the Azure Portal." -ForegroundColor Yellow
+}
+
+if ($UsePrivateAcr) {
+    Test-AcaPrivateAcrPull -AppName $ContainerAppName -AppResourceGroup $ResourceGroupName
+    if ($DisableAcrPublicAccess) {
+        Invoke-AzChecked @("acr", "update", "--name", $AcrName, "--resource-group", $ResourceGroupName, "--public-network-enabled", "false", "--output", "none") | Out-Null
+        Write-Host "ACR public network access disabled." -ForegroundColor Green
+    }
 }

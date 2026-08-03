@@ -75,7 +75,7 @@ Parameters marked with `# Optional` are not required.
   -WorkloadIdentityResourceId "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<uami-name>" ` # Optional
   -StateStoreAppID "<state-store-app-id-base>" ` # Optional (reuse this value across redeployments to continue viewing existing jobs/logs)
   -InfrastructureSubnetResourceId "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/<subnet-name>" ` # Optional
-  -ImageTag "latest" ` # Optional
+  -ImageTag "<image-tag>" ` # Optional
   -NodeVmSize "<node-vm-size>" ` # Optional
   -ServiceCidr "10.250.0.0/16" ` # Optional
   -DnsServiceIp "10.250.0.10" ` # Optional
@@ -138,6 +138,11 @@ The script will:
 | `InstanceCount` | int | `1` | Number of instances to deploy |
 | `Namespace` | string | `mongomigration` | Kubernetes namespace |
 | `KubernetesVersion` | string | latest | Optional AKS version |
+| `UsePrivateAcr` | switch | `$false` | Create an ACR private endpoint and configure private DNS after the initial image is deployed. Uses the Premium ACR SKU. |
+| `AcrPrivateEndpointSubnetResourceId` | string | `""` | Dedicated private-endpoint subnet resource ID. Required with `UsePrivateAcr`. |
+| `AcrPrivateDnsVnetResourceId` | string | AKS node VNet | VNet resource ID to link to `privatelink.azurecr.io`. Override for hub/spoke networking. |
+| `AcrPrivateDnsZoneResourceGroup` | string | `ResourceGroupName` | Resource group in which to create or reuse the ACR private DNS zone. |
+| `DisableAcrPublicAccess` | switch | `$false` | Disable ACR public network access after Private Link is configured. Requires `UsePrivateAcr`. |
 
 CIDR guidance:
 - Check the subnet CIDR before deployment when using BYO subnet (`InfrastructureSubnetResourceId`).
@@ -156,6 +161,10 @@ CIDR guidance:
 | `InstanceName` | string | `""` | Update one specific instance |
 | `InstanceCount` | int | `1` | Update instances `1..N` |
 | `Namespace` | string | `mongomigration` | Kubernetes namespace |
+| `UsePrivateAcr` | switch | `$false` | Require an approved Premium ACR private endpoint, verify the AKS node VNet private DNS link, run `az aks check-acr`, and require updated deployments to become ready. |
+| `AcrPrivateDnsVnetResourceId` | string | AKS node VNet | VNet expected to be linked to `privatelink.azurecr.io`. Override when automatic discovery is not possible. |
+| `AcrPrivateDnsZoneResourceGroup` | string | `ResourceGroupName` | Resource group containing the existing ACR private DNS zone. |
+| `DisableAcrPublicAccess` | switch | `$false` | Disable ACR public network access only after private ACR validation succeeds. Requires `UsePrivateAcr`. |
 
 ### publish-image-to-acr.ps1
 
@@ -230,7 +239,7 @@ cd .\AKS
   -ResourceGroupName "<resource-group-name>" `
   -AcrName "<acr-name>" `
   -AcrRepository "<acr-repository>" `
-  -ImageTag "latest"
+  -ImageTag "<image-tag>"
 ```
 
 ### 2) Ensure AKS can pull from ACR (one-time)
@@ -358,6 +367,73 @@ Required runtime values:
 - `StateStoreAppID` identifies the app instance in StateStore.
 - If you deploy again and want to continue viewing the same jobs and logs, use the same `StateStoreAppID` values as before.
 - If you use a different `StateStoreAppID`, the deployment is treated as a different app identity in StateStore.
+
+## ACR Private Endpoint and Public Access Cutover
+
+Use this configuration when enterprise policy requires ACR Private Link or automatically disables ACR public network access. Without the private endpoint and DNS configuration, running pods can appear healthy because their image is cached, while replacement pods later fail with `ImagePullBackOff`.
+
+ACR Private Link requires the Premium SKU. The deployment script selects Premium automatically when `-UsePrivateAcr` is specified.
+
+For predictable enterprise networking, deploy AKS with `-InfrastructureSubnetResourceId`. Create the ACR private endpoint in a dedicated private-endpoint subnet in the same VNet or a peered VNet that the AKS nodes can route to. Link the ACR private DNS zone to the **AKS node VNet**, even when the private endpoint is hosted in a central hub VNet.
+
+> **Publishing from a public network:** The deploy and update scripts do **not** automatically enable ACR public network access when it is disabled. If the script runs from a public VM or workstation and must publish an image, enable public access before running it:
+>
+> ```powershell
+> az acr update --name <acr-name> --resource-group <resource-group-name> --public-network-enabled true
+> ```
+>
+> Run the script with `-UsePrivateAcr`. Add `-DisableAcrPublicAccess` if public access should be revoked after the private image pull succeeds. If the publishing VM uses a VNet linked to `privatelink.azurecr.io` and resolves the registry to private IP addresses, it can publish through the private endpoint without enabling public access.
+
+### 1. Deploy with ACR Private Link
+
+Pass the AKS node subnet and a dedicated private-endpoint subnet to the initial deployment:
+
+```powershell
+.\deploy-to-aks.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ClusterName <cluster-name> `
+  -AcrName <acr-name> `
+  -Location <location> `
+  -OwnerTag <owner> `
+  -InfrastructureSubnetResourceId <aks-node-subnet-resource-id> `
+  -UsePrivateAcr `
+  -AcrPrivateEndpointSubnetResourceId <private-endpoint-subnet-resource-id>
+```
+
+The script builds and publishes the image through ACR Tasks first, then creates the private endpoint and links `privatelink.azurecr.io` to the AKS node VNet before applying Kubernetes Deployments. Pods therefore resolve the registry through Private Link. The script leaves public ACR access in its current state unless `-DisableAcrPublicAccess` is supplied. With AKS default networking, the generated node VNet is discovered after cluster creation. If the connection is created in `Pending` state, an ACR owner must approve it before workload deployment can continue.
+
+For a hub/spoke topology, pass the AKS node VNet resource ID with `-AcrPrivateDnsVnetResourceId`. Use `-AcrPrivateDnsZoneResourceGroup` when the private DNS zone belongs in a central networking resource group. When the AKS VNet uses custom DNS, configure conditional forwarding for `privatelink.azurecr.io` to Azure DNS (`168.63.129.16`) through an Azure-hosted DNS forwarder.
+
+### 2. Update through Private Link
+
+Use the update script to publish the image first, verify the approved endpoint and AKS node VNet DNS link, run `az aks check-acr`, force rollout restarts, and require every updated deployment to become ready:
+
+```powershell
+.\update-aks-app.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ClusterName <cluster-name> `
+  -AcrName <acr-name> `
+  -ImageTag <image-tag> `
+  -UsePrivateAcr
+```
+
+The deployment uses `imagePullPolicy: Always`, so each replacement pod performs a new ACR pull. Public ACR access does not need to be disabled: private DNS causes requests from the AKS node VNet to resolve to the private endpoint.
+
+### 3. Disable ACR public network access (Optional)
+
+Add `-DisableAcrPublicAccess` to the update command. The script disables public access only after `az aks check-acr` and all rollouts succeed:
+
+```powershell
+.\update-aks-app.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ClusterName <cluster-name> `
+  -AcrName <acr-name> `
+  -ImageTag <image-tag> `
+  -UsePrivateAcr `
+  -DisableAcrPublicAccess
+```
+
+Microsoft references: [Connect privately to an Azure container registry using Azure Private Link](https://learn.microsoft.com/azure/container-registry/container-registry-private-link) and [Integrate ACR with AKS](https://learn.microsoft.com/azure/aks/cluster-container-registry-integration)
 
 ## Troubleshooting
 
