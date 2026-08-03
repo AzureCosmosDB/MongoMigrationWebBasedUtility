@@ -2,7 +2,7 @@
 # Updates only the Docker image across all instances without changing storage or infrastructure.
 #
 # Usage:
-#   Update a single named instance:  -InstanceName "mongomig-prod-2"
+#   Update a single named instance:  -InstanceName "<instance-name>"
 #   Update instances 1..N:           -InstanceCount 3
 #   Both can be combined; InstanceName takes precedence when provided.
 
@@ -22,7 +22,7 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$ImageTag = "latest",
 
-    # Update a specific instance by its full name (e.g. "mongomig-prod-2").
+    # Update a specific instance by its full name.
     # When set, only this instance is updated and InstanceCount is ignored.
     [Parameter(Mandatory=$false)]
     [string]$InstanceName = "",

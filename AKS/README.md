@@ -75,7 +75,7 @@ Parameters marked with `# Optional` are not required.
   -WorkloadIdentityResourceId "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<uami-name>" ` # Optional
   -StateStoreAppID "<state-store-app-id-base>" ` # Optional (reuse this value across redeployments to continue viewing existing jobs/logs)
   -InfrastructureSubnetResourceId "/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/<subnet-name>" ` # Optional
-  -ImageTag "latest" ` # Optional
+  -ImageTag "<image-tag>" ` # Optional
   -NodeVmSize "<node-vm-size>" ` # Optional
   -ServiceCidr "10.250.0.0/16" ` # Optional
   -DnsServiceIp "10.250.0.10" ` # Optional
@@ -239,7 +239,7 @@ cd .\AKS
   -ResourceGroupName "<resource-group-name>" `
   -AcrName "<acr-name>" `
   -AcrRepository "<acr-repository>" `
-  -ImageTag "latest"
+  -ImageTag "<image-tag>"
 ```
 
 ### 2) Ensure AKS can pull from ACR (one-time)
