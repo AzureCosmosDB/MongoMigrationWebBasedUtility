@@ -135,6 +135,14 @@ After initial deployment, use the update script for faster deployments:
   -AcrName "mongomigprod1234" `
   -AcrRepository "customrepo" `
   -ImageTag "v1.1"
+
+# Update through an existing ACR private endpoint
+.\update-aca-app.ps1 `
+  -ResourceGroupName "MongoMigrationRGProd" `
+  -ContainerAppName "mongomigration-prod" `
+  -AcrName "mongomigprod1234" `
+  -ImageTag "v1.2" `
+  -UsePrivateAcr
 ```
 
 **Using Existing Images:**
@@ -251,6 +259,13 @@ Remove-Variable connString, secureConnString
 | `MemoryGB` | int | `32` (range: 2-64) | Memory in GB for the container. |
 | `InfrastructureSubnetResourceId` | string | `""` (empty) | Resource ID of the subnet for VNet integration. **Must be provided at environment creation time**. See [VNet Integration](#vnet-integration) section. |
 | `UseEntraIdForAzureStorage` | switch | `$false` | Use Entra ID (Managed Identity) for Azure Blob Storage instead of mounting Azure Files. When enabled, no volume is mounted and the app uses `BlobServiceClient` with Managed Identity. **Required when using `StorageAccountResourceId`.** **Recommended when your organization blocks storage account key-based access**. |
+| `UsePrivateAcr` | switch | `$false` | Create an ACR private endpoint and configure private DNS after the initial image is deployed. Uses the Premium ACR SKU. |
+| `AcrPrivateEndpointSubnetResourceId` | string | `""` (empty) | Dedicated private-endpoint subnet resource ID. Required with `UsePrivateAcr` and must differ from the Container Apps infrastructure subnet. |
+| `AcrPrivateDnsVnetResourceId` | string | Container Apps VNet | VNet resource ID to link to `privatelink.azurecr.io`. Override for hub/spoke networking. |
+| `AcrPrivateDnsZoneResourceGroup` | string | `ResourceGroupName` | Resource group in which to create or reuse the ACR private DNS zone. |
+| `DisableAcrPublicAccess` | switch | `$false` | Disable ACR public network access after Private Link is configured. Requires `UsePrivateAcr`. |
+
+The update script also accepts `-UsePrivateAcr` to require an approved ACR private endpoint, verify that `privatelink.azurecr.io` is linked to the Container Apps VNet, and validate the new revision. Private endpoint and DNS resources must already have been configured by the initial deployment. Public ACR access remains enabled for image publishing unless `-DisableAcrPublicAccess` is explicitly supplied.
 
 ## Naming Constraints
 
@@ -457,17 +472,72 @@ For organizations with a centralized Azure Container Registry in one region serv
 
 ### ACR with Private Endpoints
 
-The deployment script is fully compatible with ACR Private Endpoints. However, **if your ACR has Private Endpoints enabled and the public endpoint is disabled**, you must run the `deploy-to-aca.ps1` script from a machine that has network access to the ACR's private endpoint.
+Use this configuration when enterprise policy requires ACR Private Link or automatically disables ACR public network access. Without the private endpoint and DNS configuration, an existing revision can continue running from its cached image, but a restart, scale operation, or new revision can fail to pull the image and leave replicas unhealthy.
 
-**Scenario: PE-enabled ACR**
-- ACR must be accessible from the machine running the script
-- If running from outside the VNet, you'll receive connection errors when the script tries to run `az acr repository show-tags` and `az acr build`
-- **Solution**: Run the script from a machine within the same VNet as the ACR's private endpoint, or temporarily enable public endpoint access during deployment
+ACR Private Link requires the Premium SKU. The deployment script selects Premium automatically when `-UsePrivateAcr` is specified.
 
-**Scenario: ACR with public endpoint enabled (default)**
-- Script can run from any machine with internet access
-- No special network configuration needed
-- Container App at runtime properly resolves to private endpoint (via VNet integration and linked private DNS zones)
+The Container Apps Environment must be VNet-integrated from its initial creation. Pass `-InfrastructureSubnetResourceId` to `deploy-to-aca.ps1`. The private endpoint must use a **different subnet** from the delegated Container Apps infrastructure subnet.
+
+> **Publishing from a public network:** The deploy and update scripts do **not** automatically enable ACR public network access when it is disabled. If the script runs from a public VM or workstation and must publish an image, enable public access before running it:
+>
+> ```powershell
+> az acr update --name <acr-name> --resource-group <resource-group-name> --public-network-enabled true
+> ```
+>
+> Run the script with `-UsePrivateAcr`. Add `-DisableAcrPublicAccess` if public access should be revoked after the private image pull succeeds. If the publishing VM uses a VNet linked to `privatelink.azurecr.io` and resolves the registry to private IP addresses, it can publish through the private endpoint without enabling public access.
+
+#### 1. Deploy with ACR Private Link
+
+Pass the Container Apps infrastructure subnet and a separate private-endpoint subnet to the initial deployment:
+
+```powershell
+.\deploy-to-aca.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ContainerAppName <container-app-name> `
+  -AcrName <acr-name> `
+  -Location <location> `
+  -OwnerTag <owner> `
+  -InfrastructureSubnetResourceId <container-apps-subnet-resource-id> `
+  -UsePrivateAcr `
+  -AcrPrivateEndpointSubnetResourceId <private-endpoint-subnet-resource-id>
+```
+
+The script builds and publishes the image through ACR Tasks first, then creates the private endpoint and links `privatelink.azurecr.io` to the Container Apps VNet before deploying the ACR-backed revision. The revision therefore resolves the registry through Private Link. The script leaves public ACR access in its current state unless `-DisableAcrPublicAccess` is supplied. If the connection is created in `Pending` state, an ACR owner must approve it before the application deployment can continue.
+
+For hub/spoke networking, pass the workload VNet resource ID with `-AcrPrivateDnsVnetResourceId`. Use `-AcrPrivateDnsZoneResourceGroup` when the private DNS zone belongs in a central networking resource group.
+
+When the VNet uses custom DNS, configure conditional forwarding for `privatelink.azurecr.io` to Azure DNS (`168.63.129.16`) through an Azure-hosted DNS forwarder. On-premises clients need VPN or ExpressRoute connectivity plus the same DNS forwarding if they must access the private registry.
+
+#### 2. Update through Private Link
+
+Use the update script with a unique image tag. It publishes the image first, verifies the approved endpoint and Container Apps VNet DNS link, then deploys the image and requires the new ACA revision to become healthy:
+
+```powershell
+.\update-aca-app.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ContainerAppName <container-app-name> `
+  -AcrName <acr-name> `
+  -ImageTag <unique-image-tag> `
+  -UsePrivateAcr
+```
+
+The unique tag forces a new image pull rather than relying on an image that may already be cached. Public ACR access does not need to be disabled: private DNS causes requests from the Container Apps VNet to resolve to the private endpoint.
+
+#### 3. Disable ACR public network access (Optional)
+
+Add `-DisableAcrPublicAccess` to the update command. The script disables public access only after the fresh revision becomes healthy:
+
+```powershell
+.\update-aca-app.ps1 `
+  -ResourceGroupName <resource-group-name> `
+  -ContainerAppName <container-app-name> `
+  -AcrName <acr-name> `
+  -ImageTag <unique-image-tag> `
+  -UsePrivateAcr `
+  -DisableAcrPublicAccess
+```
+
+Microsoft reference: [Connect privately to an Azure container registry using Azure Private Link](https://learn.microsoft.com/azure/container-registry/container-registry-private-link)
 
 ### High-Performance Migration with Pre-configured PE-enabled Storage
 

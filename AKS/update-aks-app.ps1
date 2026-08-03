@@ -33,10 +33,100 @@ param(
     [int]$InstanceCount = 1,
 
     [Parameter(Mandatory=$false)]
-    [string]$Namespace = "mongomigration"
+    [string]$Namespace = "mongomigration",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$UsePrivateAcr,
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsVnetResourceId = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$AcrPrivateDnsZoneResourceGroup = "",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$DisableAcrPublicAccess
 )
 
 $ErrorActionPreference = "Stop"
+
+function Invoke-AzChecked {
+    param([Parameter(Mandatory=$true)][string[]]$Arguments)
+
+    $result = az @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Azure CLI command failed: az $($Arguments -join ' ')"
+    }
+    return $result
+}
+
+function Get-VnetResourceIdFromSubnet {
+    param([Parameter(Mandatory=$true)][string]$SubnetResourceId)
+
+    if ($SubnetResourceId -notmatch '^(.*?/virtualNetworks/[^/]+)/subnets/[^/]+$') {
+        throw "Invalid subnet resource ID: '$SubnetResourceId'."
+    }
+    return $Matches[1]
+}
+
+function Get-AksVnetResourceId {
+    param(
+        [Parameter(Mandatory=$true)][string]$AksName,
+        [Parameter(Mandatory=$true)][string]$AksResourceGroup
+    )
+
+    $subnetId = Invoke-AzChecked @("aks", "show", "--name", $AksName, "--resource-group", $AksResourceGroup, "--query", "agentPoolProfiles[0].vnetSubnetId", "--output", "tsv")
+    if (-not [string]::IsNullOrWhiteSpace($subnetId)) {
+        return Get-VnetResourceIdFromSubnet $subnetId
+    }
+
+    $nodeResourceGroup = Invoke-AzChecked @("aks", "show", "--name", $AksName, "--resource-group", $AksResourceGroup, "--query", "nodeResourceGroup", "--output", "tsv")
+    $nodeVnets = @(Invoke-AzChecked @("network", "vnet", "list", "--resource-group", $nodeResourceGroup, "--query", "[].id", "--output", "tsv")) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    if ($nodeVnets.Count -ne 1) {
+        throw "Could not uniquely determine the AKS node VNet. Pass -AcrPrivateDnsVnetResourceId explicitly."
+    }
+    return $nodeVnets[0]
+}
+
+function Assert-AcrPrivateLinkApproved {
+    param(
+        [Parameter(Mandatory=$true)][string]$RegistryName,
+        [Parameter(Mandatory=$true)][string]$RegistryResourceGroup,
+        [Parameter(Mandatory=$true)][string]$DnsVnetId,
+        [Parameter(Mandatory=$true)][string]$DnsZoneResourceGroup
+    )
+
+    $acr = Invoke-AzChecked @("acr", "show", "--name", $RegistryName, "--resource-group", $RegistryResourceGroup, "--output", "json") | ConvertFrom-Json
+    if ($acr.sku.name -ne "Premium") {
+        throw "ACR '$RegistryName' must use the Premium SKU for Private Link."
+    }
+
+    $approvedConnection = Invoke-AzChecked @("acr", "private-endpoint-connection", "list", "--registry-name", $RegistryName, "--resource-group", $RegistryResourceGroup, "--query", "[?privateLinkServiceConnectionState.status=='Approved'] | [0].name", "--output", "tsv")
+    if ([string]::IsNullOrWhiteSpace($approvedConnection)) {
+        throw "ACR '$RegistryName' does not have an approved private endpoint connection."
+    }
+
+    $dnsLinks = Invoke-AzChecked @("network", "private-dns", "link", "vnet", "list", "--resource-group", $DnsZoneResourceGroup, "--zone-name", "privatelink.azurecr.io", "--output", "json") | ConvertFrom-Json
+    $matchingLink = $dnsLinks | Where-Object { $_.virtualNetwork.id -ieq $DnsVnetId } | Select-Object -First 1
+    if (-not $matchingLink) {
+        throw "Private DNS zone 'privatelink.azurecr.io' is not linked to the AKS node VNet '$DnsVnetId'."
+    }
+    Write-Host "Approved ACR private endpoint and AKS node VNet DNS link verified." -ForegroundColor Green
+}
+
+if ($DisableAcrPublicAccess -and -not $UsePrivateAcr) {
+    throw "-DisableAcrPublicAccess requires -UsePrivateAcr."
+}
+if ($UsePrivateAcr) {
+    if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsVnetResourceId)) {
+        $AcrPrivateDnsVnetResourceId = Get-AksVnetResourceId -AksName $ClusterName -AksResourceGroup $ResourceGroupName
+    }
+    if ([string]::IsNullOrWhiteSpace($AcrPrivateDnsZoneResourceGroup)) {
+        $AcrPrivateDnsZoneResourceGroup = $ResourceGroupName
+    }
+    Assert-AcrPrivateLinkApproved -RegistryName $AcrName -RegistryResourceGroup $ResourceGroupName -DnsVnetId $AcrPrivateDnsVnetResourceId -DnsZoneResourceGroup $AcrPrivateDnsZoneResourceGroup
+    Write-Host "ACR public access remains available for publishing; AKS pulls resolve through Private Link." -ForegroundColor Green
+}
 
 # Generate ACR repository name if not provided
 if ([string]::IsNullOrEmpty($AcrRepository)) {
@@ -124,6 +214,11 @@ if ($LASTEXITCODE -ne 0) {
 $ErrorActionPreference = 'Stop'
 Write-Host "  kubectl context updated." -ForegroundColor Green
 
+if ($UsePrivateAcr) {
+    Invoke-AzChecked @("aks", "check-acr", "--name", $ClusterName, "--resource-group", $ResourceGroupName, "--acr", "$AcrName.azurecr.io", "--output", "none") | Out-Null
+    Write-Host "  AKS connectivity to the private ACR verified." -ForegroundColor Green
+}
+
 # ── Step 3: Update image on each instance ─────────────────────────────────────
 Write-Host "`nStep 3: Updating image on $($instancesToUpdate.Count) instance(s)..." -ForegroundColor Yellow
 
@@ -148,6 +243,7 @@ foreach ($instanceName in $instancesToUpdate) {
 
 # ── Step 4: Wait for rollouts to complete ─────────────────────────────────────
 Write-Host "`nStep 4: Waiting for rollouts to complete..." -ForegroundColor Yellow
+$allRolloutsReady = $true
 
 foreach ($instanceName in $instancesToUpdate) {
     Write-Host "  Waiting for '$instanceName' rollout..." -ForegroundColor Gray
@@ -159,8 +255,18 @@ foreach ($instanceName in $instancesToUpdate) {
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  '$instanceName' is ready." -ForegroundColor Green
     } else {
+        $allRolloutsReady = $false
         Write-Host "  '$instanceName' rollout timed out. Check with: kubectl rollout status deployment/$instanceName -n $Namespace" -ForegroundColor Yellow
     }
+}
+
+if ($UsePrivateAcr -and -not $allRolloutsReady) {
+    throw "Private ACR image pull validation failed because one or more deployments did not become ready."
+}
+
+if ($DisableAcrPublicAccess) {
+    Invoke-AzChecked @("acr", "update", "--name", $AcrName, "--resource-group", $ResourceGroupName, "--public-network-enabled", "false", "--output", "none") | Out-Null
+    Write-Host "ACR public network access disabled after successful image-pull validation." -ForegroundColor Green
 }
 
 # ── Step 5: Print URLs ─────────────────────────────────────────────────────────

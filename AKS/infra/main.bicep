@@ -12,6 +12,14 @@ param clusterName string
 @description('Azure Container Registry name.')
 param acrName string = take('${replace(clusterName, '-', '')}acr', 50)
 
+@description('SKU of the Azure Container Registry. Premium is required for Private Link.')
+@allowed([
+  'Basic'
+  'Standard'
+  'Premium'
+])
+param acrSku string = 'Standard'
+
 @description('Storage account name used for migration artifacts when a preconfigured storage account is not supplied.')
 param storageAccountName string = take('${replace(clusterName, '-', '')}stor', 24)
 
@@ -52,7 +60,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: acrName
   location: location
   sku: {
-    name: 'Standard'
+    name: acrSku
   }
   properties: {
     adminUserEnabled: false
