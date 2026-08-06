@@ -1547,20 +1547,26 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                // Find the starting position of the host (after "://")
-                var startIndex = EncodeMongoPasswordInConnectionString(connectionString).IndexOf("://") + 3;
-                if (startIndex < 3 || startIndex >= connectionString.Length)
+                // Work off the encoded string so indices stay aligned when the password is URL-encoded.
+                var encoded = EncodeMongoPasswordInConnectionString(connectionString);
+
+                // Start of the authority (after "://").
+                var startIndex = encoded.IndexOf("://");
+                if (startIndex < 0)
+                    return string.Empty;
+                startIndex += 3;
+                if (startIndex >= encoded.Length)
                     return string.Empty;
 
-                // Find the end position of the host (before "/" or "?")
-                var endIndex = connectionString.IndexOf("/", startIndex);
+                // Authority ends at the first "/" or "?" after the scheme.
+                var endIndex = encoded.IndexOfAny(new[] { '/', '?' }, startIndex);
                 if (endIndex == -1)
-                    endIndex = connectionString.IndexOf("?", startIndex);
-                if (endIndex == -1)
-                    endIndex = connectionString.Length;
+                    endIndex = encoded.Length;
 
-                // Extract and return the host
-                return connectionString.Substring(startIndex, endIndex - startIndex).Split('@')[1];
+                // Strip optional "user:pass@" -- credentials are absent for no-auth (VPN-only) endpoints.
+                var authority = encoded.Substring(startIndex, endIndex - startIndex);
+                var at = authority.LastIndexOf('@');
+                return at >= 0 ? authority.Substring(at + 1) : authority;
             }
             catch
             {
