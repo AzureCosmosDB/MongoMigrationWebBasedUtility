@@ -390,7 +390,8 @@ namespace OnlineMongoMigrationProcessor.Processors
             try
             {
                 var preCountCopier = new Helpers.Mongo.IndexCopier();
-                int expectedNonUniqueCount = await preCountCopier.CountNonUniqueIndexesAsync(sourceCollection, _log);
+                var targetClient = MongoClientFactory.Create(_log, targetConnStr);
+                int expectedNonUniqueCount = await preCountCopier.CountNonUniqueIndexesAsync(sourceCollection, _log, targetClient);
                 if (expectedNonUniqueCount > 0)
                 {
                     mu.IndexesExpected = expectedNonUniqueCount;
