@@ -36,6 +36,9 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             "$or", "$nor"
         };
 
+        private const int DefaultDiskAnnMaxDegree = 32;
+        private const int DefaultDiskAnnBuildListSize = 50;
+
         /// <summary>
         /// Index filter mode for selective index copying.
         /// </summary>
@@ -89,7 +92,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         /// Returns the count of non-unique indexes on the source collection (excluding _id_).
         /// Used for calculating IndexPercent progress.
         /// </summary>
-        public async Task<int> CountNonUniqueIndexesAsync(IMongoCollection<BsonDocument> sourceCollection, Log log)
+        public async Task<int> CountNonUniqueIndexesAsync(IMongoCollection<BsonDocument> sourceCollection, Log log, MongoClient? targetClient = null)
         {
             var indexDocuments = await sourceCollection.Indexes.List().ToListAsync();
             int count = 0;
@@ -100,6 +103,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 bool isUnique = indexDocument.TryGetValue("unique", out var unique) && unique.ToBoolean();
                 if (!isUnique) count++;
             }
+
+            if (targetClient != null && MongoHelper.IsDocumentDBEndpoint(targetClient))
+            {
+                var searchIndexes = await ListAtlasSearchIndexesAsync(sourceCollection, log);
+                count += searchIndexes.Sum(CountVectorFields);
+            }
+
             return count;
         }
 
@@ -346,7 +356,230 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 }
             }
 
+            if (filter != IndexFilter.UniqueOnly && MongoHelper.IsDocumentDBEndpoint(_targetClient))
+            {
+                var searchIndexes = await ListAtlasSearchIndexesAsync(sourceCollection, log);
+                counter += await CopyAtlasVectorIndexesToDocumentDbAsync(
+                    searchIndexes,
+                    _targetClient,
+                    databaseName,
+                    collectionName,
+                    createdIndexNames,
+                    log);
+            }
+
             return counter;
+        }
+
+        private static async Task<List<BsonDocument>> ListAtlasSearchIndexesAsync(
+            IMongoCollection<BsonDocument> sourceCollection,
+            Log log)
+        {
+            try
+            {
+                var command = new BsonDocument
+                {
+                    { "aggregate", sourceCollection.CollectionNamespace.CollectionName },
+                    { "pipeline", new BsonArray { new BsonDocument("$listSearchIndexes", new BsonDocument()) } },
+                    { "cursor", new BsonDocument("batchSize", 1000) }
+                };
+
+                var response = await sourceCollection.Database.RunCommandAsync<BsonDocument>(command);
+                if (!response.TryGetValue("cursor", out var cursorValue)
+                    || !cursorValue.IsBsonDocument
+                    || !cursorValue.AsBsonDocument.TryGetValue("firstBatch", out var batchValue)
+                    || !batchValue.IsBsonArray)
+                {
+                    return new List<BsonDocument>();
+                }
+
+                return batchValue.AsBsonArray
+                    .Where(value => value.IsBsonDocument)
+                    .Select(value => value.AsBsonDocument)
+                    .ToList();
+            }
+            catch (MongoCommandException ex) when (ex.Code == 40324 || ex.Code == 59)
+            {
+                log.WriteLine($"Source does not support Atlas search-index discovery for {sourceCollection.CollectionNamespace}.", LogType.Debug);
+                return new List<BsonDocument>();
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Unable to discover Atlas search indexes for {sourceCollection.CollectionNamespace}: {ex.Message}", LogType.Warning);
+                return new List<BsonDocument>();
+            }
+        }
+
+        private static int CountVectorFields(BsonDocument searchIndex)
+        {
+            return GetSearchIndexFields(searchIndex)
+                .Count(field => field.TryGetValue("type", out var type)
+                    && type.IsString
+                    && string.Equals(type.AsString, "vector", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static IEnumerable<BsonDocument> GetSearchIndexFields(BsonDocument searchIndex)
+        {
+            BsonDocument? definition = null;
+            if (searchIndex.TryGetValue("latestDefinition", out var latestDefinition) && latestDefinition.IsBsonDocument)
+                definition = latestDefinition.AsBsonDocument;
+            else if (searchIndex.TryGetValue("definition", out var definitionValue) && definitionValue.IsBsonDocument)
+                definition = definitionValue.AsBsonDocument;
+
+            if (definition == null
+                || !definition.TryGetValue("fields", out var fieldsValue)
+                || !fieldsValue.IsBsonArray)
+            {
+                return Enumerable.Empty<BsonDocument>();
+            }
+
+            return fieldsValue.AsBsonArray
+                .Where(value => value.IsBsonDocument)
+                .Select(value => value.AsBsonDocument);
+        }
+
+        private static async Task<int> CopyAtlasVectorIndexesToDocumentDbAsync(
+            IEnumerable<BsonDocument> searchIndexes,
+            MongoClient targetClient,
+            string databaseName,
+            string collectionName,
+            HashSet<string> createdIndexNames,
+            Log log)
+        {
+            int copied = 0;
+            foreach (var searchIndex in searchIndexes)
+            {
+                var sourceIndexName = searchIndex.GetValue("name", "vector_index").AsString;
+                var vectorFields = GetSearchIndexFields(searchIndex).ToList();
+                int vectorFieldCount = CountVectorFields(searchIndex);
+
+                foreach (var field in vectorFields)
+                {
+                    if (!field.TryGetValue("type", out var type)
+                        || !type.IsString
+                        || !string.Equals(type.AsString, "vector", StringComparison.OrdinalIgnoreCase))
+                    {
+                        log.WriteLine($"Skipping non-vector field in Atlas search index '{sourceIndexName}' on {databaseName}.{collectionName}; DocumentDB translation currently supports vector fields only.", LogType.Warning);
+                        continue;
+                    }
+
+                    if (!TryTranslateVectorField(field, out var path, out var cosmosSearchOptions, out var issue))
+                    {
+                        log.WriteLine($"Skipping vector field in Atlas search index '{sourceIndexName}' on {databaseName}.{collectionName}: {issue}", LogType.Warning);
+                        continue;
+                    }
+
+                    var desiredName = vectorFieldCount == 1
+                        ? sourceIndexName
+                        : $"{sourceIndexName}_{SanitizeIndexNamePart(path)}";
+                    var targetIndexName = GetUniqueIndexName(desiredName, createdIndexNames, databaseName, collectionName, log);
+                    var indexDoc = new BsonDocument
+                    {
+                        { "name", targetIndexName },
+                        { "key", new BsonDocument(path, "cosmosSearch") },
+                        { "cosmosSearchOptions", cosmosSearchOptions }
+                    };
+
+                    if (await SubmitDocumentDbVectorIndexAsync(targetClient, databaseName, collectionName, indexDoc, log))
+                        copied++;
+                }
+            }
+
+            return copied;
+        }
+
+        private static bool TryTranslateVectorField(
+            BsonDocument field,
+            out string path,
+            out BsonDocument cosmosSearchOptions,
+            out string issue)
+        {
+            path = string.Empty;
+            cosmosSearchOptions = new BsonDocument();
+            issue = string.Empty;
+
+            if (!field.TryGetValue("path", out var pathValue) || !pathValue.IsString || string.IsNullOrWhiteSpace(pathValue.AsString))
+            {
+                issue = "the vector path is missing or invalid.";
+                return false;
+            }
+
+            if (!field.TryGetValue("numDimensions", out var dimensionsValue)
+                || !dimensionsValue.IsNumeric
+                || dimensionsValue.ToInt32() <= 0)
+            {
+                issue = "numDimensions is missing or invalid.";
+                return false;
+            }
+
+            if (!field.TryGetValue("similarity", out var similarityValue)
+                || !similarityValue.IsString
+                || !TryMapSimilarity(similarityValue.AsString, out var similarity))
+            {
+                issue = "similarity must be cosine, euclidean, or dotProduct.";
+                return false;
+            }
+
+            path = pathValue.AsString;
+            cosmosSearchOptions = new BsonDocument
+            {
+                { "kind", "vector-diskann" },
+                { "dimensions", dimensionsValue.ToInt32() },
+                { "similarity", similarity },
+                { "maxDegree", DefaultDiskAnnMaxDegree },
+                { "lBuild", DefaultDiskAnnBuildListSize }
+            };
+            return true;
+        }
+
+        private static bool TryMapSimilarity(string atlasSimilarity, out string documentDbSimilarity)
+        {
+            documentDbSimilarity = atlasSimilarity.ToLowerInvariant() switch
+            {
+                "cosine" => "COS",
+                "euclidean" => "L2",
+                "dotproduct" => "IP",
+                _ => string.Empty
+            };
+            return documentDbSimilarity.Length > 0;
+        }
+
+        private static string SanitizeIndexNamePart(string path)
+        {
+            var sanitized = new string(path.Select(character => char.IsLetterOrDigit(character) || character == '_'
+                ? character
+                : '_').ToArray());
+            return string.IsNullOrWhiteSpace(sanitized) ? "vector" : sanitized;
+        }
+
+        private static async Task<bool> SubmitDocumentDbVectorIndexAsync(
+            MongoClient targetClient,
+            string databaseName,
+            string collectionName,
+            BsonDocument indexDoc,
+            Log log)
+        {
+            var command = new BsonDocument
+            {
+                { "createIndexes", collectionName },
+                { "indexes", new BsonArray { indexDoc } },
+                { "maxTimeMS", 5000 }
+            };
+
+            try
+            {
+                await targetClient.GetDatabase(databaseName).RunCommandAsync<BsonDocument>(command);
+                return true;
+            }
+            catch (Exception ex) when (IsExpectedBlockingTimeout(ex))
+            {
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Failed to create translated vector index '{indexDoc["name"]}' on {databaseName}.{collectionName}. Details: {ex.Message}", LogType.Error);
+                return false;
+            }
         }
 
         private static async Task<bool> SubmitNonUniqueIndexBuildAsync(
