@@ -33,6 +33,7 @@ Streamline your migration to Azure DocumentDB with a reliable, easy‑to‑use w
     - [Indexing: blocking vs non-blocking](#indexing-blocking-vs-non-blocking)
     - [Sharding and Move-to-shard](#sharding-and-move-to-shard)
   - [Migration modes](#migration-modes)
+  - [Change streams with different shard keys](#change-streams-with-different-shard-keys)
   - [Job options and behaviors](#job-options-and-behaviors)
   - [Async partitioning and index-build monitoring](#async-partitioning-and-index-build-monitoring)
   - [Get List of Collections](#get-list-of-collections)
@@ -299,8 +300,46 @@ Migrations can be done in three ways:
 
   > **Oplog retention:** Ensure the source oplog has not rotated past your chosen start time — otherwise the change stream cannot resume from that point. See [Oplog retention size](#oplog-retention-size).
 
+### Change streams with different shard keys
 
-#### Oplog retention size
+For Online and Sync Only migrations, the tool detects the source and target shard-key definitions when a collection first receives an update or delete, then caches the routing decision for later batches. Collections that do not require special routing continue to use the standard change-stream `DocumentKey` path.
+
+| Source collection | Target collection | Inserts | Updates and replacements | Deletes |
+|---|---|---|---|---|
+| Unsharded | Unsharded | Applied normally | Applied normally | Applied normally |
+| Sharded | Unsharded | Applied normally | Applied normally | Applied normally |
+| Sharded | Sharded with the same key fields | Applied normally | Applied using the source `DocumentKey` | Applied using the source `DocumentKey` |
+| Sharded | Sharded with different key fields | Applied normally | Applied using `_id` and target shard-key values from `FullDocument` | Target lookup and routed delete; DLQ on unresolved lookup |
+| Unsharded | Sharded | Applied normally | Applied using `_id` and target shard-key values from `FullDocument` | Target lookup and routed delete; DLQ on unresolved lookup |
+
+Target-aware update routing requires every target shard-key path to be present in `FullDocument`. Nested paths such as `tenant.region` are supported. If a required value is missing, the write fails and the change-stream checkpoint is not advanced, allowing the batch to be retried.
+
+Delete events do not normally include the deleted document body or a target-only shard-key value. When the target is sharded but the source `DocumentKey` cannot directly route the delete, the tool performs a target lookup using the complete source `DocumentKey` (`_id` plus source shard-key values). Because those fields are not the target shard key, this lookup may be a scatter-gather read across target shards. If exactly one target document matches and contains every target shard-key path, the tool deletes it using `_id` plus the discovered target shard key. If no document matches, the target is already in the desired state and the delete is treated as complete. This extra read occurs only for deletes that require target-aware routing; collections with matching shard keys continue to use the standard direct-delete path.
+
+If lookup fails, returns multiple matches, or finds a document without all required target shard-key values, the tool does not issue an unsafe delete. It upserts an idempotent record on the write-target server in:
+
+```text
+migration_dlq.change_stream_deletes_{jobId}
+```
+
+Each migration job writes unresolved events to its own collection, with `{jobId}` replaced by the migration job ID. Each record also contains the job ID, source and target namespaces, source `DocumentKey`, target shard-key definition, cluster timestamp, UTC recording time, operation type, and reason. It intentionally contains neither a resume token nor the deleted document body. The record ID is derived from the job ID, source namespace, cluster timestamp, and source `DocumentKey`, so retrying the same event does not create another entry.
+
+After an automatic delete or successful DLQ write, the migration checkpoint advances and processing continues. If the routed delete or DLQ write fails, the batch is marked failed and the checkpoint remains unchanged. To clean up a DLQ record manually, use the source document identity from `sourceDocumentKey` to locate the target document, obtain its target shard-key value, delete it with `_id` plus that target shard key, and then remove the DLQ record.
+
+Delete outcomes are summarized once per collection flush rather than logged once per event:
+
+```text
+Target-aware delete summary for database.collection: total=20, routed=12, alreadyAbsent=8, dlq=0.
+```
+
+- `routed` — A unique target document was found and deleted using its target shard key.
+- `alreadyAbsent` — No target document matched the source `DocumentKey`; no write was necessary.
+- `dlq` — The lookup or routing could not be resolved safely and the event was stored in the job-specific DLQ collection.
+
+When `dlq=0`, the summary appears in Monitor as an Info message without adding a routine entry to the persistent Logs table. When one or more events require manual cleanup, the summary appears in Monitor and is also written to persistent Logs as a Warning. Worker-level details remain available at Debug level.
+
+
+### Oplog retention size
 
 For online jobs, ensure that the oplog retention size of the source MongoDB is large enough to store operations for at least the duration of both the download and upload activities. If the oplog retention size is too small and there is a high volume of write operations, the online migration may fail or be unable to read all documents from the change stream in time.
 
