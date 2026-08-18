@@ -1323,21 +1323,44 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         }
 
         /// <summary>
-        /// Retrieves the shard key definition for a collection from the source config.collections.
+        /// Retrieves a collection's shard key using the metadata API supported by the endpoint.
+        /// DocumentDB vCore exposes it through listCollections; native MongoDB uses config.collections.
+        /// </summary>
+        public static async Task<BsonDocument?> GetShardKeyAsync(Log log, MongoClient client, string databaseName, string collectionName)
+        {
+            bool isDocumentDb = IsDocumentDBEndpoint(client);
+            var shardKey = isDocumentDb
+                ? await GetShardKeyFromDocumentDbAsync(log, client, databaseName, collectionName)
+                : await GetShardKeyFromMongoDbAsync(log, client, databaseName, collectionName);
+
+            if (shardKey != null)
+                return shardKey;
+
+            log.WriteLine(
+                $"Primary shard-key lookup returned no metadata for {databaseName}.{collectionName}; trying the alternate endpoint API.",
+                LogType.Debug);
+
+            return isDocumentDb
+                ? await GetShardKeyFromMongoDbAsync(log, client, databaseName, collectionName)
+                : await GetShardKeyFromDocumentDbAsync(log, client, databaseName, collectionName);
+        }
+
+        /// <summary>
+        /// Retrieves the shard key definition for a native MongoDB collection from config.collections.
         /// Returns null if the collection is not sharded or the shard key cannot be determined.
         /// </summary>
-        public static async Task<BsonDocument?> GetShardKeyFromSourceAsync(Log log, MongoClient sourceClient, string databaseName, string collectionName)
+        public static async Task<BsonDocument?> GetShardKeyFromMongoDbAsync(Log log, MongoClient client, string databaseName, string collectionName)
         {
             try
             {
-                var configDb = sourceClient.GetDatabase("config");
+                var configDb = client.GetDatabase("config");
                 var collectionsCol = configDb.GetCollection<BsonDocument>("collections");
                 var ns = $"{databaseName}.{collectionName}";
 
                 var filter = Builders<BsonDocument>.Filter.Eq("_id", ns);
                 var doc = await collectionsCol.Find(filter).FirstOrDefaultAsync();
 
-                if (doc != null && doc.Contains("key"))
+                if (doc != null && !doc.GetValue("dropped", false).ToBoolean() && doc.Contains("key"))
                 {
                     var key = doc["key"].AsBsonDocument;
                     log.WriteLine($"Found shard key for {ns}: {key}", LogType.Debug);
@@ -1350,6 +1373,59 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             catch (Exception ex)
             {
                 log.WriteLine($"Error reading shard key for {databaseName}.{collectionName}: {ex.Message}", LogType.Warning);
+                return null;
+            }
+        }
+
+        public static Task<BsonDocument?> GetShardKeyFromSourceAsync(Log log, MongoClient sourceClient, string databaseName, string collectionName)
+        {
+            return GetShardKeyAsync(log, sourceClient, databaseName, collectionName);
+        }
+
+        /// <summary>
+        /// Retrieves the shard key definition exposed by Azure DocumentDB
+        /// in the listCollections response. Returns null for an unsharded collection or
+        /// when the metadata cannot be determined.
+        /// </summary>
+        public static async Task<BsonDocument?> GetShardKeyFromDocumentDbAsync(Log log, MongoClient client, string databaseName, string collectionName)
+        {
+            var ns = $"{databaseName}.{collectionName}";
+            try
+            {
+                var database = client.GetDatabase(databaseName);
+                var command = new BsonDocument
+                {
+                    { "listCollections", 1 },
+                    { "filter", new BsonDocument("name", collectionName) }
+                };
+                var result = await database.RunCommandAsync<BsonDocument>(command);
+
+                if (result.TryGetValue("cursor", out var cursorValue) && cursorValue.IsBsonDocument &&
+                    cursorValue.AsBsonDocument.TryGetValue("firstBatch", out var batchValue) && batchValue.IsBsonArray &&
+                    batchValue.AsBsonArray.FirstOrDefault() is BsonDocument collectionInfo)
+                {
+                    foreach (var container in new[] { collectionInfo.GetValue("info", BsonNull.Value), collectionInfo.GetValue("options", BsonNull.Value), collectionInfo })
+                    {
+                        if (container.IsBsonDocument &&
+                            container.AsBsonDocument.TryGetValue("shardKey", out var shardKeyValue) &&
+                            shardKeyValue.IsBsonDocument &&
+                            shardKeyValue.AsBsonDocument.ElementCount > 0)
+                        {
+                            var shardKey = shardKeyValue.AsBsonDocument;
+                            log.WriteLine($"Found DocumentDB shard key for {ns}: {shardKey}", LogType.Debug);
+                            return shardKey;
+                        }
+                    }
+
+                    log.WriteLine($"DocumentDB listCollections metadata for {ns} did not contain a recognized shardKey field. Metadata: {collectionInfo.ToJson()}", LogType.Debug);
+                }
+
+                log.WriteLine($"No DocumentDB shard key found for {ns}", LogType.Debug);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                log.WriteLine($"Error reading DocumentDB shard key for {ns}: {ex.Message}", LogType.Warning);
                 return null;
             }
         }
@@ -2252,7 +2328,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         private static readonly ConcurrentDictionary<MongoClient, bool> _isDocumentDbCache = new();
 
         /// <summary>
-        /// Detects whether the given <see cref="MongoClient"/> targets Azure Cosmos DB for MongoDB vCore
+        /// Detects whether the given <see cref="MongoClient"/> targets Azure DocumentDB
         /// (DocumentDB) by issuing <c>db.runCommand({ hello: 1 })</c> against the admin database and
         /// inspecting <c>internal.kind == "azuredocumentdb"</c>. Result is cached per client instance.
         /// </summary>

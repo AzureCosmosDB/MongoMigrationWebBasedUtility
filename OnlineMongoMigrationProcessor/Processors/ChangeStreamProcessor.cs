@@ -43,6 +43,7 @@ namespace OnlineMongoMigrationProcessor
         protected virtual bool UseResumeTokenCache => true; // Override in server-level processor to return false
         protected ConcurrentDictionary<string, string> _resumeTokenCache = new ConcurrentDictionary<string, string>();
         protected ConcurrentDictionary<string, long> _migrationUnitsToProcess = new ConcurrentDictionary<string, long>();
+        private readonly ConcurrentDictionary<string, Task<BsonDocument?>> _mismatchedTargetShardKeyCache = new ConcurrentDictionary<string, Task<BsonDocument?>>(StringComparer.OrdinalIgnoreCase);
 
         // Keep temp forensic log lines bounded; emit multiple lines when IDs are large.
         private const int TempLogMaxIdsPerLine = 25;
@@ -198,7 +199,7 @@ namespace OnlineMongoMigrationProcessor
         {
             get
             {
-                // Azure Cosmos DB for MongoDB vCore (DocumentDB) reports a Mongo-compatible
+                // Azure DocumentDB reports a Mongo-compatible
                 // version >= 6 but rejects $changeStreamSplitLargeEvent with
                 // "Stage $changeStreamSplitLargeEvent is not permitted in a $changeStream pipeline".
                 // Skip it for that endpoint regardless of reported server version.
@@ -212,8 +213,8 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        // True when the endpoint the change-stream is opened against is Azure Cosmos DB for
-        // MongoDB vCore (DocumentDB). For sync-back the watched endpoint is the target;
+        // True when the endpoint the change-stream is opened against is Azure DocumentDB.
+        // For sync-back the watched endpoint is the target;
         // otherwise it's the source. Delegates to MongoHelper.IsDocumentDBEndpoint which
         // probes via `db.runCommand({ hello: 1 })` and caches per-client.
         protected bool IsWatchedEndpointDocumentDB =>
@@ -1000,6 +1001,14 @@ namespace OnlineMongoMigrationProcessor
 
                 // Use ParallelWriteHelper for improved performance with retry logic
                 var parallelWriteHelper = new ParallelWriteHelper(_log, _syncBackPrefix);
+                string targetNamespace = collection.CollectionNamespace.FullName;
+                BsonDocument? mismatchedTargetShardKey = null;
+                if (updateEvents.Count > 0 || deleteEvents.Count > 0)
+                {
+                    mismatchedTargetShardKey = await _mismatchedTargetShardKeyCache.GetOrAdd(
+                        targetNamespace,
+                        _ => ResolveMismatchedTargetShardKeyAsync(mu, collection));
+                }
 
                 var result = await parallelWriteHelper.ProcessWritesAsync(
                     mu,
@@ -1013,7 +1022,8 @@ namespace OnlineMongoMigrationProcessor
                     isAggressiveComplete,
                     jobId,
                     _targetClient,
-                    isSimulatedRun);
+                    isSimulatedRun,
+                    mismatchedTargetShardKey);
 
                 // Track write latency directly in AccumulatedChangesTracker
                 accumulatedChangesInColl.CSTotaWriteDurationInMS += result.WriteLatencyMS;
@@ -1062,6 +1072,118 @@ namespace OnlineMongoMigrationProcessor
                 _log.WriteLine($"{_syncBackPrefix}Error processing operations for {collection.CollectionNamespace.FullName}. Details: {ex}", LogType.Error);
                 throw; // Re-throw all exceptions to ensure they are handled upstream
             }
+        }
+
+        protected BsonDocument? GetMismatchedTargetShardKeyForReplay(
+            MigrationUnit mu,
+            IMongoCollection<BsonDocument> targetCollection)
+        {
+            return _mismatchedTargetShardKeyCache.GetOrAdd(
+                targetCollection.CollectionNamespace.FullName,
+                _ => ResolveMismatchedTargetShardKeyAsync(mu, targetCollection))
+                .GetAwaiter()
+                .GetResult();
+        }
+
+        protected static FilterDefinition<BsonDocument> BuildReplayTargetShardKeyFilter(
+            BsonDocument document,
+            BsonDocument targetShardKey,
+            string collectionNamespace)
+        {
+            if (!document.TryGetValue("_id", out var idValue))
+                throw new InvalidOperationException($"Cannot route auto-replay for {collectionNamespace}: document is missing _id.");
+
+            var filters = new List<FilterDefinition<BsonDocument>>
+            {
+                MongoHelper.BuildIdEqualityFilter<BsonDocument>(idValue)
+            };
+
+            foreach (var shardKeyElement in targetShardKey.Elements)
+            {
+                if (string.Equals(shardKeyElement.Name, "_id", StringComparison.Ordinal))
+                    continue;
+
+                BsonValue current = document;
+                foreach (var segment in shardKeyElement.Name.Split('.'))
+                {
+                    if (!current.IsBsonDocument || !current.AsBsonDocument.TryGetValue(segment, out current))
+                    {
+                        throw new InvalidOperationException(
+                            $"Cannot route auto-replay for {collectionNamespace}: document does not contain target shard key path '{shardKeyElement.Name}'.");
+                    }
+                }
+
+                filters.Add(Builders<BsonDocument>.Filter.Eq(shardKeyElement.Name, current));
+            }
+
+            return filters.Count == 1
+                ? filters[0]
+                : Builders<BsonDocument>.Filter.And(filters);
+        }
+
+        protected bool ReplayTargetAwareDelete(
+            BsonDocument sourceDocumentKey,
+            IMongoCollection<BsonDocument> targetCollection,
+            BsonDocument targetShardKey)
+        {
+            var sourceIdentityFilter = MongoHelper.BuildFilterFromDocumentKey(sourceDocumentKey);
+            var matches = targetCollection.Find(sourceIdentityFilter).Limit(2).ToList();
+            if (matches.Count == 0)
+                return true;
+
+            if (matches.Count > 1)
+                return false;
+
+            var routedFilter = BuildReplayTargetShardKeyFilter(
+                matches[0], targetShardKey, targetCollection.CollectionNamespace.FullName);
+            targetCollection.DeleteOne(routedFilter);
+            return true;
+        }
+
+        protected async Task<BsonDocument?> ResolveMismatchedTargetShardKeyAsync(
+            MigrationUnit mu,
+            IMongoCollection<BsonDocument> targetCollection)
+        {
+            var writeSourceClient = _syncBack ? _targetClient : _sourceClient;
+            var writeTargetClient = _syncBack ? _sourceClient : _targetClient;
+            string sourceDatabaseName = _syncBack ? mu.GetEffectiveTargetDatabaseName() : mu.DatabaseName;
+            string sourceCollectionName = _syncBack ? mu.GetEffectiveTargetCollectionName() : mu.CollectionName;
+            string targetDatabaseName = targetCollection.Database.DatabaseNamespace.DatabaseName;
+            string targetCollectionName = targetCollection.CollectionNamespace.CollectionName;
+
+            var sourceShardKeyTask = MongoHelper.GetShardKeyAsync(
+                _log, writeSourceClient, sourceDatabaseName, sourceCollectionName);
+            var targetShardKeyTask = MongoHelper.GetShardKeyAsync(
+                _log, writeTargetClient, targetDatabaseName, targetCollectionName);
+            await Task.WhenAll(sourceShardKeyTask, targetShardKeyTask);
+
+            var sourceShardKey = await sourceShardKeyTask;
+            var targetShardKey = await targetShardKeyTask;
+            if (targetShardKey == null)
+            {
+                string metadataWarning = $"{_syncBackPrefix}Target shard key was not detected for {targetCollection.CollectionNamespace.FullName}. Standard DocumentKey routing will be used; verify that this target collection is unsharded or inspect Debug logs for listCollections metadata.";
+                _log.WriteLine(metadataWarning, LogType.Warning);
+                _log.ShowInMonitor(metadataWarning, LogType.Warning);
+                return null;
+            }
+
+            bool fieldsMatch = sourceShardKey != null &&
+                new HashSet<string>(sourceShardKey.Names, StringComparer.Ordinal)
+                    .SetEquals(targetShardKey.Names);
+
+            if (fieldsMatch)
+            {
+                _log.WriteLine(
+                    $"{_syncBackPrefix}Source and target shard keys match for {targetCollection.CollectionNamespace.FullName}; using the standard DocumentKey update path.",
+                    LogType.Debug);
+                return null;
+            }
+
+            string sourceDescription = sourceShardKey?.ToJson() ?? "<unsharded or unavailable>";
+            string routingMessage = $"{_syncBackPrefix}Target-aware shard-key handling enabled for {targetCollection.CollectionNamespace.FullName}: source={sourceDescription}, target={targetShardKey.ToJson()}. Updates will use the target shard key; deletes will look up the target by source DocumentKey and use the DLQ only when routing cannot be resolved.";
+            _log.WriteLine(routingMessage, LogType.Warning);
+            _log.ShowInMonitor(routingMessage, LogType.Warning);
+            return targetShardKey;
         }
 
         protected async Task AggressiveCSCleanupAsync()

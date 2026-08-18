@@ -1717,11 +1717,8 @@ namespace OnlineMongoMigrationProcessor
 
             var bsonDoc = BsonDocument.Parse(documentKey);
             var filter = MongoHelper.BuildFilterFromDocumentKey(bsonDoc);
-            var sourceRawCollection = sourceCollection.Database.GetCollection<RawBsonDocument>(sourceCollection.CollectionNamespace.CollectionName);
-            var targetRawCollection = targetCollection.Database.GetCollection<RawBsonDocument>(targetCollection.CollectionNamespace.CollectionName);
-            var renderedFilter = RenderFilterForRawCollection(filter);
-            var rawFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedFilter);
-            var result = sourceRawCollection.Find(rawFilter).FirstOrDefault(); // Retrieve the document for the resume token
+            var result = sourceCollection.Find(filter).FirstOrDefault();
+            var targetShardKey = GetMismatchedTargetShardKeyForReplay(mu, targetCollection);
 
             try
             {
@@ -1734,7 +1731,7 @@ namespace OnlineMongoMigrationProcessor
                             _log.WriteLine($"{_syncBackPrefix}No document found for insert operation with document key {documentKey} in {sourceCollection.CollectionNamespace}. Skipping insert.", LogType.Warning);
                             return true; // Skip if no document found
                         }
-                        targetRawCollection.InsertOne(result);
+                        targetCollection.InsertOne(result);
                         IncrementDocCounter(mu, opType);
                         return true;
                     case ChangeStreamOperationType.Update:
@@ -1744,8 +1741,15 @@ namespace OnlineMongoMigrationProcessor
                             _log.WriteLine($"{_syncBackPrefix}Processing {opType} operation for {sourceCollection.CollectionNamespace} with document key {documentKey}. No document found on source, deleting it from target.", LogType.Debug);
                             try
                             {
-                                // Use DocumentKey-based filter for sharded collections
-                                targetRawCollection.DeleteOne(rawFilter);
+                                if (targetShardKey != null)
+                                {
+                                    if (!ReplayTargetAwareDelete(bsonDoc, targetCollection, targetShardKey))
+                                        return false;
+                                }
+                                else
+                                {
+                                    targetCollection.DeleteOne(filter);
+                                }
                                 IncrementDocCounter(mu, ChangeStreamOperationType.Delete);
                             }
                             catch
@@ -1754,14 +1758,23 @@ namespace OnlineMongoMigrationProcessor
                         }
                         else
                         {
-                            // Use DocumentKey-based filter for sharded collections with upsert
-                            targetRawCollection.ReplaceOne(rawFilter, result, new ReplaceOptions { IsUpsert = true });
+                            var replaceFilter = targetShardKey != null
+                                ? BuildReplayTargetShardKeyFilter(result, targetShardKey, targetCollection.CollectionNamespace.FullName)
+                                : filter;
+                            targetCollection.ReplaceOne(replaceFilter, result, new ReplaceOptions { IsUpsert = true });
                             IncrementDocCounter(mu, opType);
                             return true;
                         }
                     case ChangeStreamOperationType.Delete:
-                        // Use DocumentKey-based filter for sharded collections
-                        targetRawCollection.DeleteOne(rawFilter);
+                        if (targetShardKey != null)
+                        {
+                            if (!ReplayTargetAwareDelete(bsonDoc, targetCollection, targetShardKey))
+                                return false;
+                        }
+                        else
+                        {
+                            targetCollection.DeleteOne(filter);
+                        }
                         IncrementDocCounter(mu, opType);
                         return true;
                     default:

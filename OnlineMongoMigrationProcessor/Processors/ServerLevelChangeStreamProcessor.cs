@@ -1382,11 +1382,8 @@ namespace OnlineMongoMigrationProcessor
                 sourceCollection = sourceDb.GetCollection<BsonDocument>(targetCollectionName);
             }
 
-            var sourceRawCollection = sourceCollection.Database.GetCollection<RawBsonDocument>(sourceCollection.CollectionNamespace.CollectionName);
-            var targetRawCollection = targetCollection.Database.GetCollection<RawBsonDocument>(targetCollection.CollectionNamespace.CollectionName);
-            var renderedFilter = RenderFilterForRawCollection(filter);
-            var rawFilter = new BsonDocumentFilterDefinition<RawBsonDocument>(renderedFilter);
-            var result = sourceRawCollection.Find(rawFilter).FirstOrDefault();
+            var result = sourceCollection.Find(filter).FirstOrDefault();
+            var targetShardKey = GetMismatchedTargetShardKeyForReplay(migrationUnit, targetCollection);
 
             try
             {
@@ -1401,7 +1398,7 @@ namespace OnlineMongoMigrationProcessor
                             _log.WriteLine($"No document found for insert operation with document key {documentKey} in {collectionKey}. Skipping insert.");
                             return true;
                         }
-                        targetRawCollection.InsertOne(result);
+                        targetCollection.InsertOne(result);
                         IncrementDocCounter(migrationUnit, operationType);
                         return true;
 
@@ -1412,8 +1409,15 @@ namespace OnlineMongoMigrationProcessor
                             _log.WriteLine($"Processing {operationType} operation for {collectionKey} with document key {documentKey}. No document found on source, deleting it from target.");
                             try
                             {
-                                // Use DocumentKey-based filter for sharded collections
-                                targetRawCollection.DeleteOne(rawFilter);
+                                if (targetShardKey != null)
+                                {
+                                    if (!ReplayTargetAwareDelete(bsonDoc, targetCollection, targetShardKey))
+                                        return false;
+                                }
+                                else
+                                {
+                                    targetCollection.DeleteOne(filter);
+                                }
                                 IncrementDocCounter(migrationUnit, ChangeStreamOperationType.Delete);
                             }
                             catch { }
@@ -1421,15 +1425,24 @@ namespace OnlineMongoMigrationProcessor
                         }
                         else
                         {
-                            // Use DocumentKey-based filter for sharded collections with upsert
-                            targetRawCollection.ReplaceOne(rawFilter, result, new ReplaceOptions { IsUpsert = true });
+                            var replaceFilter = targetShardKey != null
+                                ? BuildReplayTargetShardKeyFilter(result, targetShardKey, targetCollection.CollectionNamespace.FullName)
+                                : filter;
+                            targetCollection.ReplaceOne(replaceFilter, result, new ReplaceOptions { IsUpsert = true });
                             IncrementDocCounter(migrationUnit, operationType);
                             return true;
                         }
 
                     case ChangeStreamOperationType.Delete:
-                        // Use DocumentKey-based filter for sharded collections
-                        targetRawCollection.DeleteOne(rawFilter);
+                        if (targetShardKey != null)
+                        {
+                            if (!ReplayTargetAwareDelete(bsonDoc, targetCollection, targetShardKey))
+                                return false;
+                        }
+                        else
+                        {
+                            targetCollection.DeleteOne(filter);
+                        }
                         IncrementDocCounter(migrationUnit, operationType);
                         return true;
 

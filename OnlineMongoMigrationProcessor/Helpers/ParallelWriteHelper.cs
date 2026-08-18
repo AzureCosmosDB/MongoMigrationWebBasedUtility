@@ -59,6 +59,54 @@ namespace OnlineMongoMigrationProcessor.Helpers
             });
         }
 
+        private static FilterDefinition<BsonDocument> BuildTargetShardKeyFilter(
+            BsonDocument fullDocument,
+            BsonDocument targetShardKey,
+            string collectionNamespace)
+        {
+            if (!fullDocument.TryGetValue("_id", out var idValue))
+                throw new InvalidOperationException($"Cannot route update for {collectionNamespace}: fullDocument is missing _id.");
+
+            var filters = new List<FilterDefinition<BsonDocument>>
+            {
+                MongoHelper.BuildIdEqualityFilter<BsonDocument>(idValue)
+            };
+
+            foreach (var shardKeyElement in targetShardKey.Elements)
+            {
+                if (string.Equals(shardKeyElement.Name, "_id", StringComparison.Ordinal))
+                    continue;
+
+                if (!TryGetValueByPath(fullDocument, shardKeyElement.Name, out var shardKeyValue))
+                {
+                    throw new InvalidOperationException(
+                        $"Cannot route update for {collectionNamespace}: fullDocument does not contain target shard key path '{shardKeyElement.Name}'.");
+                }
+
+                filters.Add(Builders<BsonDocument>.Filter.Eq(shardKeyElement.Name, shardKeyValue));
+            }
+
+            return filters.Count == 1
+                ? filters[0]
+                : Builders<BsonDocument>.Filter.And(filters);
+        }
+
+        private static bool TryGetValueByPath(BsonDocument document, string path, out BsonValue value)
+        {
+            BsonValue current = document;
+            foreach (var segment in path.Split('.'))
+            {
+                if (!current.IsBsonDocument || !current.AsBsonDocument.TryGetValue(segment, out current))
+                {
+                    value = BsonNull.Value;
+                    return false;
+                }
+            }
+
+            value = current;
+            return true;
+        }
+
         /// <summary>
         /// Calculate optimal number of threads based on available CPU cores and RAM
         /// </summary>
@@ -114,7 +162,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             bool isAggressiveComplete = true,
             string jobId = "",
             MongoClient? targetClient = null,
-            bool isSimulatedRun = false)
+            bool isSimulatedRun = false,
+            BsonDocument? targetShardKey = null)
         {
             var result = new WriteResult();
             
@@ -158,7 +207,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             isAggressiveComplete,
                             jobId,
                             targetClient,
-                            isSimulatedRun);
+                            isSimulatedRun,
+                            targetShardKey);
                         MigrationJobContext.AddVerboseLog($"{_logPrefix}Completed batch {batchIndex} processing for {collection.CollectionNamespace}: success={batchResult.Success}, processed={batchResult.Processed}, failures={batchResult.Failures}");
                         return batchResult;
                     }
@@ -200,6 +250,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
                     result.Processed += batchResult.Processed;
                     result.Failures += batchResult.Failures;
                     result.Skipped += batchResult.Skipped;
+                    result.TargetAwareDeletesRouted += batchResult.TargetAwareDeletesRouted;
+                    result.TargetAwareDeletesAlreadyAbsent += batchResult.TargetAwareDeletesAlreadyAbsent;
+                    result.TargetAwareDeletesDlq += batchResult.TargetAwareDeletesDlq;
                     result.WriteLatencyMS += batchResult.WriteLatencyMS;
                     result.FailedDocumentKeys.AddRange(batchResult.FailedDocumentKeys);
                     
@@ -219,6 +272,23 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 else
                 {
                     MigrationJobContext.AddVerboseLog($"{_logPrefix}Parallel processing completed successfully: {result.Processed} processed, {result.Skipped} skipped for {collection.CollectionNamespace.FullName}");
+                }
+
+                int targetAwareDeleteCount = result.TargetAwareDeletesRouted
+                    + result.TargetAwareDeletesAlreadyAbsent
+                    + result.TargetAwareDeletesDlq;
+                if (targetAwareDeleteCount > 0)
+                {
+                    string dlqNotice = result.TargetAwareDeletesDlq > 0
+                        ? $" Unresolved deletes were stored in migration_dlq.change_stream_deletes_{jobId}; manual target cleanup is required."
+                        : string.Empty;
+                    string summary = $"{_logPrefix}Target-aware delete summary for {collection.CollectionNamespace.FullName}: total={targetAwareDeleteCount}, routed={result.TargetAwareDeletesRouted}, alreadyAbsent={result.TargetAwareDeletesAlreadyAbsent}, dlq={result.TargetAwareDeletesDlq}.{dlqNotice}";
+                    var summaryLogType = result.TargetAwareDeletesDlq > 0 ? LogType.Warning : LogType.Info;
+                    _log.ShowInMonitor(summary, summaryLogType);
+                    if (result.TargetAwareDeletesDlq > 0)
+                    {
+                        _log.WriteLine(summary, LogType.Warning);
+                    }
                 }
             }
             catch (Exception ex)
@@ -325,7 +395,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             bool isAggressiveComplete,
             string jobId,
             MongoClient? targetClient,
-            bool isSimulatedRun)
+            bool isSimulatedRun,
+            BsonDocument? targetShardKey)
         {
             var result = new WriteResult { Success = true };
             
@@ -368,7 +439,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
             {
                 var updateResult = await ProcessUpdatesWithRetryAsync(
                     mu, collection, updateOps, counterDelegate, batchSize,
-                    isAggressive, isAggressiveComplete, aggressiveHelper, databaseName, collectionName, isSimulatedRun);
+                    isAggressive, isAggressiveComplete, aggressiveHelper, databaseName, collectionName, isSimulatedRun, targetShardKey);
                 result.Processed += updateResult.Processed;
                 result.Failures += updateResult.Failures;
                 result.Skipped += updateResult.Skipped;
@@ -382,10 +453,14 @@ namespace OnlineMongoMigrationProcessor.Helpers
             {
                 var deleteResult = await ProcessDeletesWithRetryAsync(
                     mu, collection, deleteOps, counterDelegate, batchSize,
-                    isAggressive, isAggressiveComplete, aggressiveHelper, databaseName, collectionName, isSimulatedRun);
+                    isAggressive, isAggressiveComplete, aggressiveHelper, databaseName, collectionName, isSimulatedRun,
+                    jobId, targetShardKey);
                 result.Processed += deleteResult.Processed;
                 result.Failures += deleteResult.Failures;
                 result.Skipped += deleteResult.Skipped;
+                result.TargetAwareDeletesRouted += deleteResult.TargetAwareDeletesRouted;
+                result.TargetAwareDeletesAlreadyAbsent += deleteResult.TargetAwareDeletesAlreadyAbsent;
+                result.TargetAwareDeletesDlq += deleteResult.TargetAwareDeletesDlq;
                 result.WriteLatencyMS += deleteResult.WriteLatencyMS;
                 result.Success &= deleteResult.Success;
                 result.Errors.AddRange(deleteResult.Errors);
@@ -699,7 +774,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             AggressiveChangeStreamHelper? aggressiveHelper,
             string databaseName,
             string collectionName,
-            bool isSimulatedRun)
+            bool isSimulatedRun,
+            BsonDocument? targetShardKey)
         {
             var result = new WriteResult { Success = true };
 
@@ -764,8 +840,11 @@ namespace OnlineMongoMigrationProcessor.Helpers
                             buildFilter = GetFilterBuilder(collectionNamespace, e.DocumentKey);
                         }
                         
-                        // Build filter using cached builder function
-                        var filter = buildFilter(e.DocumentKey);
+                        // DocumentKey carries the source shard key. If the target uses a
+                        // different key, route with target values from FullDocument instead.
+                        var filter = targetShardKey != null
+                            ? BuildTargetShardKeyFilter(e.FullDocument, targetShardKey, collectionNamespace)
+                            : buildFilter(e.DocumentKey);
                         return new ReplaceOneModel<BsonDocument>(filter, e.FullDocument) { IsUpsert = true };
                     })
                     .ToList();
@@ -907,7 +986,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
             AggressiveChangeStreamHelper? aggressiveHelper,
             string databaseName,
             string collectionName,
-            bool isSimulatedRun)
+            bool isSimulatedRun,
+            string jobId,
+            BsonDocument? targetShardKey)
         {
             var result = new WriteResult { Success = true };
             var writeStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -919,6 +1000,45 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 if (await ProcessAggresiveCSAsync(unit, collection, events, batchSize,
                     isAggressive, isAggressiveComplete, aggressiveHelper, databaseName, collectionName, isSimulatedRun, "delete") == false)
                 {
+                    return result;
+                }
+
+                if (targetShardKey != null)
+                {
+                    var (deleteModels, alreadyAbsentCount, unresolvedEvents) = await ResolveTargetAwareDeletesAsync(
+                        collection, events, targetShardKey, isSimulatedRun);
+
+                    if (deleteModels.Count > 0)
+                    {
+                        var (success, deletedCount) = await ExecuteBulkWriteWithRetry(
+                            collection, deleteModels, "target-aware delete", isSimulatedRun,
+                            writeResult => writeResult.DeletedCount);
+
+                        if (!success)
+                            throw new InvalidOperationException($"CRITICAL: Target-aware delete failed for {collection.CollectionNamespace.FullName}.");
+
+                        counterDelegate(unit, CounterType.Processed, ChangeStreamOperationType.Delete, (int)deletedCount);
+                        result.Processed += (int)deletedCount;
+                    }
+
+                    if (alreadyAbsentCount > 0)
+                    {
+                        counterDelegate(unit, CounterType.Processed, ChangeStreamOperationType.Delete, alreadyAbsentCount);
+                        result.Processed += alreadyAbsentCount;
+                    }
+
+                    if (unresolvedEvents.Count > 0)
+                    {
+                        int dlqCount = await StoreMismatchedShardKeyDeletesInDlqAsync(
+                            collection, unresolvedEvents, targetShardKey, jobId, isSimulatedRun);
+                        counterDelegate(unit, CounterType.Skipped, ChangeStreamOperationType.Delete, dlqCount);
+                        result.Skipped += dlqCount;
+                    }
+
+                    result.TargetAwareDeletesRouted += deleteModels.Count;
+                    result.TargetAwareDeletesAlreadyAbsent += alreadyAbsentCount;
+                    result.TargetAwareDeletesDlq += unresolvedEvents.Count;
+
                     return result;
                 }
 
@@ -995,6 +1115,133 @@ namespace OnlineMongoMigrationProcessor.Helpers
             }
 
             return result;
+        }
+
+        private async Task<(List<DeleteOneModel<BsonDocument>> DeleteModels, int AlreadyAbsentCount, List<ChangeStreamDocument<BsonDocument>> UnresolvedEvents)> ResolveTargetAwareDeletesAsync(
+            IMongoCollection<BsonDocument> targetCollection,
+            List<ChangeStreamDocument<BsonDocument>> events,
+            BsonDocument targetShardKey,
+            bool isSimulatedRun)
+        {
+            var deleteModels = new List<DeleteOneModel<BsonDocument>>();
+            var unresolvedEvents = new List<ChangeStreamDocument<BsonDocument>>();
+            int alreadyAbsentCount = 0;
+
+            foreach (var change in events
+                .Where(e => e.DocumentKey != null)
+                .GroupBy(e => $"{e.ClusterTime?.Value ?? 0}:{e.DocumentKey.ToJson()}")
+                .Select(g => g.First()))
+            {
+                if (isSimulatedRun)
+                {
+                    alreadyAbsentCount++;
+                    continue;
+                }
+
+                try
+                {
+                    var sourceIdentityFilter = MongoHelper.BuildFilterFromDocumentKey(change.DocumentKey);
+                    var matches = await targetCollection.Find(sourceIdentityFilter).Limit(2).ToListAsync();
+
+                    if (matches.Count == 0)
+                    {
+                        alreadyAbsentCount++;
+                        continue;
+                    }
+
+                    if (matches.Count > 1)
+                    {
+                        unresolvedEvents.Add(change);
+                        _log.WriteLine(
+                            $"{_logPrefix}Target lookup for delete {change.DocumentKey.ToJson()} in {targetCollection.CollectionNamespace.FullName} returned multiple documents; storing the event in the DLQ.",
+                            LogType.Warning);
+                        continue;
+                    }
+
+                    try
+                    {
+                        var routedFilter = BuildTargetShardKeyFilter(
+                            matches[0], targetShardKey, targetCollection.CollectionNamespace.FullName);
+                        deleteModels.Add(new DeleteOneModel<BsonDocument>(routedFilter));
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        unresolvedEvents.Add(change);
+                        _log.WriteLine($"{_logPrefix}{ex.Message} Storing the delete event in the DLQ.", LogType.Warning);
+                    }
+                }
+                catch (Exception ex) when (ex is not InvalidOperationException || !ex.Message.Contains("CRITICAL"))
+                {
+                    unresolvedEvents.Add(change);
+                    _log.WriteLine(
+                        $"{_logPrefix}Target lookup failed for delete {change.DocumentKey.ToJson()} in {targetCollection.CollectionNamespace.FullName}; storing the event in the DLQ. Details: {ex.Message}",
+                        LogType.Warning);
+                }
+            }
+
+            return (deleteModels, alreadyAbsentCount, unresolvedEvents);
+        }
+
+        private async Task<int> StoreMismatchedShardKeyDeletesInDlqAsync(
+            IMongoCollection<BsonDocument> targetCollection,
+            List<ChangeStreamDocument<BsonDocument>> events,
+            BsonDocument targetShardKey,
+            string jobId,
+            bool isSimulatedRun)
+        {
+            var deduplicatedEvents = events
+                .Where(e => e.DocumentKey != null)
+                .GroupBy(e => $"{e.ClusterTime?.Value ?? 0}:{e.DocumentKey.ToJson()}")
+                .Select(g => g.First())
+                .ToList();
+
+            if (deduplicatedEvents.Count == 0)
+                return 0;
+
+            if (!isSimulatedRun)
+            {
+                string dlqCollectionName = $"change_stream_deletes_{jobId}";
+                var dlqCollection = targetCollection.Database.Client
+                    .GetDatabase("migration_dlq")
+                    .GetCollection<BsonDocument>(dlqCollectionName);
+                var models = deduplicatedEvents.Select(change =>
+                {
+                    string sourceNamespace = change.CollectionNamespace?.FullName ?? string.Empty;
+                    var clusterTime = change.ClusterTime ?? new BsonTimestamp(0, 0);
+                    var id = new BsonDocument
+                    {
+                        { "jobId", jobId },
+                        { "sourceNamespace", sourceNamespace },
+                        { "clusterTime", clusterTime },
+                        { "sourceDocumentKey", change.DocumentKey }
+                    };
+                    var record = new BsonDocument
+                    {
+                        { "_id", id },
+                        { "jobId", jobId },
+                        { "recordedAtUtc", DateTime.UtcNow },
+                        { "operationType", "delete" },
+                        { "sourceNamespace", sourceNamespace },
+                        { "targetNamespace", targetCollection.CollectionNamespace.FullName },
+                        { "sourceDocumentKey", change.DocumentKey },
+                        { "targetShardKey", targetShardKey },
+                        { "clusterTime", clusterTime },
+                        { "reason", "Target lookup did not resolve a unique document with all required target shard-key values." }
+                    };
+                    return new ReplaceOneModel<BsonDocument>(
+                        Builders<BsonDocument>.Filter.Eq("_id", id), record)
+                    {
+                        IsUpsert = true
+                    };
+                }).ToList();
+
+                await dlqCollection.BulkWriteAsync(models, new BulkWriteOptions { IsOrdered = false });
+            }
+
+            _log.WriteLine(
+                $"{_logPrefix}Stored {deduplicatedEvents.Count} unresolved delete event(s) for {targetCollection.CollectionNamespace.FullName} in migration_dlq.change_stream_deletes_{jobId}; included in the aggregate target-aware delete summary.",
+                LogType.Debug);
+            return deduplicatedEvents.Count;
         }
 
         /// <summary>
@@ -1313,6 +1560,9 @@ namespace OnlineMongoMigrationProcessor.Helpers
         public int Processed { get; set; }
         public int Failures { get; set; }
         public int Skipped { get; set; }
+        public int TargetAwareDeletesRouted { get; set; }
+        public int TargetAwareDeletesAlreadyAbsent { get; set; }
+        public int TargetAwareDeletesDlq { get; set; }
         public List<string> Errors { get; set; } = new List<string>();
         public List<string> FailedDocumentKeys { get; set; } = new List<string>();
         public long WriteLatencyMS { get; set; } = 0;
