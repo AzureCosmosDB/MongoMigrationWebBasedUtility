@@ -1074,7 +1074,73 @@ namespace OnlineMongoMigrationProcessor
             }
         }
 
-        private async Task<BsonDocument?> ResolveMismatchedTargetShardKeyAsync(
+        protected BsonDocument? GetMismatchedTargetShardKeyForReplay(
+            MigrationUnit mu,
+            IMongoCollection<BsonDocument> targetCollection)
+        {
+            return _mismatchedTargetShardKeyCache.GetOrAdd(
+                targetCollection.CollectionNamespace.FullName,
+                _ => ResolveMismatchedTargetShardKeyAsync(mu, targetCollection))
+                .GetAwaiter()
+                .GetResult();
+        }
+
+        protected static FilterDefinition<BsonDocument> BuildReplayTargetShardKeyFilter(
+            BsonDocument document,
+            BsonDocument targetShardKey,
+            string collectionNamespace)
+        {
+            if (!document.TryGetValue("_id", out var idValue))
+                throw new InvalidOperationException($"Cannot route auto-replay for {collectionNamespace}: document is missing _id.");
+
+            var filters = new List<FilterDefinition<BsonDocument>>
+            {
+                MongoHelper.BuildIdEqualityFilter<BsonDocument>(idValue)
+            };
+
+            foreach (var shardKeyElement in targetShardKey.Elements)
+            {
+                if (string.Equals(shardKeyElement.Name, "_id", StringComparison.Ordinal))
+                    continue;
+
+                BsonValue current = document;
+                foreach (var segment in shardKeyElement.Name.Split('.'))
+                {
+                    if (!current.IsBsonDocument || !current.AsBsonDocument.TryGetValue(segment, out current))
+                    {
+                        throw new InvalidOperationException(
+                            $"Cannot route auto-replay for {collectionNamespace}: document does not contain target shard key path '{shardKeyElement.Name}'.");
+                    }
+                }
+
+                filters.Add(Builders<BsonDocument>.Filter.Eq(shardKeyElement.Name, current));
+            }
+
+            return filters.Count == 1
+                ? filters[0]
+                : Builders<BsonDocument>.Filter.And(filters);
+        }
+
+        protected bool ReplayTargetAwareDelete(
+            BsonDocument sourceDocumentKey,
+            IMongoCollection<BsonDocument> targetCollection,
+            BsonDocument targetShardKey)
+        {
+            var sourceIdentityFilter = MongoHelper.BuildFilterFromDocumentKey(sourceDocumentKey);
+            var matches = targetCollection.Find(sourceIdentityFilter).Limit(2).ToList();
+            if (matches.Count == 0)
+                return true;
+
+            if (matches.Count > 1)
+                return false;
+
+            var routedFilter = BuildReplayTargetShardKeyFilter(
+                matches[0], targetShardKey, targetCollection.CollectionNamespace.FullName);
+            targetCollection.DeleteOne(routedFilter);
+            return true;
+        }
+
+        protected async Task<BsonDocument?> ResolveMismatchedTargetShardKeyAsync(
             MigrationUnit mu,
             IMongoCollection<BsonDocument> targetCollection)
         {
