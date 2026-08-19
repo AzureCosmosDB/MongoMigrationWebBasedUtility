@@ -314,42 +314,67 @@ namespace OnlineMongoMigrationProcessor.Helpers
             var operations = new List<OrderedOperation>();
             long sequenceNumber = 0;
 
-            // Add all operations with their sequence numbers based on ClusterTime
-            foreach (var evt in insertEvents.Where(e => e != null).OrderBy(e => e.ClusterTime ?? new BsonTimestamp(0, 0)))
+            foreach (var evt in insertEvents.Where(e => e != null).OrderBy(GetEventTimestampUtc).ThenBy(GetClusterTimeIncrement))
             {
                 operations.Add(new OrderedOperation
                 {
                     SequenceNumber = sequenceNumber++,
                     OperationType = ChangeStreamOperationType.Insert,
                     Event = evt,
-                    Timestamp = evt.ClusterTime ?? new BsonTimestamp(0, 0)
+                    TimestampUtc = GetEventTimestampUtc(evt),
+                    ClusterTimeIncrement = GetClusterTimeIncrement(evt)
                 });
             }
 
-            foreach (var evt in updateEvents.Where(e => e != null).OrderBy(e => e.ClusterTime ?? new BsonTimestamp(0, 0)))
+            foreach (var evt in updateEvents.Where(e => e != null).OrderBy(GetEventTimestampUtc).ThenBy(GetClusterTimeIncrement))
             {
                 operations.Add(new OrderedOperation
                 {
                     SequenceNumber = sequenceNumber++,
                     OperationType = ChangeStreamOperationType.Update,
                     Event = evt,
-                    Timestamp = evt.ClusterTime ?? new BsonTimestamp(0, 0)
+                    TimestampUtc = GetEventTimestampUtc(evt),
+                    ClusterTimeIncrement = GetClusterTimeIncrement(evt)
                 });
             }
 
-            foreach (var evt in deleteEvents.Where(e => e != null).OrderBy(e => e.ClusterTime ?? new BsonTimestamp(0, 0)))
+            foreach (var evt in deleteEvents.Where(e => e != null).OrderBy(GetEventTimestampUtc).ThenBy(GetClusterTimeIncrement))
             {
                 operations.Add(new OrderedOperation
                 {
                     SequenceNumber = sequenceNumber++,
                     OperationType = ChangeStreamOperationType.Delete,
                     Event = evt,
-                    Timestamp = evt.ClusterTime ?? new BsonTimestamp(0, 0)
+                    TimestampUtc = GetEventTimestampUtc(evt),
+                    ClusterTimeIncrement = GetClusterTimeIncrement(evt)
                 });
             }
 
             // Sort by timestamp to maintain chronological order
-            return operations.OrderBy(op => op.Timestamp).ThenBy(op => op.SequenceNumber).ToList();
+            return operations
+                .OrderBy(op => op.TimestampUtc)
+                .ThenBy(op => op.ClusterTimeIncrement)
+                .ThenBy(op => op.SequenceNumber)
+                .ToList();
+        }
+
+        private static DateTime GetEventTimestampUtc(ChangeStreamDocument<BsonDocument> change)
+        {
+            if (change.ClusterTime != null)
+                return MongoHelper.BsonTimestampToUtcDateTime(change.ClusterTime);
+
+            return change.WallTime?.ToUniversalTime() ?? DateTime.MinValue;
+        }
+
+        private static int GetClusterTimeIncrement(ChangeStreamDocument<BsonDocument> change) =>
+            change.ClusterTime?.Increment ?? 0;
+
+        private static string GetEventDeduplicationKey(ChangeStreamDocument<BsonDocument> change)
+        {
+            string timestampKey = change.ClusterTime != null
+                ? $"cluster:{change.ClusterTime.Value}"
+                : $"wall:{change.WallTime?.ToUniversalTime().Ticks ?? 0}";
+            return $"{timestampKey}:{change.DocumentKey.ToJson()}";
         }
 
         /// <summary>
@@ -785,7 +810,10 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 var groupedUpdates = batch
                     .Where(e => e.FullDocument != null && e.FullDocument.Contains("_id"))
                     .GroupBy(e => e.DocumentKey.ToJson())
-                    .Select(g => g.OrderByDescending(e => e.ClusterTime ?? new BsonTimestamp(0, 0)).First())
+                    .Select(g => g
+                        .OrderByDescending(GetEventTimestampUtc)
+                        .ThenByDescending(GetClusterTimeIncrement)
+                        .First())
                     .ToList();
 
                 if (await ProcessAggresiveCSAsync(unit, collection, groupedUpdates, batchSize,
@@ -1129,7 +1157,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
 
             foreach (var change in events
                 .Where(e => e.DocumentKey != null)
-                .GroupBy(e => $"{e.ClusterTime?.Value ?? 0}:{e.DocumentKey.ToJson()}")
+                .GroupBy(GetEventDeduplicationKey)
                 .Select(g => g.First()))
             {
                 if (isSimulatedRun)
@@ -1191,7 +1219,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
         {
             var deduplicatedEvents = events
                 .Where(e => e.DocumentKey != null)
-                .GroupBy(e => $"{e.ClusterTime?.Value ?? 0}:{e.DocumentKey.ToJson()}")
+                .GroupBy(GetEventDeduplicationKey)
                 .Select(g => g.First())
                 .ToList();
 
@@ -1207,12 +1235,18 @@ namespace OnlineMongoMigrationProcessor.Helpers
                 var models = deduplicatedEvents.Select(change =>
                 {
                     string sourceNamespace = change.CollectionNamespace?.FullName ?? string.Empty;
-                    var clusterTime = change.ClusterTime ?? new BsonTimestamp(0, 0);
+                    BsonValue clusterTime = change.ClusterTime != null
+                        ? change.ClusterTime
+                        : BsonNull.Value;
+                    BsonValue wallTime = change.WallTime.HasValue
+                        ? new BsonDateTime(change.WallTime.Value.ToUniversalTime())
+                        : BsonNull.Value;
                     var id = new BsonDocument
                     {
                         { "jobId", jobId },
                         { "sourceNamespace", sourceNamespace },
                         { "clusterTime", clusterTime },
+                        { "wallTime", wallTime },
                         { "sourceDocumentKey", change.DocumentKey }
                     };
                     var record = new BsonDocument
@@ -1226,6 +1260,7 @@ namespace OnlineMongoMigrationProcessor.Helpers
                         { "sourceDocumentKey", change.DocumentKey },
                         { "targetShardKey", targetShardKey },
                         { "clusterTime", clusterTime },
+                        { "wallTime", wallTime },
                         { "reason", "Target lookup did not resolve a unique document with all required target shard-key values." }
                     };
                     return new ReplaceOneModel<BsonDocument>(
@@ -1547,7 +1582,8 @@ namespace OnlineMongoMigrationProcessor.Helpers
             public long SequenceNumber { get; set; }
             public ChangeStreamOperationType OperationType { get; set; }
             public ChangeStreamDocument<BsonDocument> Event { get; set; } = null!;
-            public BsonTimestamp Timestamp { get; set; } = new BsonTimestamp(0, 0);
+            public DateTime TimestampUtc { get; set; } = DateTime.MinValue;
+            public int ClusterTimeIncrement { get; set; }
         }
     }
 

@@ -55,10 +55,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
         public long CSTotaWriteDurationInMS { get; set; } = 0;
 
         private string _collectionKey = string.Empty;
-        public AccumulatedChangesTracker(string collectionKey)
+        private readonly bool _preferWallTime;
+
+        public AccumulatedChangesTracker(string collectionKey, bool preferWallTime = false)
         {
             _collectionKey = collectionKey;
             CollectionKey = _collectionKey;
+            _preferWallTime = preferWallTime;
         }
 
 
@@ -156,14 +159,17 @@ namespace OnlineMongoMigrationProcessor.Helpers.JobManagement
             DateTime changeTimestamp = DateTime.MinValue;
 
 #if !LEGACY_MONGODB_DRIVER
-            // Extract timestamp from ClusterTime or WallTime
-            if (change.ClusterTime != null)
+            if (_preferWallTime && change.WallTime.HasValue)
+            {
+                changeTimestamp = change.WallTime.Value.ToUniversalTime();
+            }
+            else if (change.ClusterTime != null)
             {
                 changeTimestamp = MongoHelper.BsonTimestampToUtcDateTime(change.ClusterTime);
             }
-            else if (change.WallTime != null)
+            else if (change.WallTime.HasValue)
             {
-                changeTimestamp = change.WallTime.Value;
+                changeTimestamp = change.WallTime.Value.ToUniversalTime();
             }
 #endif
            

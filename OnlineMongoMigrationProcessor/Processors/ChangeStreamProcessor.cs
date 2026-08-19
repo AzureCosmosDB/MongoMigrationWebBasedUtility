@@ -153,7 +153,9 @@ namespace OnlineMongoMigrationProcessor
             {
                 if (!_accumulatedChangesPerCollection.ContainsKey(collectionKey))
                 {
-                    _accumulatedChangesPerCollection[collectionKey] = new AccumulatedChangesTracker(collectionKey);
+                    _accumulatedChangesPerCollection[collectionKey] = new AccumulatedChangesTracker(
+                        collectionKey,
+                        IsWatchedEndpointDocumentDB);
                 }
             }
         }
@@ -754,14 +756,19 @@ namespace OnlineMongoMigrationProcessor
 
         protected DateTime GetChangeTimestampUtc(ChangeStreamDocument<BsonDocument> change)
         {
+            if (IsWatchedEndpointDocumentDB && change.WallTime.HasValue)
+            {
+                return change.WallTime.Value.ToUniversalTime();
+            }
+
             if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.ClusterTime != null)
             {
                 return MongoHelper.BsonTimestampToUtcDateTime(change.ClusterTime);
             }
 
-            if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.WallTime != null)
+            if (!MigrationJobContext.CurrentlyActiveJob.SourceServerVersion.StartsWith("3") && change.WallTime.HasValue)
             {
-                return change.WallTime.Value;
+                return change.WallTime.Value.ToUniversalTime();
             }
 
             return DateTime.MinValue;
