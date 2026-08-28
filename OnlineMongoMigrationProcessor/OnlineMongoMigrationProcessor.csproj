@@ -20,8 +20,10 @@
     <PackageReference Include="Azure.Identity" Version="1.13.2" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.23.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.0" />
-    <PackageReference Include="MongoDB.Bson" Version="3.1.0" />
-    <PackageReference Include="MongoDB.Driver" Version="3.1.0" />
+    <!-- 3.9.0 is the floor that pulls patched Snappier (>=1.3.1, GHSA-pggp-6c3x-2xmx) and
+         SharpCompress (>=0.48.0, GHSA-6c8g-7p36-r338). Do not downgrade. -->
+    <PackageReference Include="MongoDB.Bson" Version="3.11.1" />
+    <PackageReference Include="MongoDB.Driver" Version="3.11.1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 
