@@ -1554,20 +1554,25 @@ namespace OnlineMongoMigrationProcessor
 
             try
             {
-                // Find the starting position of the host (after "://")
-                var startIndex = EncodeMongoPasswordInConnectionString(connectionString).IndexOf("://") + 3;
-                if (startIndex < 3 || startIndex >= connectionString.Length)
+                // Work off the encoded string so indices stay aligned when the password is URL-encoded.
+                var encoded = EncodeMongoPasswordInConnectionString(connectionString);
+
+                // Start of the authority (after "://").
+                var startIndex = encoded.IndexOf("://");
+                if (startIndex < 0)
+                    return string.Empty;
+                startIndex += 3;
+                if (startIndex >= encoded.Length)
                     return string.Empty;
 
-                // Find the end position of the host (before "/" or "?")
-                var endIndex = connectionString.IndexOf("/", startIndex);
+                // Authority ends at the first "/" or "?" after the scheme.
+                var endIndex = encoded.IndexOfAny(new[] { '/', '?' }, startIndex);
                 if (endIndex == -1)
-                    endIndex = connectionString.IndexOf("?", startIndex);
-                if (endIndex == -1)
-                    endIndex = connectionString.Length;
+                    endIndex = encoded.Length;
 
-                // Extract and return the host
-                var authority = connectionString.Substring(startIndex, endIndex - startIndex);
+                // Slice `encoded`, not the raw string: startIndex/endIndex were measured against
+                // `encoded`, which is a different length whenever the password needed escaping.
+                var authority = encoded.Substring(startIndex, endIndex - startIndex);
                 var credentialSeparatorIndex = authority.LastIndexOf('@');
                 return credentialSeparatorIndex >= 0 ? authority.Substring(credentialSeparatorIndex + 1) : authority;
             }
