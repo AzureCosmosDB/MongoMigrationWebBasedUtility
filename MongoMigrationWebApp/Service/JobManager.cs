@@ -221,25 +221,25 @@ namespace MongoMigrationWebApp.Service
         {
             MigrationJobContext.JobList.MigrationJobIds?.Remove(jobId);
             MigrationJobContext.SaveJobList();
-;
+
             try
             {
-                Task.Run(() =>
-                {
-                    MigrationJobContext.Store.DeleteDocument($"{Path.Combine("migrationjobs", jobId)}");
-                    MigrationJobContext.Store.DeleteLogs(jobId);
-                    //clearing  dumped files
-
-                    string dumpPath = Path.Combine(Helper.GetWorkingFolder(), "mongodump", jobId);
-                    StorageStreamFactory.DeleteDirectory(dumpPath, true);
-
-                });
+                MigrationJobContext.Store.DeleteDocument($"{Path.Combine("migrationjobs", jobId)}");
+                MigrationJobContext.Store.DeleteLogs(jobId);
+                string dumpPath = Path.Combine(Helper.GetWorkingFolder(), "mongodump", jobId);
+                StorageStreamFactory.DeleteDirectory(dumpPath, true);
             }
             catch
             {
             }
+        }
 
-            
+        public int ClearAllJobFiles()
+        {
+            var jobIds = MigrationJobContext.JobList.MigrationJobIds?.ToList() ?? new List<string>();
+            foreach (var jobId in jobIds)
+                ClearJobFiles(jobId);
+            return jobIds.Count;
         }
 
         #endregion 

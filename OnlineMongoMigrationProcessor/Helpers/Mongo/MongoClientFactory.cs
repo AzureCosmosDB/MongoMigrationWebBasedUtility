@@ -1,4 +1,8 @@
-﻿using MongoDB.Driver;
+﻿using Azure;
+using Azure.Core;
+using Azure.Identity;
+using MongoDB.Driver;
+using MongoDB.Driver.Authentication.Oidc;
 using System;
 using System.Collections.Concurrent;
 using System.IO;
@@ -17,6 +21,8 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         // Cache MongoClient instances by a key derived from connection string + options
         // to avoid exhausting logical sessions on the server (TooManyLogicalSessions)
         private static readonly ConcurrentDictionary<string, MongoClient> _clientCache = new();
+        private static readonly AzureCliCredential _azureCliCredential = new();
+        private const string CosmosMongoScope = "https://ossrdbms-aad.database.windows.net/.default";
 
         public static MongoClient Create(Log? log,string connectionString, bool ReadConcernMajority=false, string? PEMFileContents=null)
         {
@@ -28,6 +34,13 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             return _clientCache.GetOrAdd(cacheKey, _ =>
             {
                 var settings = MongoClientSettings.FromUrl(new MongoUrl(cleanConnStr));
+
+                if (settings.Credential?.Mechanism == "MONGODB-OIDC")
+                {
+                    settings.Credential = MongoCredential.CreateOidcCredential(
+                        new AzureCliOidcCallback(_azureCliCredential, CosmosMongoScope),
+                        settings.Credential.Username);
+                }
 
                 if (!string.IsNullOrWhiteSpace(PEMFileContents))
                 {
@@ -44,6 +57,29 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                 return new MongoClient(settings);
             });
+        }
+
+        private sealed class AzureCliOidcCallback : IOidcCallback
+        {
+            private readonly AzureCliCredential _credential;
+            private readonly string _scope;
+
+            public AzureCliOidcCallback(AzureCliCredential credential, string scope)
+            {
+                _credential = credential;
+                _scope = scope;
+            }
+
+            public OidcAccessToken GetOidcAccessToken(OidcCallbackParameters parameters, System.Threading.CancellationToken cancellationToken)
+                => GetOidcAccessTokenAsync(parameters, cancellationToken).GetAwaiter().GetResult();
+
+            public async Task<OidcAccessToken> GetOidcAccessTokenAsync(OidcCallbackParameters parameters, System.Threading.CancellationToken cancellationToken)
+            {
+                AccessToken token = await _credential.GetTokenAsync(
+                    new TokenRequestContext(new[] { _scope }),
+                    cancellationToken);
+                return new OidcAccessToken(token.Token, token.ExpiresOn - DateTimeOffset.UtcNow);
+            }
         }
 
         private static string RemovePemPathFromConnectionString(string connStr)

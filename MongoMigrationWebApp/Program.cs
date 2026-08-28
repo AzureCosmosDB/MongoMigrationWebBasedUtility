@@ -65,6 +65,8 @@ builder.Services.AddAuthorizationCore();
 
 var app = builder.Build();
 
+app.Services.GetRequiredService<JobManager>();
+
 // _configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
