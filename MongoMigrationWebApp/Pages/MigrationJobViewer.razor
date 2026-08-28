@@ -512,7 +512,7 @@
                             }
                             else
                             {
-                                <span>@logObject.Datetime - @logObject.Message</span>
+                                <span>@TimestampFormatter.MountainTime(logObject.Datetime) - @logObject.Message</span>
                             }
                         </td>
                     </tr>
@@ -547,7 +547,7 @@
         <thead>
             <tr>
                 <th class="log-icon-header"></th>
-                <th style="width: 150px;">Date Time (UTC)</th>
+                <th style="width: 150px;">Date Time (Mountain)</th>
                 <th>Message</th>
             </tr>
         </thead>
@@ -557,7 +557,7 @@
             {
                 <tr class="@GetRowClass(logObject.Type.ToString(),logObject.Message)">
                     <td class="log-icon-cell">@GetLogIcon(logObject.Type)</td>
-                    <td>@logObject.Datetime</td>
+                    <td>@TimestampFormatter.MountainTime(logObject.Datetime)</td>
                     <td>@logObject.Message</td>
                 </tr>
             }                
@@ -574,7 +574,7 @@
                 {
                     <tr class="@GetRowClass(logObject.Type.ToString(),logObject.Message)">
                         <td class="log-icon-cell">@GetLogIcon(logObject.Type)</td>
-                        <td style="width: 120px;">@logObject.Datetime</td>
+                        <td style="width: 120px;">@TimestampFormatter.MountainTime(logObject.Datetime)</td>
                         <td>@logObject.Message</td>
                     </tr>
                 }

@@ -802,7 +802,7 @@ namespace OnlineMongoMigrationProcessor
                             {
                                 mu.UserFilter = item.Filter;
                                 mu.TargetDatabaseName = targetDatabaseName;
-                                mu.TargetCollectionName = targetCollectionName;
+                                mu.TargetCollectionName = targetCollectionName ?? mu.CollectionName;
                                 unitsToAdd.Add(mu);
                             }
                         }
@@ -869,8 +869,15 @@ namespace OnlineMongoMigrationProcessor
                 foreach (var mu in newUnits)
                 {
                     ResetRuntimeProgressState(mu);
-                    MigrationJobContext.SaveMigrationUnit(mu, false);
+                    mu.JobId = job.Id;
                     AddMigrationUnit(mu,job);
+                    if (!MigrationJobContext.SaveMigrationUnit(mu, false))
+                    {
+                        MigrationJobContext.PurgeMigrationUnit(job.Id, mu.Id);
+                        job.MigrationUnitBasics.RemoveAll(basic => basic.Id == mu.Id);
+                        log?.WriteLine($"Failed to persist migration unit {mu.DatabaseName}.{mu.CollectionName}.", LogType.Error);
+                        return false;
+                    }
                 }
                 MigrationJobContext.SaveMigrationJob(job);
             }
@@ -1560,7 +1567,9 @@ namespace OnlineMongoMigrationProcessor
                     endIndex = connectionString.Length;
 
                 // Extract and return the host
-                return connectionString.Substring(startIndex, endIndex - startIndex).Split('@')[1];
+                var authority = connectionString.Substring(startIndex, endIndex - startIndex);
+                var credentialSeparatorIndex = authority.LastIndexOf('@');
+                return credentialSeparatorIndex >= 0 ? authority.Substring(credentialSeparatorIndex + 1) : authority;
             }
             catch
             {

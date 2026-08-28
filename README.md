@@ -222,6 +222,26 @@ The web app is protected by a single application password.
 
 > **What changed:** The New Job dialog no longer accepts a collection list, Append Mode toggle, Skip Indexes toggle, or `_id` ObjectId flag. Collections (and all per-collection options) are now added from the job's **Manage Collections** dialog after the job is created. This lets you stage a curated list, edit each entry, and apply changes as a single batch.
 
+### Import Jobs Locally
+
+The app exposes a loopback-only import endpoint for automation:
+
+```text
+POST /api/migration-jobs/import
+```
+
+The request accepts a complete job definition, a `CollectionInfo` list, and
+source and target connection strings. The endpoint is available only from the
+same machine as the app. Connection strings are kept in process memory using
+the same mechanism as the UI and are not written to the persisted job files.
+
+Use the companion `import-migration-jobs.ps1` script from the infrastructure
+repository to read a seed file, prompt for credentials, expand URI placeholders
+in memory, load an optional source CA certificate, and submit the jobs to
+`http://localhost:8080`. Source credentials are optional; use the CA certificate
+field for certificate-authenticated sources that do not require a username or
+password.
+
 **Note for Azure Web App deployments:** For the Mongo Dump/Restore option, the Web App will download the mongo-tools from the URL specified in the Web App settings. Ensure that the Web App has access to this URL. If the Web App does not have internet access, you can download the mongo-tools zip file to your development machine, then copy it to the wwwroot folder inside the published folder before compressing it. Afterward, update the URL in the Web App settings to point to the Web App's URL (e.g., https://<WebAppName>.azurewebsites.net/<zipfilename.zip>). This note does not apply to Azure Container Apps (ACA) deployments, where mongo-tools are pre-installed in the container image.
 
 ### Manage Collections

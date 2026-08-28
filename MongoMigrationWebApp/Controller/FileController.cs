@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc;
 using OnlineMongoMigrationProcessor;
 using OnlineMongoMigrationProcessor.Context;
+using MongoMigrationWebApp.Service;
 using System.Text;
 
 [ApiController]
@@ -9,17 +10,21 @@ using System.Text;
 
 public class FileController : ControllerBase
 {
-   
+    private readonly JobManager _jobManager;
+
+    public FileController(JobManager jobManager)
+    {
+        _jobManager = jobManager;
+    }
+
 
     [HttpGet("download/log/{Id}")]
     public IActionResult DownloadFile(string Id)
     {
-        string fileSharePath = $"{Helper.GetWorkingFolder()}migrationlogs"; // UNC path to your file share
-        string filePath;
-        
-        filePath = Path.Combine(fileSharePath, Id + ".bin");       
-
-        var fileBytes = new Log().DownloadLogsAsJsonBytes(Id, 0, 0);
+        var logBucket = _jobManager.GetLogBucket(Id, out _, out _);
+        var fileBytes = Encoding.UTF8.GetBytes(string.Join(Environment.NewLine,
+            (logBucket.Logs ?? new List<LogObject>()).Select(log =>
+                $"{log.Type}|{log.Datetime:MM/dd/yyyy HH:mm:ss}|{log.Message}")));
         var contentType = "application/octet-stream";
         return File(fileBytes, contentType, $"{Id}.txt");
 

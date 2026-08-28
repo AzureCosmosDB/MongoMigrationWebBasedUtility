@@ -6,6 +6,7 @@
 @inject HttpClient HttpClient
 
 @using MongoMigrationWebApp.Components
+@using MongoMigrationWebApp.Helpers
 @using OnlineMongoMigrationProcessor
 @using OnlineMongoMigrationProcessor.Context
 @using OnlineMongoMigrationProcessor.Helpers
@@ -37,7 +38,7 @@
                     <th></th>
                     <th>Name</th>
                     <th>Migration Tool</th>
-                    <th>Started On (UTC)</th>
+                    <th>Started On (Mountain)</th>
                     <th>Endpoints</th>
                     <th>Is Online</th>
                     <th>Is Completed</th>
@@ -60,7 +61,7 @@
                             @migration.Name
                         </td>
                         <td>@GetToolName(migration.JobType)</td>
-                        <td>@migration.StartedOn</td>
+                        <td>@TimestampFormatter.MountainTime(migration.StartedOn)</td>
                         <td class="tooltip-text" title="@GetTootTip(migration)">@migration.SourceEndpoint<br /> to <br /> @migration.TargetEndpoint</td>
                         <td>@Helper.IsOnline(migration)</td>
                         <td>@migration.IsCompleted</td>
