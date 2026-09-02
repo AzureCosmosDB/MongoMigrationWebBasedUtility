@@ -271,33 +271,33 @@
     <table class="table collections-table">
         <thead>
             <tr>
-                <th class="sortable-header @GetSortClass("DatabaseName")" @onclick='() => SortBy("DatabaseName")' style="cursor: pointer; white-space: nowrap;">
+                <th class="sortable-header @GetSortClass("DatabaseName")" @onclick='() => SortBy("DatabaseName")' title="Source database holding this collection. Shown as 'source (target)' when the job maps it to a different target database. The info icon opens full collection details; the download icon exports this collection's migration record as JSON." style="cursor: pointer; white-space: nowrap;">
                     Database<br/>Name
                     <i class="bi @GetSortIcon("DatabaseName") ms-1"></i>
                 </th>
-                <th class="sortable-header @GetSortClass("CollectionName")" @onclick='() => SortBy("CollectionName")' style="cursor: pointer; white-space: nowrap;">
+                <th class="sortable-header @GetSortClass("CollectionName")" @onclick='() => SortBy("CollectionName")' title="Source collection being migrated. Shown as 'source (target)' when the job maps it to a different target collection name." style="cursor: pointer; white-space: nowrap;">
                     Collection<br/>Name
                     <i class="bi @GetSortIcon("CollectionName") ms-1"></i>
                 </th>
                 @if (CurrentlyLoadedMigrationJob != null && CurrentlyLoadedMigrationJob.JobType==OnlineMongoMigrationProcessor.Models.JobType.DumpAndRestore)
                 {
-                    <th class="sortable-header @GetSortClass("DownloadStatus")" @onclick='() => SortBy("DownloadStatus")' style="cursor: pointer;">
+                    <th class="sortable-header @GetSortClass("DownloadStatus")" @onclick='() => SortBy("DownloadStatus")' title="Progress of the mongodump phase: percent of the collection extracted from the source to the staging disk. 'Success' when the dump is complete. 'Skipped' means the collection was not dumped (404 = not found on source, VIEW / TIMESERIES = unsupported type, Max Retries = repeated failures)." style="cursor: pointer;">
                         Download<br/>Status
                         <i class="bi @GetSortIcon("DownloadStatus") ms-1"></i>
                     </th>
-                    <th class="sortable-header @GetSortClass("UploadStatus")" @onclick='() => SortBy("UploadStatus")' style="cursor: pointer;">
+                    <th class="sortable-header @GetSortClass("UploadStatus")" @onclick='() => SortBy("UploadStatus")' title="Progress of the mongorestore phase: percent of the dumped data inserted into the target. 'Success' when the restore is complete. Same 'Skipped' reasons as Download Status." style="cursor: pointer;">
                         Upload<br/>Status
                         <i class="bi @GetSortIcon("UploadStatus") ms-1"></i>
                     </th>
                 }
                 else
                 {
-                    <th class="sortable-header @GetSortClass("CopyStatus")" @onclick='() => SortBy("CopyStatus")' style="cursor: pointer;">
+                    <th class="sortable-header @GetSortClass("CopyStatus")" @onclick='() => SortBy("CopyStatus")' title="Progress of the bulk document copy from source to target for this collection. 'Success' when every document has been copied. 'Skipped' means the collection was not copied (404 = not found on source, VIEW / TIMESERIES = unsupported type, Max Retries = repeated failures)." style="cursor: pointer;">
                         Copy<br/>Status
                         <i class="bi @GetSortIcon("CopyStatus") ms-1"></i>
                     </th>
                 }
-                <th class="sortable-header @GetSortClass("IndexStatus")" @onclick='() => SortBy("IndexStatus")' style="cursor: pointer; min-width: 5em;">
+                <th class="sortable-header @GetSortClass("IndexStatus")" @onclick='() => SortBy("IndexStatus")' title="Build progress of the non-unique (secondary) indexes recreated on the target. These are submitted only after the bulk copy of the collection finishes, because building them post-load is far faster than maintaining them per-write. Unique indexes are created before the copy starts and are not counted here. 'Pending' = copy done, build not started yet; 'N indexes (xx.x%)' = build in progress; 'Success' = all builds finished; a 'N failed' suffix means the target rejected that many index builds. Cut Over stays disabled until every collection reaches 100%." style="cursor: pointer; min-width: 5em;">
                     Non-Unique<br/>Index Status
                     <i class="bi @GetSortIcon("IndexStatus") ms-1"></i>
                 </th>
@@ -305,22 +305,22 @@
                 {
                     @if (CurrentlyLoadedMigrationJob.JobType != OnlineMongoMigrationProcessor.Models.JobType.RUOptimizedCopy)
                     {
-                        <th class="sortable-header @GetSortClass("TimeSinceLastChange")" @onclick='() => SortBy("TimeSinceLastChange")' style="cursor: pointer; min-width: 6em;">
+                        <th class="sortable-header @GetSortClass("TimeSinceLastChange")" @onclick='() => SortBy("TimeSinceLastChange")' title="Replication lag: how long ago the most recent change-stream event for this collection was applied to the target. 'NA' means no change has been replicated yet (or the change stream was reset). Hover a row's cell for that collection's average change-stream read and write latency." style="cursor: pointer; min-width: 6em;">
                             Time Since<br/>Last Change
                             <i class="bi @GetSortIcon("TimeSinceLastChange") ms-1"></i>
                         </th>
-                        <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' style="cursor: pointer; min-width: 5em;">
+                        <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' title="Change-stream liveness heartbeat - this is NOT replication lag.&#10;&#10;How long ago the change-stream processor last finished a poll round covering this collection. The timestamp is stamped at the end of every round even when the round returned zero events, so an idle collection still refreshes it.&#10;&#10;A value that keeps resetting to seconds or a couple of minutes means the processor is alive and reaching the source. A value that climbs past the configured batch duration (default 120s) means no round has completed - the processor is stopped, stalled, or stuck opening a cursor; check the Monitor log.&#10;&#10;Scope follows the job's change-stream level: at Server level one job-wide timestamp is shared, so every row shows the same value; at Collection level each collection is stamped independently.&#10;&#10;'NA' = the change stream has not run for this collection yet - bulk copy still in progress, or the change stream was reset.&#10;'Resume Token Expired' = the saved resume point aged off the source oplog; the stream cannot resume without a reset.&#10;'Watch Failed' = the watch() cursor errored for some other reason.&#10;&#10;For how far behind replication actually is, use Time Since Last Change." style="cursor: pointer; min-width: 5em;">
                             CS Last<br/>Checked
                             <i class="bi @GetSortIcon("TimeSinceLastBatch") ms-1"></i>
                         </th>
-                        <th class="sortable-header @GetSortClass("LastBatchChanges")" @onclick='() => SortBy("LastBatchChanges")' style="cursor: pointer; min-width: 6em;">
+                        <th class="sortable-header @GetSortClass("LastBatchChanges")" @onclick='() => SortBy("LastBatchChanges")' title="Number of change-stream events processed for this collection in the most recent batch. Cut Over readiness expects at least 2 consecutive batches at 0, which means the forward sync has fully drained." style="cursor: pointer; min-width: 6em;">
                             Last Batch<br/>Total Changes
                             <i class="bi @GetSortIcon("LastBatchChanges") ms-1"></i>
                         </th>
                     }
                     else
                     {
-                        <th class="sortable-header @GetSortClass("LastBatchChanges")" @onclick='() => SortBy("LastBatchChanges")' style="cursor: pointer; min-width: 6em;">
+                        <th class="sortable-header @GetSortClass("LastBatchChanges")" @onclick='() => SortBy("LastBatchChanges")' title="Number of change-stream events processed for this collection in the most recent batch. Cut Over readiness expects at least 2 consecutive batches at 0, which means the forward sync has fully drained." style="cursor: pointer; min-width: 6em;">
                             CS Last Batch<br/>Total Changes
                             <i class="bi @GetSortIcon("LastBatchChanges") ms-1"></i>
                         </th>
@@ -330,15 +330,15 @@
                 @if (CurrentlyLoadedMigrationJob != null && Helper.IsOnline(CurrentlyLoadedMigrationJob) && CurrentlyLoadedMigrationJob.ProcessingSyncBack)
                 {
 
-                     <th class="sortable-header @GetSortClass("TimeSinceLastChange")" @onclick='() => SortBy("TimeSinceLastChange")' style="cursor: pointer; min-width: 6em;">
+                     <th class="sortable-header @GetSortClass("TimeSinceLastChange")" @onclick='() => SortBy("TimeSinceLastChange")' title="Reverse replication lag: how long ago the most recent sync-back event for this collection was applied back to the original source. 'NA' means nothing has been synced back yet (or the change stream was reset). Hover a row's cell for that collection's average change-stream read and write latency." style="cursor: pointer; min-width: 6em;">
                         Time Since<br/>Last Sync Back
                         <i class="bi @GetSortIcon("TimeSinceLastChange") ms-1"></i>
                     </th>
-                    <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' style="cursor: pointer; min-width: 5em;">
+                    <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' title="Change-stream liveness heartbeat - this is NOT replication lag.&#10;&#10;How long ago the sync-back change-stream processor last finished a poll round covering this collection. The timestamp is stamped at the end of every round even when the round returned zero events, so an idle collection still refreshes it.&#10;&#10;A value that keeps resetting to seconds or a couple of minutes means sync back is alive and reaching the target. A value that climbs past the configured batch duration (default 120s) means no round has completed - the processor is stopped, stalled, or stuck opening a cursor; check the Monitor log.&#10;&#10;Scope follows the job's change-stream level: at Server level one job-wide timestamp is shared, so every row shows the same value; at Collection level each collection is stamped independently.&#10;&#10;'NA' = the sync-back change stream has not run for this collection yet, or was reset.&#10;'Resume Token Expired' = the saved resume point aged off the oplog; the stream cannot resume without a reset.&#10;'Watch Failed' = the watch() cursor errored for some other reason.&#10;&#10;For how far behind reverse replication actually is, use Time Since Last Sync Back." style="cursor: pointer; min-width: 5em;">
                         CS Last<br/>Checked
                         <i class="bi @GetSortIcon("TimeSinceLastBatch") ms-1"></i>
                     </th>
-                    <th class="sortable-header @GetSortClass("LastBatchChanges")" @onclick='() => SortBy("LastBatchChanges")' style="cursor: pointer; min-width: 6em;">
+                    <th class="sortable-header @GetSortClass("LastBatchChanges")" @onclick='() => SortBy("LastBatchChanges")' title="Number of sync-back change-stream events processed for this collection in the most recent batch. Completing the job expects at least 2 consecutive batches at 0, which means the reverse sync has fully drained." style="cursor: pointer; min-width: 6em;">
                         Last Batch<br/>Total Changes
                         <i class="bi @GetSortIcon("LastBatchChanges") ms-1"></i>
                     </th>
