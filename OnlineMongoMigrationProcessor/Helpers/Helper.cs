@@ -878,6 +878,9 @@ namespace OnlineMongoMigrationProcessor
                         MigrationJobContext.PurgeMigrationUnit(job.Id, mu.Id);
                         job.MigrationUnitBasics.RemoveAll(basic => basic.Id == mu.Id);
                         log?.WriteLine($"Failed to persist migration unit {mu.DatabaseName}.{mu.CollectionName}.", LogType.Error);
+                        // Units added before the failure are already on disk; persist the job so its
+                        // basics match them instead of leaving orphaned unit documents behind.
+                        MigrationJobContext.SaveMigrationJob(job);
                         return false;
                     }
                 }

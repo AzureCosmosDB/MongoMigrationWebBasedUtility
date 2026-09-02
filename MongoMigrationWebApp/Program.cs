@@ -65,7 +65,16 @@ builder.Services.AddAuthorizationCore();
 
 var app = builder.Build();
 
-app.Services.GetRequiredService<JobManager>();
+// Warm the job store so the first request doesn't pay for it. A bad StateStore configuration
+// is reported here instead of crashing the host, which would crash-loop the container.
+try
+{
+    app.Services.GetRequiredService<JobManager>();
+}
+catch (Exception ex)
+{
+    app.Logger.LogError(ex, "Migration job store initialization failed. Check StateStore:ConnectionStringOrPath, StateStore:AppID and the ResourceDrive environment variable.");
+}
 
 // _configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

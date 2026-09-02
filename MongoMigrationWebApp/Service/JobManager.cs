@@ -243,6 +243,7 @@ namespace MongoMigrationWebApp.Service
             // CurrentlyActiveJob reloads from this id, so leaving it set resurrects a cleared job
             // from disk and every later import is rejected as a cross-job write.
             MigrationJobContext.ActiveMigrationJobId = string.Empty;
+            MigrationJobContext.ClearCurrentlyActiveJobCache();
 
             return jobIds.Count;
         }
