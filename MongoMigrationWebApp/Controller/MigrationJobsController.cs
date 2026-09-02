@@ -91,6 +91,17 @@ namespace MongoMigrationWebApp.Controller
                 MigrationJobContext.SourceConnectionString[importedJob.Id] = request.SourceConnectionString;
                 MigrationJobContext.TargetConnectionString[importedJob.Id] = request.TargetConnectionString;
 
+                if (request.Settings.HasValue)
+                {
+                    var appSettings = new MigrationSettings();
+                    appSettings.Load();
+                    // PopulateObject merges only the properties present in the payload, so callers
+                    // can override one setting without restating the rest.
+                    JsonConvert.PopulateObject(request.Settings.Value.GetRawText(), appSettings);
+                    if (!appSettings.Save(out var appSettingsError))
+                        return StatusCode(StatusCodes.Status500InternalServerError, appSettingsError);
+                }
+
                 if (request.SourceCaCertificatePem != null)
                 {
                     var settings = new MigrationSettings();
@@ -190,5 +201,6 @@ namespace MongoMigrationWebApp.Controller
         public string? SourceConnectionString { get; set; }
         public string? TargetConnectionString { get; set; }
         public string? SourceCaCertificatePem { get; set; }
+        public JsonElement? Settings { get; set; }
     }
 }
