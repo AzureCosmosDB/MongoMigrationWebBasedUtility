@@ -309,7 +309,7 @@
                             Time Since<br/>Last Change
                             <i class="bi @GetSortIcon("TimeSinceLastChange") ms-1"></i>
                         </th>
-                        <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' title="Change-stream liveness heartbeat - this is NOT replication lag.&#10;&#10;How long ago the change-stream processor last finished a poll round covering this collection. The timestamp is stamped at the end of every round even when the round returned zero events, so an idle collection still refreshes it.&#10;&#10;A value that keeps resetting to seconds or a couple of minutes means the processor is alive and reaching the source. A value that climbs past the configured batch duration (default 120s) means no round has completed - the processor is stopped, stalled, or stuck opening a cursor; check the Monitor log.&#10;&#10;Scope follows the job's change-stream level: at Server level one job-wide timestamp is shared, so every row shows the same value; at Collection level each collection is stamped independently.&#10;&#10;'NA' = the change stream has not run for this collection yet - bulk copy still in progress, or the change stream was reset.&#10;'Resume Token Expired' = the saved resume point aged off the source oplog; the stream cannot resume without a reset.&#10;'Watch Failed' = the watch() cursor errored for some other reason.&#10;&#10;For how far behind replication actually is, use Time Since Last Change." style="cursor: pointer; min-width: 5em;">
+                        <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' title="@CsLastCheckedTooltip" style="cursor: pointer; min-width: 5em;">
                             CS Last<br/>Checked
                             <i class="bi @GetSortIcon("TimeSinceLastBatch") ms-1"></i>
                         </th>
@@ -334,7 +334,7 @@
                         Time Since<br/>Last Sync Back
                         <i class="bi @GetSortIcon("TimeSinceLastChange") ms-1"></i>
                     </th>
-                    <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' title="Change-stream liveness heartbeat - this is NOT replication lag.&#10;&#10;How long ago the sync-back change-stream processor last finished a poll round covering this collection. The timestamp is stamped at the end of every round even when the round returned zero events, so an idle collection still refreshes it.&#10;&#10;A value that keeps resetting to seconds or a couple of minutes means sync back is alive and reaching the target. A value that climbs past the configured batch duration (default 120s) means no round has completed - the processor is stopped, stalled, or stuck opening a cursor; check the Monitor log.&#10;&#10;Scope follows the job's change-stream level: at Server level one job-wide timestamp is shared, so every row shows the same value; at Collection level each collection is stamped independently.&#10;&#10;'NA' = the sync-back change stream has not run for this collection yet, or was reset.&#10;'Resume Token Expired' = the saved resume point aged off the oplog; the stream cannot resume without a reset.&#10;'Watch Failed' = the watch() cursor errored for some other reason.&#10;&#10;For how far behind reverse replication actually is, use Time Since Last Sync Back." style="cursor: pointer; min-width: 5em;">
+                    <th class="sortable-header @GetSortClass("TimeSinceLastBatch")" @onclick='() => SortBy("TimeSinceLastBatch")' title="@CsLastCheckedSyncBackTooltip" style="cursor: pointer; min-width: 5em;">
                         CS Last<br/>Checked
                         <i class="bi @GetSortIcon("TimeSinceLastBatch") ms-1"></i>
                     </th>
@@ -662,6 +662,44 @@ else if (@_showLogBackupFile)
     // Sorting properties
     private string _sortColumn = "DatabaseName";
     private bool _sortAscending = true;
+
+    // Multi-line header tooltips live here rather than inline in the markup: Razor emits an
+    // HTML entity in an attribute as a literal string and Blazor applies it with setAttribute,
+    // which does not decode it, so "&#10;" would render as visible text instead of a line break.
+    private const string CsLastCheckedTooltip =
+        "Change-stream liveness heartbeat - this is NOT replication lag.\n\n" +
+        "How long ago the change-stream processor last finished a poll round covering this collection. " +
+        "The timestamp is stamped at the end of every round even when the round returned zero events, " +
+        "so an idle collection still refreshes it.\n\n" +
+        "A value that keeps resetting to seconds or a couple of minutes means the processor is alive and " +
+        "reaching the source. A value that climbs past the configured batch duration (default 120s) means " +
+        "no round has completed - the processor is stopped, stalled, or stuck opening a cursor; check the " +
+        "Monitor log.\n\n" +
+        "Scope follows the job's change-stream level: at Server level one job-wide timestamp is shared, so " +
+        "every row shows the same value; at Collection level each collection is stamped independently.\n\n" +
+        "'NA' = the change stream has not run for this collection yet - bulk copy still in progress, or the " +
+        "change stream was reset.\n" +
+        "'Resume Token Expired' = the saved resume point aged off the source oplog; the stream cannot resume " +
+        "without a reset.\n" +
+        "'Watch Failed' = the watch() cursor errored for some other reason.\n\n" +
+        "For how far behind replication actually is, use Time Since Last Change.";
+
+    private const string CsLastCheckedSyncBackTooltip =
+        "Change-stream liveness heartbeat - this is NOT replication lag.\n\n" +
+        "How long ago the sync-back change-stream processor last finished a poll round covering this " +
+        "collection. The timestamp is stamped at the end of every round even when the round returned zero " +
+        "events, so an idle collection still refreshes it.\n\n" +
+        "A value that keeps resetting to seconds or a couple of minutes means sync back is alive and " +
+        "reaching the target. A value that climbs past the configured batch duration (default 120s) means " +
+        "no round has completed - the processor is stopped, stalled, or stuck opening a cursor; check the " +
+        "Monitor log.\n\n" +
+        "Scope follows the job's change-stream level: at Server level one job-wide timestamp is shared, so " +
+        "every row shows the same value; at Collection level each collection is stamped independently.\n\n" +
+        "'NA' = the sync-back change stream has not run for this collection yet, or was reset.\n" +
+        "'Resume Token Expired' = the saved resume point aged off the oplog; the stream cannot resume " +
+        "without a reset.\n" +
+        "'Watch Failed' = the watch() cursor errored for some other reason.\n\n" +
+        "For how far behind reverse replication actually is, use Time Since Last Sync Back.";
 
     // Pagination helper
     private PaginationHelper<MigrationUnitBasic> _paginationHelper = new PaginationHelper<MigrationUnitBasic>(
