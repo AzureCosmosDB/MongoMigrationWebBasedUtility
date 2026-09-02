@@ -11,18 +11,24 @@ namespace MongoMigrationWebApp.Controller
     [Route("api/migration-jobs")]
     public class MigrationJobsController : ControllerBase
     {
-        private readonly Service.JobManager _jobManager;
+        // Callers authenticate with the same password that gates the UI.
+        public const string AppPasswordHeader = "X-Migration-App-Password";
 
-        public MigrationJobsController(Service.JobManager jobManager)
+        private readonly Service.JobManager _jobManager;
+        private readonly Service.PasswordManager _passwordManager;
+
+        public MigrationJobsController(Service.JobManager jobManager, Service.PasswordManager passwordManager)
         {
             _jobManager = jobManager;
+            _passwordManager = passwordManager;
         }
 
         [HttpPost("reset")]
-        public IActionResult Reset()
+        public async Task<IActionResult> Reset()
         {
-            if (!IsLoopbackRequest())
-                return Forbid();
+            var denied = await AuthorizeAsync();
+            if (denied != null)
+                return denied;
 
             if (_jobManager.GetMigrationIds().Any(_jobManager.IsProcessRunning))
                 return Conflict("Cannot reset while a migration job is running.");
@@ -31,10 +37,11 @@ namespace MongoMigrationWebApp.Controller
         }
 
         [HttpGet("{jobId}/logs")]
-        public IActionResult GetLogs(string jobId)
+        public async Task<IActionResult> GetLogs(string jobId)
         {
-            if (!IsLoopbackRequest())
-                return Forbid();
+            var denied = await AuthorizeAsync();
+            if (denied != null)
+                return denied;
 
             if (string.IsNullOrWhiteSpace(jobId))
                 return BadRequest("jobId is required.");
@@ -54,8 +61,9 @@ namespace MongoMigrationWebApp.Controller
         {
             try
             {
-                if (!IsLoopbackRequest())
-                    return Forbid();
+                var denied = await AuthorizeAsync();
+                if (denied != null)
+                    return denied;
 
                 if (request?.Job == null
                     || string.IsNullOrWhiteSpace(request.SourceConnectionString)
@@ -116,7 +124,13 @@ namespace MongoMigrationWebApp.Controller
 
                     var collectionJson = JsonConvert.SerializeObject(request.Collections);
                     var units = await Helper.PopulateJobCollectionsAsync(importedJob, collectionJson, request.SourceConnectionString);
-                    Helper.AddMigrationUnits(units, importedJob, MigrationJobContext.Logger);
+
+                    if (!Helper.AddMigrationUnits(units, importedJob, MigrationJobContext.Logger))
+                    {
+                        return StatusCode(StatusCodes.Status500InternalServerError,
+                            $"Resolved {units.Count} collection(s) for '{importedJob.Name}' but persisted only "
+                            + $"{importedJob.MigrationUnitBasics.Count}. See the job log for the failing namespace.");
+                    }
 
                     if (importedJob.MigrationUnitBasics.Count == 0)
                     {
@@ -137,11 +151,35 @@ namespace MongoMigrationWebApp.Controller
             }
         }
 
+        /// <summary>
+        /// Returns the response to send when the caller is not allowed, or null when it is.
+        /// Behind an out-of-process reverse proxy (IIS/ANCM, kubectl port-forward) every request
+        /// looks loopback, so the source address alone is not treated as an authentication factor.
+        /// </summary>
+        private async Task<IActionResult?> AuthorizeAsync()
+        {
+            if (!IsLoopbackRequest())
+            {
+                return StatusCode(StatusCodes.Status403Forbidden,
+                    "This endpoint is only available from the machine hosting the app.");
+            }
+
+            if (!await _passwordManager.IsPasswordSetAsync())
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                    "Set the application password in the web UI before using the migration job API.");
+            }
+
+            if (!await _passwordManager.ValidatePasswordAsync(Request.Headers[AppPasswordHeader].ToString()))
+                return StatusCode(StatusCodes.Status401Unauthorized, $"A valid {AppPasswordHeader} header is required.");
+
+            return null;
+        }
+
         private bool IsLoopbackRequest()
         {
             var address = HttpContext.Connection.RemoteIpAddress;
-            return address != null && (System.Net.IPAddress.IsLoopback(address)
-                || address.Equals(HttpContext.Connection.LocalIpAddress));
+            return address != null && System.Net.IPAddress.IsLoopback(address);
         }
     }
 

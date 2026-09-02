@@ -2,7 +2,6 @@
 using Microsoft.AspNetCore.Mvc;
 using OnlineMongoMigrationProcessor;
 using OnlineMongoMigrationProcessor.Context;
-using MongoMigrationWebApp.Service;
 using System.Text;
 
 [ApiController]
@@ -10,21 +9,13 @@ using System.Text;
 
 public class FileController : ControllerBase
 {
-    private readonly JobManager _jobManager;
-
-    public FileController(JobManager jobManager)
-    {
-        _jobManager = jobManager;
-    }
-
 
     [HttpGet("download/log/{Id}")]
     public IActionResult DownloadFile(string Id)
     {
-        var logBucket = _jobManager.GetLogBucket(Id, out _, out _);
-        var fileBytes = Encoding.UTF8.GetBytes(string.Join(Environment.NewLine,
-            (logBucket.Logs ?? new List<LogObject>()).Select(log =>
-                $"{log.Type}|{log.Datetime:MM/dd/yyyy HH:mm:ss}|{log.Message}")));
+        // 0/0 disables the top/bottom window so the whole log is returned; the log bucket
+        // APIs cap at 300 entries and would silently truncate a long-running job's log.
+        var fileBytes = new Log().DownloadLogsAsJsonBytes(Id, 0, 0);
         var contentType = "application/octet-stream";
         return File(fileBytes, contentType, $"{Id}.txt");
 

@@ -1,5 +1,4 @@
-﻿using Azure;
-using Azure.Core;
+﻿using Azure.Core;
 using Azure.Identity;
 using MongoDB.Driver;
 using MongoDB.Driver.Authentication.Oidc;
@@ -21,7 +20,10 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         // Cache MongoClient instances by a key derived from connection string + options
         // to avoid exhausting logical sessions on the server (TooManyLogicalSessions)
         private static readonly ConcurrentDictionary<string, MongoClient> _clientCache = new();
-        private static readonly AzureCliCredential _azureCliCredential = new();
+
+        // DefaultAzureCredential rather than AzureCliCredential: the container image has no az
+        // CLI, so a CLI-only credential cannot authenticate under a managed identity.
+        private static readonly DefaultAzureCredential _azureCredential = new();
         private const string CosmosMongoScope = "https://ossrdbms-aad.database.windows.net/.default";
 
         public static MongoClient Create(Log? log,string connectionString, bool ReadConcernMajority=false, string? PEMFileContents=null)
@@ -38,7 +40,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 if (settings.Credential?.Mechanism == "MONGODB-OIDC")
                 {
                     settings.Credential = MongoCredential.CreateOidcCredential(
-                        new AzureCliOidcCallback(_azureCliCredential, CosmosMongoScope),
+                        new AzureOidcCallback(_azureCredential, CosmosMongoScope),
                         settings.Credential.Username);
                 }
 
@@ -59,12 +61,12 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
             });
         }
 
-        private sealed class AzureCliOidcCallback : IOidcCallback
+        private sealed class AzureOidcCallback : IOidcCallback
         {
-            private readonly AzureCliCredential _credential;
+            private readonly TokenCredential _credential;
             private readonly string _scope;
 
-            public AzureCliOidcCallback(AzureCliCredential credential, string scope)
+            public AzureOidcCallback(TokenCredential credential, string scope)
             {
                 _credential = credential;
                 _scope = scope;
