@@ -802,7 +802,9 @@ namespace OnlineMongoMigrationProcessor
                             {
                                 mu.UserFilter = item.Filter;
                                 mu.TargetDatabaseName = targetDatabaseName;
-                                mu.TargetCollectionName = targetCollectionName ?? mu.CollectionName;
+                                mu.TargetCollectionName = string.IsNullOrWhiteSpace(item.TargetCollectionName)
+                                    ? mu.CollectionName
+                                    : targetCollectionName;
                                 unitsToAdd.Add(mu);
                             }
                         }
