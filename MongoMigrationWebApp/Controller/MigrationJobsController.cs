@@ -102,9 +102,27 @@ namespace MongoMigrationWebApp.Controller
                 importedJob.MigrationUnitBasics ??= new List<MigrationUnitBasic>();
                 if (request.Collections != null && request.Collections.Count > 0)
                 {
+                    // SaveMigrationUnit rejects any unit whose JobId differs from the active job, so
+                    // importing while a different job is active discards every unit and still returns 200.
+                    var activeJob = MigrationJobContext.CurrentlyActiveJob;
+                    if (activeJob != null
+                        && !string.Equals(activeJob.Id, importedJob.Id, StringComparison.Ordinal)
+                        && activeJob.IsStarted && !activeJob.IsCompleted && !activeJob.IsCancelled)
+                    {
+                        return Conflict($"Migration job '{activeJob.Name}' is still running. Stop it before importing.");
+                    }
+
+                    MigrationJobContext.ActiveMigrationJobId = importedJob.Id;
+
                     var collectionJson = JsonConvert.SerializeObject(request.Collections);
                     var units = await Helper.PopulateJobCollectionsAsync(importedJob, collectionJson, request.SourceConnectionString);
                     Helper.AddMigrationUnits(units, importedJob, MigrationJobContext.Logger);
+
+                    if (importedJob.MigrationUnitBasics.Count == 0)
+                    {
+                        return StatusCode(StatusCodes.Status500InternalServerError,
+                            $"Resolved {units.Count} collection(s) for '{importedJob.Name}' but persisted none.");
+                    }
                 }
 
                 if (!MigrationJobContext.SaveMigrationJob(importedJob) || !MigrationJobContext.SaveJobList())

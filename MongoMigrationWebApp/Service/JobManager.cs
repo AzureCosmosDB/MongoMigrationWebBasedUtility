@@ -239,6 +239,11 @@ namespace MongoMigrationWebApp.Service
             var jobIds = MigrationJobContext.JobList.MigrationJobIds?.ToList() ?? new List<string>();
             foreach (var jobId in jobIds)
                 ClearJobFiles(jobId);
+
+            // CurrentlyActiveJob reloads from this id, so leaving it set resurrects a cleared job
+            // from disk and every later import is rejected as a cross-job write.
+            MigrationJobContext.ActiveMigrationJobId = string.Empty;
+
             return jobIds.Count;
         }
 
