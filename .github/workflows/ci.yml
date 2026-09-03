@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  test:
+    name: Build and Test
+    # Windows only: the local-disk job store and the DPAPI-protected Data Protection key ring are
+    # Windows code paths, and the deployment target is IIS on Windows Server.
+    runs-on: windows-latest
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v7
+
+      - name: Set Up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore OnlineMongoMigration.sln
+
+      - name: Build
+        run: dotnet build OnlineMongoMigration.sln -c Release --no-restore
+
+      - name: Test
+        run: >
+          dotnet test tests/MongoMigrationWebApp.Tests/MongoMigrationWebApp.Tests.csproj
+          -c Release --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory artifacts/test-results
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: warn
+
+  package:
+    name: Package Release Zip
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v7
+
+      - name: Set Up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish
+        run: dotnet publish MongoMigrationWebApp/MongoMigrationWebApp.csproj -c Release -o artifacts/publish
+
+      - name: Verify Publish Layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # dre-infra-terraform's 02-deploy-app.ps1 expands the release zip straight into the IIS
+          # app directory and fails if web.config is not at its root, so assert the same shape here
+          # rather than after a release has already been tagged.
+          $required = @('web.config', 'MongoMigrationWebApp.dll', 'appsettings.json')
+          foreach ($file in $required) {
+            $path = Join-Path 'artifacts/publish' $file
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "$file is missing from the publish output."
+            }
+            Write-Host "  OK  $file"
+          }
+
+      - name: Create Release Zip
+        id: zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Match the asset name the Terraform utility_release_zip_uri variables point at.
+          $version = (Select-Xml -Path 'MongoMigrationWebApp/MongoMigrationWebApp.csproj' -XPath '//Version').Node.InnerText
+          $name = "MongoMigrationWebUtility-internal-v$version"
+
+          New-Item -ItemType Directory -Path 'artifacts/package' -Force | Out-Null
+          Compress-Archive -Path 'artifacts/publish/*' -DestinationPath "artifacts/package/$name.zip" -Force
+
+          "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload Release Zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.zip.outputs.name }}
+          path: artifacts/package/*.zip
+          if-no-files-found: error

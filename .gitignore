@@ -14,6 +14,9 @@
 /.vs/CopilotSnapshots/
 /tests/OnlineMongoMigrationProcessor.Tests/bin
 /tests/OnlineMongoMigrationProcessor.Tests/obj
+/tests/MongoMigrationWebApp.Tests/bin
+/tests/MongoMigrationWebApp.Tests/obj
+/artifacts
 *.dll
 /MongoMigrationWebApp/appsettings.Development.json
 /MongoMigrationWebApp/Properties/PublishProfiles

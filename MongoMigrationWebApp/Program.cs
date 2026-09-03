@@ -118,3 +118,6 @@ app.MapControllers(); // Ensure controllers are mapped
 
 app.Run();
 
+// Top-level statements produce an internal entry point; WebApplicationFactory needs a public one.
+public partial class Program { }
+
