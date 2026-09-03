@@ -164,6 +164,85 @@ namespace MongoMigrationWebApp.Controller
             });
         }
 
+        [HttpPost("{jobId}/start")]
+        public async Task<IActionResult> Start(string jobId, [FromBody] MigrationJobStartRequest? request)
+        {
+            var denied = await AuthorizeAsync();
+            if (denied != null)
+                return denied;
+
+            if (string.IsNullOrWhiteSpace(jobId))
+                return BadRequest("jobId is required.");
+
+            var job = _jobManager.GetMigrationJobById(jobId);
+            if (job == null)
+                return NotFound($"No migration job with id '{jobId}'.");
+
+            if (job.IsCompleted)
+                return Conflict("Job is already completed.");
+
+            var runningJobId = _jobManager.GetRunningJobId();
+            if (!string.IsNullOrEmpty(runningJobId))
+            {
+                return runningJobId == jobId
+                    ? Conflict("Job is already running.")
+                    : Conflict($"Another migration job is running ({runningJobId}).");
+            }
+
+            // Body wins so a rotated credential can be supplied; otherwise reuse what the job was
+            // started with, which is the whole point of not having to re-enter them after a recycle.
+            string source, target;
+            if (!string.IsNullOrWhiteSpace(request?.SourceConnectionString)
+                && !string.IsNullOrWhiteSpace(request?.TargetConnectionString))
+            {
+                source = request!.SourceConnectionString!;
+                target = request!.TargetConnectionString!;
+                _jobManager.RememberConnectionStrings(job.Id, source, target);
+            }
+            else if (!_jobManager.TryResolveConnectionStrings(job.Id, out source, out target))
+            {
+                return BadRequest(
+                    "No stored connection strings for this job. Supply sourceConnectionString and targetConnectionString.");
+            }
+
+            // Endpoints are what the job records, so a mismatch means these credentials point
+            // somewhere else entirely -- refuse rather than migrate into the wrong cluster.
+            var sourceEndpoint = Helper.ExtractHost(source);
+            var targetEndpoint = Helper.ExtractHost(target);
+            if (!string.IsNullOrEmpty(job.SourceEndpoint) && job.SourceEndpoint != sourceEndpoint)
+                return BadRequest($"Source endpoint '{sourceEndpoint}' does not match the job's '{job.SourceEndpoint}'.");
+            if (!string.IsNullOrEmpty(job.TargetEndpoint) && job.TargetEndpoint != targetEndpoint)
+                return BadRequest($"Target endpoint '{targetEndpoint}' does not match the job's '{job.TargetEndpoint}'.");
+
+            MigrationJobContext.SaveMigrationJob(job);
+            MigrationJobContext.SaveJobList();
+
+            // Both flags are mutated by the calls below, so report the pre-start values.
+            var resumed = job.IsStarted;
+            var syncBack = job.ProcessingSyncBack && !job.IsSimulatedRun;
+
+            if (syncBack)
+            {
+                await _jobManager.SyncBackToSource(source, target, job);
+            }
+            else
+            {
+                await _jobManager.StartMigration(
+                    job, source, target, job.NameSpaces ?? string.Empty, job.JobType, Helper.IsOnline(job));
+            }
+
+            return Accepted(new
+            {
+                jobId = job.Id,
+                name = job.Name,
+                started = true,
+                resumed,
+                syncBack,
+                sourceEndpoint = job.SourceEndpoint,
+                targetEndpoint = job.TargetEndpoint
+            });
+        }
+
         [HttpPost("import")]
         public async Task<IActionResult> Import([FromBody] MigrationJobImportRequest request)
         {
@@ -310,5 +389,12 @@ namespace MongoMigrationWebApp.Controller
         public string? TargetConnectionString { get; set; }
         public string? SourceCaCertificatePem { get; set; }
         public JsonElement? Settings { get; set; }
+    }
+
+    public sealed class MigrationJobStartRequest
+    {
+        // Both optional: omit them to reuse what the job was started with.
+        public string? SourceConnectionString { get; set; }
+        public string? TargetConnectionString { get; set; }
     }
 }

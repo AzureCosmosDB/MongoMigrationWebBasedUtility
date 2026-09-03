@@ -21,10 +21,12 @@ namespace MongoMigrationWebApp.Service
         private bool _resumeExecuted = false;
         private string? _webAppBaseUrl = null;
         private readonly SemaphoreSlim _syncBackLock = new SemaphoreSlim(1, 1);
+        private readonly ConnectionStringVault? _connectionVault;
 
-        public JobManager(IConfiguration configuration)
+        public JobManager(IConfiguration configuration, ConnectionStringVault? connectionVault = null)
         {
             _configuration = configuration;
+            _connectionVault = connectionVault;
 
             MigrationJobContext.Initialize(_configuration);
 
@@ -57,9 +59,26 @@ namespace MongoMigrationWebApp.Service
 
                 Helper.LogToFile("Step 0");
 
-                if (migrationJobIds != null && migrationJobIds.Count == 1)
+                // ActiveMigrationJobId is in-memory only, so after a recycle it is empty and the
+                // original single-job gate meant a box with more than one job never auto-resumed.
+                // Fall back to persisted state: at most one job can be mid-flight at a time.
+                var resumeId = MigrationJobContext.ActiveMigrationJobId;
+                if (string.IsNullOrEmpty(resumeId))
                 {
-                    var mj= GetMigrationJobById(migrationJobIds[0]);
+                    var inFlight = (migrationJobIds ?? new List<string>())
+                        .Select(id => GetMigrationJobById(id))
+                        .Where(j => j != null && j.IsStarted && !j.IsCompleted && !j.IsCancelled)
+                        .ToList();
+
+                    if (inFlight.Count == 1)
+                        resumeId = inFlight[0].Id;
+                    else if (inFlight.Count > 1)
+                        Helper.LogToFile($"Skipping auto-resume: {inFlight.Count} jobs are mid-flight, cannot pick one.");
+                }
+
+                if (!string.IsNullOrEmpty(resumeId))
+                {
+                    var mj = GetMigrationJobById(resumeId);
                     if (mj == null)
                         return;
 
@@ -84,8 +103,23 @@ namespace MongoMigrationWebApp.Service
                         {
                             Helper.LogToFile("Step2 : before reading config");
 
-                            var sourceConnectionString = _configuration.GetConnectionString("SourceConnectionString");
-                            var targetConnectionString = _configuration.GetConnectionString("TargetConnectionString");
+                            // What the job was started with, kept across recycles. Falls back to
+                            // configuration, which is the only source the app had before.
+                            string? sourceConnectionString = null;
+                            string? targetConnectionString = null;
+
+                            if (_connectionVault != null
+                                && _connectionVault.TryLoad(mj.Id, out var vaultSource, out var vaultTarget))
+                            {
+                                sourceConnectionString = vaultSource;
+                                targetConnectionString = vaultTarget;
+                                Helper.LogToFile("Step2a : restored connection strings for this job");
+                            }
+                            else
+                            {
+                                sourceConnectionString = _configuration.GetConnectionString("SourceConnectionString");
+                                targetConnectionString = _configuration.GetConnectionString("TargetConnectionString");
+                            }
 
                             if (sourceConnectionString != null && targetConnectionString != null)
                             {
@@ -222,6 +256,9 @@ namespace MongoMigrationWebApp.Service
             MigrationJobContext.JobList.MigrationJobIds?.Remove(jobId);
             MigrationJobContext.SaveJobList();
 
+            // Credentials must not outlive the job they belong to.
+            _connectionVault?.Remove(jobId);
+
             try
             {
                 MigrationJobContext.Store.DeleteDocument($"{Path.Combine("migrationjobs", jobId)}");
@@ -239,6 +276,9 @@ namespace MongoMigrationWebApp.Service
             var jobIds = MigrationJobContext.JobList.MigrationJobIds?.ToList() ?? new List<string>();
             foreach (var jobId in jobIds)
                 ClearJobFiles(jobId);
+
+            // Sweeps entries orphaned by a job whose files failed to delete.
+            _connectionVault?.RemoveAll();
 
             // CurrentlyActiveJob reloads from this id, so leaving it set resurrects a cleared job
             // from disk and every later import is rejected as a cross-job write.
@@ -376,6 +416,37 @@ namespace MongoMigrationWebApp.Service
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Connection strings for a job: in-memory first, then the values it was started with.
+        /// Rehydrates the in-memory cache on a hit so the rest of the app sees them as normal.
+        /// </summary>
+        public bool TryResolveConnectionStrings(string jobId, out string sourceConnectionString, out string targetConnectionString)
+        {
+            sourceConnectionString = MigrationJobContext.SourceConnectionString[jobId] ?? string.Empty;
+            targetConnectionString = MigrationJobContext.TargetConnectionString[jobId] ?? string.Empty;
+
+            if (!string.IsNullOrWhiteSpace(sourceConnectionString) && !string.IsNullOrWhiteSpace(targetConnectionString))
+                return true;
+
+            if (_connectionVault != null && _connectionVault.TryLoad(jobId, out var storedSource, out var storedTarget))
+            {
+                sourceConnectionString = storedSource;
+                targetConnectionString = storedTarget;
+                MigrationJobContext.SourceConnectionString[jobId] = storedSource;
+                MigrationJobContext.TargetConnectionString[jobId] = storedTarget;
+                return true;
+            }
+
+            return false;
+        }
+
+        public void RememberConnectionStrings(string jobId, string sourceConnectionString, string targetConnectionString)
+        {
+            MigrationJobContext.SourceConnectionString[jobId] = sourceConnectionString;
+            MigrationJobContext.TargetConnectionString[jobId] = targetConnectionString;
+            _connectionVault?.TrySave(jobId, sourceConnectionString, targetConnectionString);
+        }
+
         public Task StartMigration(MigrationJob job, string sourceConnectionString, string targetConnectionString, string namespacesToMigrate, OnlineMongoMigrationProcessor.Models.JobType jobType,bool trackChangeStreams)
         {
             
@@ -390,6 +461,9 @@ namespace MongoMigrationWebApp.Service
             
             MigrationJobContext.SourceConnectionString[job.Id] = sourceConnectionString;
             MigrationJobContext.TargetConnectionString[job.Id] = targetConnectionString;
+
+            // So a recycle does not force the operator to re-enter them to resume.
+            _connectionVault?.TrySave(job.Id, sourceConnectionString, targetConnectionString);
 
             MigrationJobContext.ActiveMigrationJobId = job.Id;
 
@@ -445,6 +519,10 @@ namespace MongoMigrationWebApp.Service
 
                 MigrationJobContext.SourceConnectionString[job.Id] = sourceConnectionString;
                 MigrationJobContext.TargetConnectionString[job.Id] = targetConnectionString;
+
+                // So a recycle does not force the operator to re-enter them to resume.
+                _connectionVault?.TrySave(job.Id, sourceConnectionString, targetConnectionString);
+
                 MigrationJobContext.ActiveMigrationJobId = job.Id;
 
                 // Call synchronous method since it starts async work internally

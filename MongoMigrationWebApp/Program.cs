@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.DependencyInjection;
 using MongoMigrationWebApp.Service;
 using OnlineMongoMigrationProcessor;
@@ -54,6 +55,23 @@ if (!string.IsNullOrEmpty(useLocalDisk))
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 builder.Services.AddSingleton(builder.Configuration);
+
+// Keyring lives in the state store, not the app directory: a redeploy replaces the app
+// directory, which would otherwise make every persisted connection string undecryptable.
+var dataProtection = builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(
+        Path.Combine(MongoMigrationWebApp.Service.ConnectionStringVault.ResolveStateRoot(builder.Configuration), "dataprotection-keys")))
+    .SetApplicationName("MongoMigrationWebUtility");
+
+if (OperatingSystem.IsWindows())
+{
+    // Otherwise the keyring is plaintext XML next to the payloads it protects, so read access to
+    // the state folder alone yields the stored credentials. Machine scope rather than user scope
+    // so an app-pool identity change does not orphan the keys. Windows-only API.
+    dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
+}
+
+builder.Services.AddSingleton<MongoMigrationWebApp.Service.ConnectionStringVault>();
 builder.Services.AddSingleton<JobManager>();
 builder.Services.AddScoped<FileService>();
 

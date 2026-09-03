@@ -12,7 +12,7 @@
                 <AuthorizeView>
                     <Authorized>
                         <div class="d-flex align-items-center gap-3">
-                            <div class="small">v0.9.15</div>
+                            <div class="small">@AppVersion</div>
                             <button class="btn btn-sm btn-outline-secondary" @onclick="@(() => Navigation.NavigateTo("/change-password"))">
                                 <i class="bi bi-key"></i> Change Password
                             </button>
@@ -22,7 +22,7 @@
                         </div>
                     </Authorized>
                     <NotAuthorized>
-                        <div class="small">v0.9.15</div>
+                        <div class="small">@AppVersion</div>
                     </NotAuthorized>
                 </AuthorizeView>
             </div>
@@ -35,6 +35,14 @@
 </AuthenticationGuard>
 
 @code {
+    // Read from the assembly rather than hardcoded: the literal was left at v0.9.15 through two
+    // releases, so the UI reported a version the box was not running.
+    private static readonly string AppVersion = "v" + (System.Reflection.CustomAttributeExtensions
+        .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(
+            System.Reflection.Assembly.GetExecutingAssembly())?
+        .InformationalVersion?
+        .Split('+')[0] ?? "unknown");
+
     private async Task HandleLogout()
     {
         await AuthService.LogoutAsync();

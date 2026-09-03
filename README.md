@@ -227,15 +227,39 @@ The web app is protected by a single application password.
 The app exposes a local automation API for staging migration jobs:
 
 ```text
+GET  /api/migration-jobs
+GET  /api/migration-jobs/{jobId}
+POST /api/migration-jobs/{jobId}/start
+GET  /api/migration-jobs/{jobId}/logs
 POST /api/migration-jobs/import
 POST /api/migration-jobs/reset
-GET  /api/migration-jobs/{jobId}/logs
 ```
 
 `import` accepts a complete job definition, a `CollectionInfo` list, source and
 target connection strings, and an optional source CA certificate (PEM). `reset`
-deletes every job. Connection strings are kept in process memory using the same
-mechanism as the UI and are not written to the persisted job files.
+deletes every job.
+
+`start` starts or resumes an existing job without using the UI. The body is
+optional:
+
+```json
+{ "sourceConnectionString": "...", "targetConnectionString": "..." }
+```
+
+Omit it to reuse the connection strings the job was started with. Supplying them
+overrides what is stored, which is how you rotate a credential. Either way the
+endpoints they resolve to must match the job's recorded `SourceEndpoint` and
+`TargetEndpoint`, so a job cannot be pointed at a different cluster; a mismatch
+returns `400`. It returns `409` if a migration is already running, and `404` if
+the job does not exist.
+
+Connection strings are held in process memory as the UI does, and are also
+written to `<state-store>/connections/<jobId>.dat`, encrypted with ASP.NET Core
+Data Protection. They are never written to the persisted job files. This is what
+lets a job be resumed after an app-pool recycle, an `iisreset` or a redeploy,
+which previously dropped them and left a started job unresumable without
+re-entering the credentials by hand. On Windows the key ring is itself encrypted
+with machine-scoped DPAPI. Deleting a job deletes its stored connection strings.
 
 Every endpoint requires both of the following, and returns `403` / `401` when
 either is missing:
