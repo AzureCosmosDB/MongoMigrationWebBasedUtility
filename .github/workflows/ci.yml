@@ -58,6 +58,8 @@ jobs:
     name: Package Release Zip
     needs: test
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - name: Check Out
         uses: actions/checkout@v7
@@ -96,11 +98,15 @@ jobs:
           # Match the asset name the Terraform utility_release_zip_uri variables point at.
           $version = (Select-Xml -Path 'MongoMigrationWebApp/MongoMigrationWebApp.csproj' -XPath '//Version').Node.InnerText
           $name = "MongoMigrationWebUtility-internal-v$version"
+          $zip = "artifacts/package/$name.zip"
 
           New-Item -ItemType Directory -Path 'artifacts/package' -Force | Out-Null
-          Compress-Archive -Path 'artifacts/publish/*' -DestinationPath "artifacts/package/$name.zip" -Force
+          Compress-Archive -Path 'artifacts/publish/*' -DestinationPath $zip -Force
 
-          "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          Write-Host "  $name.zip  SHA256 $sha256"
+
+          @("name=$name", "version=$version", "zip=$zip", "sha256=$sha256") | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload Release Zip
         uses: actions/upload-artifact@v7
@@ -108,3 +114,55 @@ jobs:
           name: ${{ steps.zip.outputs.name }}
           path: artifacts/package/*.zip
           if-no-files-found: error
+
+      - name: Verify the Tag Matches the Project Version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          PROJECT_VERSION: ${{ steps.zip.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # The asset name comes from the csproj version but its download URL comes from the tag,
+          # so a disagreement publishes the asset at a URL nobody can derive from the release.
+          $expected = "v$env:PROJECT_VERSION"
+          if ($env:TAG -ne $expected) {
+            throw "Tag $env:TAG does not match <Version> in MongoMigrationWebApp.csproj ($expected)."
+          }
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          # Read through the environment rather than interpolated into the script body, which
+          # would let anything embedded in a ref name execute as PowerShell.
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          ASSET_NAME: ${{ steps.zip.outputs.name }}
+          ZIP_PATH: ${{ steps.zip.outputs.zip }}
+          ZIP_SHA256: ${{ steps.zip.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Releases here are titled "<tag> - <summary>", which the annotated tag already carries.
+          # %(contents) would drag the signature block in with it.
+          $subject = (@(git for-each-ref "refs/tags/$env:TAG" --format='%(contents:subject)') -join '').Trim()
+          $title = if ($subject -and $subject -ne $env:TAG) { "$env:TAG - $subject" } else { $env:TAG }
+
+          # dre-infra-terraform pins the digest alongside the URL, so ship both rather than making
+          # the operator hash the download by hand.
+          $url = "https://github.com/$env:REPOSITORY/releases/download/$env:TAG/${env:ASSET_NAME}.zip"
+          $notes = @(
+            'Deploy this build by setting these on the Terraform migration VM:'
+            ''
+            '```hcl'
+            "migration_vm_utility_release_zip_uri    = `"$url`""
+            "migration_vm_utility_release_zip_sha256 = `"$env:ZIP_SHA256`""
+            '```'
+          ) -join "`n"
+
+          Set-Content -LiteralPath 'artifacts/release-notes.md' -Value $notes -Encoding utf8
+
+          gh release create $env:TAG $env:ZIP_PATH --title $title --notes-file 'artifacts/release-notes.md' --generate-notes
