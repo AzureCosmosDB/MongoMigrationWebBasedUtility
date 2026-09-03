@@ -805,6 +805,12 @@ namespace OnlineMongoMigrationProcessor
                                 mu.TargetCollectionName = string.IsNullOrWhiteSpace(item.TargetCollectionName)
                                     ? mu.CollectionName
                                     : targetCollectionName;
+                                // Only override when supplied: a wildcard entry applies its
+                                // options to every namespace it expands to.
+                                if (item.Overwrite.HasValue)
+                                    mu.Overwrite = item.Overwrite;
+                                if (item.IndexingStrategy.HasValue)
+                                    mu.IndexingStrategy = item.IndexingStrategy;
                                 unitsToAdd.Add(mu);
                             }
                         }
@@ -1174,7 +1180,9 @@ namespace OnlineMongoMigrationProcessor
                 CollectionName = mu.CollectionName,
                 TargetDatabaseName = string.Equals(mu.DatabaseName, mu.GetEffectiveTargetDatabaseName(), StringComparison.OrdinalIgnoreCase) ? null : mu.GetEffectiveTargetDatabaseName(),
                 TargetCollectionName = string.Equals(mu.CollectionName, mu.GetEffectiveTargetCollectionName(), StringComparison.OrdinalIgnoreCase) ? null : mu.GetEffectiveTargetCollectionName(),
-                Filter = string.IsNullOrWhiteSpace(mu.UserFilter) ? null : mu.UserFilter
+                Filter = string.IsNullOrWhiteSpace(mu.UserFilter) ? null : mu.UserFilter,
+                Overwrite = mu.Overwrite,
+                IndexingStrategy = mu.IndexingStrategy
             }).ToList();
 
             return JsonConvert.SerializeObject(collectionInfos, Formatting.Indented);

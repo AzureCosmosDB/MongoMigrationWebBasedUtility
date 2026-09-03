@@ -13,5 +13,10 @@ namespace OnlineMongoMigrationProcessor.Models
         public string? TargetCollectionName { get; set; }
         public string? TargetDatabaseName { get; set; }
         public string? Filter { get; set; }
+
+        // Null leaves the per-unit default (append, and the default indexing strategy), so an
+        // existing payload that omits these behaves exactly as before.
+        public bool? Overwrite { get; set; }
+        public IndexingStrategy? IndexingStrategy { get; set; }
     }
 }
