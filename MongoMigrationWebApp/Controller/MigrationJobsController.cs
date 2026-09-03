@@ -36,6 +36,114 @@ namespace MongoMigrationWebApp.Controller
             return Ok(new { deletedJobs = _jobManager.ClearAllJobFiles() });
         }
 
+        [HttpGet]
+        public async Task<IActionResult> List()
+        {
+            var denied = await AuthorizeAsync();
+            if (denied != null)
+                return denied;
+
+            var runningJobId = _jobManager.GetRunningJobId();
+            var jobs = new List<object>();
+
+            foreach (var id in _jobManager.GetMigrationIds() ?? new List<string>())
+            {
+                var job = _jobManager.GetMigrationJobById(id);
+                if (job == null)
+                    continue;
+
+                jobs.Add(Summarize(job, _jobManager.GetMigrationUnits(job), runningJobId));
+            }
+
+            return Ok(new { runningJobId, count = jobs.Count, jobs });
+        }
+
+        [HttpGet("{jobId}")]
+        public async Task<IActionResult> Get(string jobId)
+        {
+            var denied = await AuthorizeAsync();
+            if (denied != null)
+                return denied;
+
+            if (string.IsNullOrWhiteSpace(jobId))
+                return BadRequest("jobId is required.");
+
+            var job = _jobManager.GetMigrationJobById(jobId);
+            if (job == null)
+                return NotFound($"No migration job with id '{jobId}'.");
+
+            var units = _jobManager.GetMigrationUnits(job) ?? new List<MigrationUnit>();
+
+            return Ok(new
+            {
+                job = Summarize(job, units, _jobManager.GetRunningJobId()),
+                units = units.Select(u => new
+                {
+                    u.Id,
+                    u.DatabaseName,
+                    u.CollectionName,
+                    targetDatabaseName = u.GetEffectiveTargetDatabaseName(),
+                    targetCollectionName = u.GetEffectiveTargetCollectionName(),
+                    u.DumpPercent,
+                    u.RestorePercent,
+                    u.IndexPercent,
+                    u.DumpComplete,
+                    u.RestoreComplete,
+                    u.EstimatedDocCount,
+                    u.ActualDocCount,
+                    u.AvgDocSizeBytes,
+                    sourceStatus = u.SourceStatus.ToString(),
+                    u.FailedOperation,
+                    u.SkippedDueToMaxRetries,
+                    opLogError = u.OpLogError.ToString(),
+                    u.BulkCopyStartedOn,
+                    u.BulkCopyEndedOn,
+                    u.ChangeStreamStartedOn,
+                    u.CSLastChecked,
+                    u.CSLastChangeUTCTime
+                })
+            });
+        }
+
+        /// <summary>
+        /// Shapes a job for the read APIs. MigrationJob holds endpoints rather than connection
+        /// strings, so nothing here needs redacting.
+        /// </summary>
+        private object Summarize(MigrationJob job, List<MigrationUnit>? units, string? runningJobId)
+        {
+            units ??= new List<MigrationUnit>();
+
+            return new
+            {
+                job.Id,
+                job.Name,
+                jobType = job.JobType.ToString(),
+                cdcMode = job.CDCMode.ToString(),
+                changeStreamLevel = job.ChangeStreamLevel.ToString(),
+                changeStreamMode = job.ChangeStreamMode.ToString(),
+                job.SourceEndpoint,
+                job.TargetEndpoint,
+                job.SourceServerVersion,
+                job.IsStarted,
+                job.IsCompleted,
+                job.IsCancelled,
+                job.IsSimulatedRun,
+                job.SyncBackEnabled,
+                isRunning = job.Id == runningJobId,
+                job.StartedOn,
+                job.CSLastChecked,
+                units = new
+                {
+                    total = units.Count,
+                    dumpComplete = units.Count(u => u.DumpComplete),
+                    restoreComplete = units.Count(u => u.RestoreComplete),
+                    failed = units.Count(u => !string.IsNullOrEmpty(u.FailedOperation)),
+                    estimatedDocs = units.Sum(u => u.EstimatedDocCount),
+                    actualDocs = units.Sum(u => u.ActualDocCount)
+                }
+            };
+        }
+
         [HttpGet("{jobId}/logs")]
         public async Task<IActionResult> GetLogs(string jobId)
         {
