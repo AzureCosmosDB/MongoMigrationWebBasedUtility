@@ -53,7 +53,7 @@
                     </button>
                     <ul class="dropdown-menu" aria-labelledby="resumeJobDropdown">
                         <li><a class="dropdown-item" @onclick="ResumeJobWithNewConnectionString">With Updated Connection Strings</a></li>
-                        @if (CurrentlyLoadedMigrationJob != null && !string.IsNullOrEmpty(MigrationJobContext.SourceConnectionString[CurrentlyLoadedMigrationJob.Id]) && !string.IsNullOrEmpty(MigrationJobContext.TargetConnectionString[CurrentlyLoadedMigrationJob.Id]))
+                        @if (CurrentlyLoadedMigrationJob != null && JobManager.TryResolveConnectionStrings(CurrentlyLoadedMigrationJob.Id, out _, out _))
                         {
                             <li><a class="dropdown-item" @onclick="ResumeJobWithExistingConnectionString">With Existing Connection Strings</a></li>
                         }

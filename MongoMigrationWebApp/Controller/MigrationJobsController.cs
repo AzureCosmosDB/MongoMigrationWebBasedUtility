@@ -275,8 +275,11 @@ namespace MongoMigrationWebApp.Controller
                 importedJob.IsCompleted = false;
                 importedJob.IsCancelled = false;
 
-                MigrationJobContext.SourceConnectionString[importedJob.Id] = request.SourceConnectionString;
-                MigrationJobContext.TargetConnectionString[importedJob.Id] = request.TargetConnectionString;
+                // Through the manager so they also reach the ConnectionStringVault. Assigning the
+                // in-memory dictionaries directly left an imported job with nothing on disk, so a
+                // recycle before it was ever started lost the strings and the viewer could then
+                // only offer a resume with updated ones.
+                _jobManager.RememberConnectionStrings(importedJob.Id, request.SourceConnectionString, request.TargetConnectionString);
 
                 if (request.Settings.HasValue)
                 {

@@ -135,6 +135,24 @@ public sealed class MigrationJobsApiTests : IClassFixture<MigrationApiFactory>, 
         Assert.Equal(jobId, logs.RootElement.GetProperty("jobId").GetString());
     }
 
+    /// <summary>
+    /// An imported job is never started, so no other path writes its connection strings to the
+    /// vault. Without them a recycle leaves the viewer able to offer only a resume with updated
+    /// strings, because the in-memory cache is all there ever was.
+    /// </summary>
+    [Fact]
+    public async Task Persists_imported_connection_strings_to_the_vault()
+    {
+        using var client = _factory.CreateApiClient();
+
+        var jobId = await ImportAsync(client, "ci-import-vault");
+
+        var vault = _factory.Services.GetRequiredService<ConnectionStringVault>();
+        Assert.True(vault.TryLoad(jobId, out var source, out var target));
+        Assert.Equal(SourceConnectionString, source);
+        Assert.Equal(TargetConnectionString, target);
+    }
+
     [Fact]
     public async Task Reuses_the_existing_job_when_a_name_is_imported_twice()
     {
