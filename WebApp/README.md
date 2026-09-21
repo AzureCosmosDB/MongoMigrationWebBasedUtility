@@ -55,6 +55,7 @@ This option involves cloning the repository and building the C# project source f
    $projectFilePath = "$projectFolderPath\MongoMigrationWebApp\MongoMigrationWebApp.csproj"
    $publishFolder = "$projectFolderPath\publish"
    $zipPath = "$publishFolder\app.zip"
+   $artifactValidator = Join-Path (Get-Location) "Assert-PublishArtifactSafe.ps1"
 
    # Login to Azure
    az login
@@ -77,6 +78,12 @@ This option involves cloning the repository and building the C# project source f
    # Build the Blazor app
    Write-Host "Building Blazor app..."
    dotnet publish $projectFilePath -c Release -o $publishFolder -warnaserror:none --nologo
+   if ($LASTEXITCODE -ne 0) {
+       throw "dotnet publish failed with exit code $LASTEXITCODE."
+   }
+
+   # Reject environment-specific settings and embedded credentials
+   & $artifactValidator -Path $publishFolder
 
    # Delete the existing zip file if it exists
    if (Test-Path $zipPath) {
@@ -85,13 +92,14 @@ This option involves cloning the repository and building the C# project source f
 
    # Archive published files
    Compress-Archive -Path "$publishFolder\*" -DestinationPath $zipPath -Update
+   & $artifactValidator -Path $zipPath
 
    # Deploy files to Azure Web App
    Write-Host "Deploying to Azure Web App..."
    az webapp deploy --resource-group $resourceGroupName --name $webAppName --src-path $zipPath --type zip
 
    Write-Host "Deployment has completed successfully"
-
+   ```
 
 3. **Access the Application**
    - Open `https://<WebAppName>.azurewebsites.net` in your browser
@@ -113,6 +121,7 @@ This option uses pre-built binaries from the latest release, eliminating the nee
    $webAppName = "<Replace with Web App Name>"
    $location = "<Replace with Azure Region (e.g., WestUs3, EastUS, WestEurope)>"
    $zipPath = "<Replace with full path of downloaded latest release zip file on local>"
+   $artifactValidator = Join-Path (Get-Location) "Assert-PublishArtifactSafe.ps1"
 
    # Login to Azure
    az login
@@ -124,6 +133,9 @@ This option uses pre-built binaries from the latest release, eliminating the nee
    Write-Host "Deploying Azure Web App..."
    az deployment group create --resource-group $resourceGroupName --template-file main.bicep --parameters location=$location webAppName=$webAppName
 
+   # Reject environment-specific settings and embedded credentials
+   & $artifactValidator -Path $zipPath
+
    # Deploy files to Azure Web App
    Write-Host "Deploying to Azure Web App..."
    az webapp deploy --resource-group $resourceGroupName --name $webAppName --src-path $zipPath --type zip
@@ -131,6 +143,8 @@ This option uses pre-built binaries from the latest release, eliminating the nee
    Write-Host "Deployment has completed successfully"
   
    ```
+
+Store development credentials with .NET user secrets and production credentials in the deployment platform's secret store or environment variables. Environment-specific `appsettings.*.json` files are intentionally excluded from build and publish output.
 
 3. **Access the Application**
    - Open `https://<WebAppName>.azurewebsites.net` in your browser

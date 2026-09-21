@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^git show v0\\.9\\.8:MongoMigrationWebApp/MongoMigrationWebApp\\.csproj 2>\\$null; git show v0\\.9\\.8:MongoMigrationWebApp/appsettings\\.json 2>\\$null; git ls-tree -r --name-only v0\\.9\\.8 \\| Select-String -Pattern 'appsettings\\.\\*development' -CaseSensitive:\\$false$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

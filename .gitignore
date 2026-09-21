@@ -15,7 +15,7 @@
 /tests/OnlineMongoMigrationProcessor.Tests/bin
 /tests/OnlineMongoMigrationProcessor.Tests/obj
 *.dll
-/MongoMigrationWebApp/appsettings.Development.json
+/MongoMigrationWebApp/appsettings.*.json
 /MongoMigrationWebApp/Properties/PublishProfiles
 /SchemaMigration/__pycache__
 /OnlineMongoMigrationProcessor/Helpers/Mongo

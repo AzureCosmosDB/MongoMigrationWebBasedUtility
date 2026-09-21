@@ -5,9 +5,13 @@ param (
     [bool]$SupportMongoDump = $true
 )
 
+$ErrorActionPreference = "Stop"
+
 # Calculate full zip path based on parent folder
 $workingFolder = Split-Path (Get-Location) -Parent
 $zipPath = Join-Path $workingFolder $zipFileName
+$scriptFolder = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { (Get-Location).Path } else { $PSScriptRoot }
+$artifactValidator = Join-Path $scriptFolder "Assert-PublishArtifactSafe.ps1"
 
 # Login to Azure
 #az login
@@ -45,6 +49,8 @@ if (-not $SupportMongoDump) {
     # Optionally clean up temp folder
     Remove-Item -Path $tempFolder -Recurse -Force
 }
+
+& $artifactValidator -Path $zipPath
 
 # Deploy zip contents to Azure Web App
 Write-Host "Deploying to Azure Web App..."

@@ -62,4 +62,4 @@ Thumbs.db
 publish/
 
 #appSettings files
-appsettings.development.json
+**/appsettings.*.json

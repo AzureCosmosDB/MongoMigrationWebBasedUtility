@@ -310,7 +310,8 @@ namespace OnlineMongoMigrationProcessor.Processors
             var targetCollectionName = mu.GetEffectiveTargetCollectionName();
             var namespaceForLog = Log.FormatNamespaceForLog(mu.DatabaseName, mu.CollectionName, targetDatabaseName, targetCollectionName);
 
-            bool isBlocking = mu.IndexingStrategy.Value == IndexingStrategy.SameAsSourceBlocking;
+            bool isBlocking = !Helper.IsOnline(activeJob)
+                || mu.IndexingStrategy.Value == IndexingStrategy.SameAsSourceBlocking;
 
             // Authoritative resume check: if the target already has all expected non-unique
             // index *documents* (listIndexes), the previous run already issued createIndexes.
@@ -386,7 +387,6 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             // Pre-count source non-unique indexes so the UI immediately shows the denominator
             // (e.g. "0/5") instead of "0/0" while createIndexes commands are being submitted.
-            int originalIndexesMigrated = mu.IndexesMigrated;
             try
             {
                 var preCountCopier = new Helpers.Mongo.IndexCopier();
@@ -409,11 +409,11 @@ namespace OnlineMongoMigrationProcessor.Processors
 
             count = await MongoHelper.BuildNonUniqueIndexesAsync(_log, mu, targetConnStr, sourceCollection, isBlocking);
 
-            // BuildNonUniqueIndexesAsync sets IndexesMigrated += actualCount.
-            // If the build failed (count < 0), restore the original count.
+            // Post-copy progress fields track non-unique indexes only. Unique indexes are created
+            // before copy and must not be included in the verifier's denominator.
             if (count < 0)
             {
-                mu.IndexesMigrated = originalIndexesMigrated;
+                mu.IndexesMigrated = 0;
                 mu.IndexesExpected = 0;
             }
 
@@ -422,6 +422,12 @@ namespace OnlineMongoMigrationProcessor.Processors
                 _log.WriteLine($"Failed to build non-unique indexes for {namespaceForLog}", LogType.Error);
                 return !isBlocking; // In non-blocking mode, don't block change stream on failure
             }
+
+            // The source pre-count includes definitions that the target copier may intentionally
+            // reject as unsupported. Wait only for indexes accepted for creation.
+            mu.IndexesMigrated = count;
+            mu.IndexesExpected = count;
+            MigrationJobContext.SaveMigrationUnit(mu, true);
 
             if (count == 0)
             {

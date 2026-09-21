@@ -380,16 +380,7 @@
                             </td>
                         }
                         <td>
-                            @{ var displayIndexCount = mu.IndexesMigrated > 0 ? mu.IndexesMigrated : mu.IndexesExpected; }
-                            @{ var failedSuffix = mu.IndexesFailed > 0 ? $", {mu.IndexesFailed} failed" : string.Empty; }
-                            @(mu.SourceStatus == CollectionStatus.NotFound ? "N/A"
-                                                : mu.SourceStatus == CollectionStatus.IsView ? "N/A"
-                                                : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "N/A"
-                                                : mu.IndexBuildComplete && mu.IndexesFailed > 0 ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
-                                                : mu.IndexBuildComplete || mu.IndexPercent >= 100 ? $"{displayIndexCount} indexes (Success)"
-                                                : (mu.IndexPercent > 0 || mu.IndexesExpected > 0) ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
-                                                : mu.DumpComplete && mu.RestoreComplete ? "Pending"
-                                                : "—")
+                            @GetIndexStatus(mu)
                         </td>
                         @if (CurrentlyLoadedMigrationJob != null && Helper.IsOnline(CurrentlyLoadedMigrationJob))
                         {
@@ -726,16 +717,7 @@ else if (@_showLogBackupFile)
 
             // Non-Unique Index Status (mirrors the cell rendering in the table)
             {
-                var displayIndexCount = mu.IndexesMigrated > 0 ? mu.IndexesMigrated : mu.IndexesExpected;
-                var failedSuffix = mu.IndexesFailed > 0 ? $", {mu.IndexesFailed} failed" : string.Empty;
-                var indexStatus = mu.SourceStatus == CollectionStatus.NotFound ? "N/A"
-                                                    : mu.SourceStatus == CollectionStatus.IsView ? "N/A"
-                                                    : mu.SourceStatus == CollectionStatus.IsTimeSeries ? "N/A"
-                                                    : mu.IndexBuildComplete && mu.IndexesFailed > 0 ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
-                                                    : mu.IndexBuildComplete || mu.IndexPercent >= 100 ? $"{displayIndexCount} indexes (Success)"
-                                                    : (mu.IndexPercent > 0 || mu.IndexesExpected > 0) ? $"{displayIndexCount} indexes ({Math.Max(0, mu.IndexPercent):F1}%{failedSuffix})"
-                                                    : mu.DumpComplete && mu.RestoreComplete ? "Pending"
-                                                    : "—";
+                var indexStatus = GetIndexStatus(mu);
                 if (indexStatus.Contains(searchText, StringComparison.OrdinalIgnoreCase))
                     return true;
             }
@@ -844,8 +826,8 @@ else if (@_showLogBackupFile)
                 : units.OrderByDescending(u => GetSortValueForStatus(u, true)).ToList(),
 
             "IndexStatus" => _sortAscending
-                ? units.OrderBy(u => u.IndexBuildComplete ? 100 : u.IndexPercent).ToList()
-                : units.OrderByDescending(u => u.IndexBuildComplete ? 100 : u.IndexPercent).ToList(),
+                ? units.OrderBy(u => u.IndexBuildCompleteExplicit ? 100 : u.IndexPercent).ToList()
+                : units.OrderByDescending(u => u.IndexBuildCompleteExplicit ? 100 : u.IndexPercent).ToList(),
 
             "TimeSinceLastChange" => _sortAscending
                 ? units.OrderBy(u => GetSortValueForTimestamp(u)).ToList()
@@ -1378,6 +1360,37 @@ else if (@_showLogBackupFile)
         return Task.FromResult(false);
     }
 
+    private static string GetIndexStatus(MigrationUnitBasic mu)
+    {
+        if (mu.SourceStatus == CollectionStatus.NotFound
+            || mu.SourceStatus == CollectionStatus.IsView
+            || mu.SourceStatus == CollectionStatus.IsTimeSeries)
+        {
+            return "N/A";
+        }
+
+        if (mu.IndexBuildCompleteExplicit)
+        {
+            return mu.IndexesFailed > 0
+                ? $"{mu.IndexesMigrated} of {mu.IndexesExpected} indexes ({mu.IndexesFailed} failed)"
+                : $"{mu.IndexesMigrated} indexes (Success)";
+        }
+
+        if (mu.IndexPercent >= 100)
+        {
+            return mu.IndexesExpected > 0
+                ? $"{mu.IndexesMigrated} of {mu.IndexesExpected} indexes (Verification pending)"
+                : "Verification pending";
+        }
+
+        if (mu.IndexPercent > 0 || mu.IndexesExpected > 0)
+        {
+            return $"{mu.IndexesMigrated} of {mu.IndexesExpected} indexes ({Math.Max(0, mu.IndexPercent):F1}%)";
+        }
+
+        return mu.DumpComplete && mu.RestoreComplete ? "Pending" : "—";
+    }
+
     private bool CheckCutoverReadiness()
     {
         if (!Helper.IsOfflineJobCompleted(CurrentlyLoadedMigrationJob))
@@ -1388,7 +1401,7 @@ else if (@_showLogBackupFile)
         {
             foreach (var mu in CurrentlyLoadedMigrationJob.MigrationUnitBasics)
             {
-                if (Helper.IsMigrationUnitValid(mu) && !mu.IndexBuildComplete && mu.IndexPercent < 100)
+                if (Helper.IsMigrationUnitValid(mu) && !mu.IndexBuildCompleteExplicit)
                     return false;
             }
         }

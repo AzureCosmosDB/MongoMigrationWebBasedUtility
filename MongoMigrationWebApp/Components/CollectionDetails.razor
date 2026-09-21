@@ -49,7 +49,7 @@
                                     <div><span class="lbl">Before Copying:</span> @FormatLong(MigrationUnit.ActualDocCount)</div>
                                     <div><span class="lbl">While Processing:</span> @FormatLong(MigrationUnit.SourceCountDuringCopy)</div>
                                     <div><span class="lbl">Non-Unique Indexes Created:</span> @(MigrationUnit.IndexesExpected > 0 ? $"{MigrationUnit.IndexesMigrated} of {MigrationUnit.IndexesExpected}{(MigrationUnit.IndexesFailed > 0 ? $" ({MigrationUnit.IndexesFailed} failed)" : string.Empty)}" : MigrationUnit.IndexesMigrated.ToString())</div>
-                                    <div><span class="lbl">Index Build Progress:</span> @(MigrationUnit.IndexBuildComplete && MigrationUnit.IndexesFailed == 0 ? "Complete" : MigrationUnit.IndexBuildComplete ? $"{MigrationUnit.IndexPercent:F1}% ({MigrationUnit.IndexesFailed} failed)" : $"{MigrationUnit.IndexPercent:F1}%")</div>
+                                    <div><span class="lbl">Index Build Progress:</span> @(MigrationUnit.IndexBuildCompleteExplicit && MigrationUnit.IndexesFailed == 0 ? "Complete" : MigrationUnit.IndexBuildCompleteExplicit ? $"Complete ({MigrationUnit.IndexesFailed} failed)" : MigrationUnit.IndexPercent >= 100 ? "Verification pending" : $"{MigrationUnit.IndexPercent:F1}%")</div>
                                 </td>
                             </tr>
 

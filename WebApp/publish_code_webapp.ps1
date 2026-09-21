@@ -2,6 +2,8 @@ param (
     [bool]$SupportMongoDump = $true
 )
 
+$ErrorActionPreference = "Stop"
+
 # Variables to be replaced
 $resourceGroupName = "<Replace with Existing Resource Group Name>"
 $webAppName = "<Replace with WebApp Name>"
@@ -12,6 +14,8 @@ $projectFolderPath = Split-Path (Get-Location) -Parent
 $projectFilePath = Join-Path $projectFolderPath "MongoMigrationWebApp\MongoMigrationWebApp.csproj"
 $publishFolder = Join-Path $projectFolderPath "publish"
 $zipPath = Join-Path $publishFolder "app.zip"
+$scriptFolder = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { (Get-Location).Path } else { $PSScriptRoot }
+$artifactValidator = Join-Path $scriptFolder "Assert-PublishArtifactSafe.ps1"
 
 # Delete the existing publish folder (if exist)
 if (Test-Path $publishFolder) {
@@ -21,6 +25,9 @@ if (Test-Path $publishFolder) {
 # Build the Blazor app
 Write-Host "Building Blazor app..."
 dotnet publish $projectFilePath -c Release -o $publishFolder -warnaserror:none --nologo
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet publish failed with exit code $LASTEXITCODE."
+}
 
 # Modify appsettings.json if SupportMongoDump is false
 if (-not $SupportMongoDump) {
@@ -35,6 +42,8 @@ if (-not $SupportMongoDump) {
     }
 }
 
+& $artifactValidator -Path $publishFolder
+
 # Delete the existing zip file if it exists
 if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
@@ -42,6 +51,7 @@ if (Test-Path $zipPath) {
 
 # Archive published files
 Compress-Archive -Path "$publishFolder\*" -DestinationPath $zipPath -Update
+& $artifactValidator -Path $zipPath
 
 # Deploy files to Azure Web App
 Write-Host "Deploying to Azure Web App..."

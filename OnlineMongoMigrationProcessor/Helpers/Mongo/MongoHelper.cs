@@ -1559,7 +1559,6 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
 
                 IndexCopier indexCopier = new IndexCopier();
                 int count = await indexCopier.CopyNonUniqueIndexesAsync(sourceCollection, targetClient, targetDatabaseName, targetCollectionName, log, useBlockingBuilds);
-                mu.IndexesMigrated += count;
                 log.WriteLine($"{count} non-unique indexes created on {namespaceForLog}");
                 return count;
             }
