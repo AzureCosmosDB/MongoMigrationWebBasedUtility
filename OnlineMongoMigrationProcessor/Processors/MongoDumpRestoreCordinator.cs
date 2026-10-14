@@ -3570,7 +3570,8 @@ namespace OnlineMongoMigrationProcessor
                     {
                         bool allActuallyDownloaded = verifyMu.MigrationChunks.All(c => c.IsDownloaded == true);
                         bool allActuallyUploaded = verifyMu.MigrationChunks.All(c => c.IsUploaded == true);
-                        if (!allActuallyDownloaded || !allActuallyUploaded)
+                        bool noCleanupPending = verifyMu.MigrationChunks.All(c => !c.NeedsCleanup);
+                        if (!allActuallyDownloaded || !allActuallyUploaded || !noCleanupPending)
                         {
                             // Tracker overcounted (or new chunks were added since seed) — re-sync to reality,
                             // re-queue the missing chunks, and skip completion. Without the re-queue the MU
@@ -3609,9 +3610,18 @@ namespace OnlineMongoMigrationProcessor
                         }
                     }
 
-                    // All chunks verified — mark migration unit as complete atomically
+                    // Re-check the chunk flags inside the same per-MU mutation that marks completion.
+                    // A cleanup worker can reset IsDownloaded/IsUploaded after the check above.
+                    bool completionConfirmed = false;
                     var mu = MigrationJobContext.MutateMigrationUnit(muId, m =>
                     {
+                        if (m.MigrationChunks == null ||
+                            !m.MigrationChunks.All(c => c.IsDownloaded == true && c.IsUploaded == true && !c.NeedsCleanup))
+                        {
+                            return;
+                        }
+
+                        completionConfirmed = true;
                         m.DumpComplete = true;
                         m.DumpPercent = 100;
                         m.RestoreComplete = true;
@@ -3623,6 +3633,33 @@ namespace OnlineMongoMigrationProcessor
                             m.BulkCopyEndedOn = DateTime.UtcNow;
                         }
                     }, updateParent: true);
+
+                    if (!completionConfirmed)
+                    {
+                        if (mu?.MigrationChunks != null && mu.MigrationChunks.Count > 0)
+                        {
+                            int actualTotal = mu.MigrationChunks.Count;
+                            int realDown = mu.MigrationChunks.Count(c => c.IsDownloaded == true);
+                            int realUp = mu.MigrationChunks.Count(c => c.IsUploaded == true);
+                            Interlocked.Exchange(ref tracker.TotalChunks, actualTotal);
+                            Interlocked.Exchange(ref tracker.DownloadedChunks, realDown);
+                            Interlocked.Exchange(ref tracker.RestoredChunks, realUp);
+
+                            _log?.WriteLine(
+                                $"CheckCompleted: chunk state changed during finalization for {mu.DatabaseName}.{mu.CollectionName}. " +
+                                $"Actual downloaded={realDown}/{actualTotal}, uploaded={realUp}/{actualTotal}. Re-queuing incomplete chunks.",
+                                LogType.Warning);
+
+                            PrepareDownloadList(mu, tracker.SourceConnectionString, tracker.TargetConnectionString);
+                            PrepareRestoreList(mu, tracker.SourceConnectionString, tracker.TargetConnectionString);
+                            RefillManifestWorkingSets();
+                        }
+                        else
+                        {
+                            _log?.WriteLine($"CheckCompleted: unable to confirm completion for migration unit {muId}; leaving it active.", LogType.Warning);
+                        }
+                        continue;
+                    }
 
                     // Remove from active tracking
                     _activeMigrationUnits.TryRemove(muId, out _);
