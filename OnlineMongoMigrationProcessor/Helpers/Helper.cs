@@ -820,7 +820,7 @@ namespace OnlineMongoMigrationProcessor
                 mu.TargetCollectionName = string.IsNullOrWhiteSpace(mu.TargetCollectionName) ? mu.CollectionName : mu.TargetCollectionName;
             }
 
-            if (!ValidateNoTargetNamespaceClashes(unitsToAdd, out var clashError))
+            if (!ValidateTargetNamespaces(job, job.MigrationUnitBasics.Concat(unitsToAdd), out var clashError))
             {
                 throw new InvalidOperationException(clashError);
             }
@@ -855,7 +855,7 @@ namespace OnlineMongoMigrationProcessor
                 .Concat(newUnits.Select(mu => (MigrationUnitBasic)mu))
                 .ToList();
 
-            if (!ValidateNoTargetNamespaceClashes(candidateUnits, out var clashError))
+            if (!ValidateTargetNamespaces(job, candidateUnits, out var clashError))
             {
                 log?.WriteLine(clashError, LogType.Error);
                 return false;
@@ -1113,6 +1113,43 @@ namespace OnlineMongoMigrationProcessor
             {
                 return ValidateNamespaceFormatfromCSV(input);
             }
+        }
+
+        public static bool AreSameEndpoints(string? sourceEndpoint, string? targetEndpoint)
+        {
+            return !string.IsNullOrWhiteSpace(sourceEndpoint)
+                && !string.IsNullOrWhiteSpace(targetEndpoint)
+                && string.Equals(sourceEndpoint.Trim(), targetEndpoint.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static bool ValidateTargetNamespaces(MigrationJob job, IEnumerable<MigrationUnitBasic> units, out string errorMessage)
+        {
+            var candidates = units.ToList();
+            if (!ValidateNoTargetNamespaceClashes(candidates, out errorMessage))
+            {
+                return false;
+            }
+
+            if (job.IsSimulatedRun || !AreSameEndpoints(job.SourceEndpoint, job.TargetEndpoint))
+            {
+                return true;
+            }
+
+            var sources = candidates
+                .Select(mu => $"{mu.DatabaseName}.{mu.CollectionName}")
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var mu in candidates)
+            {
+                var target = $"{mu.GetEffectiveTargetDatabaseName()}.{mu.GetEffectiveTargetCollectionName()}";
+                if (sources.Contains(target))
+                {
+                    errorMessage = $"Source and target endpoints are the same. Rename {mu.DatabaseName}.{mu.CollectionName} using TargetCollectionName and/or TargetDatabaseName. Target namespace {target} must not match any source namespace in this job.";
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         public static bool ValidateNoTargetNamespaceClashes(IEnumerable<MigrationUnitBasic> units, out string errorMessage)
@@ -1560,7 +1597,7 @@ namespace OnlineMongoMigrationProcessor
                     endIndex = connectionString.Length;
 
                 // Extract and return the host
-                return connectionString.Substring(startIndex, endIndex - startIndex).Split('@')[1];
+                return connectionString.Substring(startIndex, endIndex - startIndex).Split('@').Last();
             }
             catch
             {
