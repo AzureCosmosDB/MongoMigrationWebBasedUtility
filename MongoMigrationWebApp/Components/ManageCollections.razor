@@ -21,6 +21,13 @@
             {
                 @* LIST VIEW *@
                 <div class="modal-body">
+                    @if (RequiresTargetRename)
+                    {
+                        <div class="alert alert-warning" role="alert">
+                            Source and target use the same endpoint. Use JSON with TargetCollectionName and/or
+                            TargetDatabaseName to rename every collection. Targets must not match any source namespace in this job.
+                        </div>
+                    }
                     @if (!string.IsNullOrWhiteSpace(_error))
                     {
                         <div class="alert alert-danger">@_error</div>

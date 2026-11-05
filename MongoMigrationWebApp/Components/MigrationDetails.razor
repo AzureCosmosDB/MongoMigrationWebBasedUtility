@@ -70,6 +70,15 @@
                         }
                     </div>
 
+                    @if (!isSimulatedRun && Helper.AreSameEndpoints(CurrentSourceEndpoint, CurrentTargetEndpoint))
+                    {
+                        <div class="alert alert-warning py-2 mb-3" role="alert">
+                            Source and target use the same endpoint. Each collection must be renamed to a different
+                            target namespace in Manage Collections using TargetCollectionName and/or TargetDatabaseName.
+                            Targets must not match any source namespace in this job.
+                        </div>
+                    }
+
                     @if (NewMode)
                     {
                         <div class="alert alert-info py-2 mb-3">
@@ -535,12 +544,6 @@
         if (tmpTgtEndpoint != targetEndpoint && !NewMode)
         {
             errorMessage = "Target endpoint doesn't match provided Target Connection String.";
-            return;
-        }
-
-        if (tmpTgtEndpoint == tmpSrcEndpoint && !isSimulatedRun)
-        {
-            errorMessage = "Target and Source endpoints can't be the same.";
             return;
         }
 

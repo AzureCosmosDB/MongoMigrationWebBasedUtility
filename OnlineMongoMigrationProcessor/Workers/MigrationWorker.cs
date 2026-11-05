@@ -2359,7 +2359,10 @@ namespace OnlineMongoMigrationProcessor.Workers
                 namespacesToMigrate, 
                 sourceConnectionString);
 
-            Helper.AddMigrationUnits(unitsToAdd, MigrationJobContext.CurrentlyActiveJob, _log);
+            if (!Helper.AddMigrationUnits(unitsToAdd, MigrationJobContext.CurrentlyActiveJob, _log))
+            {
+                throw new InvalidOperationException("Migration collection validation failed. See the preceding error for details.");
+            }
         }
 
         /// <summary>

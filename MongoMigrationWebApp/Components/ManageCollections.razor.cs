@@ -23,6 +23,9 @@ namespace MongoMigrationWebApp.Components
         // meaningful — only append is allowed. Overwrite is forced FALSE across Add/Edit and Bulk.
         private bool IsSyncOnlyJob => MigrationJob?.CDCMode == CDCMode.SyncOnly;
 
+        private bool RequiresTargetRename => !MigrationJob.IsSimulatedRun
+            && Helper.AreSameEndpoints(MigrationJob.SourceEndpoint, MigrationJob.TargetEndpoint);
+
         // Curated list of _id BSON types the user can pin (excludes the catch-all DataType.Other).
         // Null/empty selection in the UI represents "Unknown / Multiple" and leaves DataTypeForId unset.
         private static readonly DataType[] IdDataTypeOptions = new[]
@@ -783,6 +786,23 @@ namespace MongoMigrationWebApp.Components
 
             try
             {
+                var candidates = _liveUnits
+                    .Where(unit => !_toRemoveIds.Contains(unit.Id))
+                    .Cast<MigrationUnitBasic>()
+                    .Concat(_drafts.Select(draft => new MigrationUnitBasic
+                    {
+                        DatabaseName = draft.DatabaseName,
+                        CollectionName = draft.CollectionName,
+                        TargetDatabaseName = draft.TargetDatabaseName,
+                        TargetCollectionName = draft.TargetCollectionName
+                    }));
+                if (!Helper.ValidateTargetNamespaces(MigrationJob, candidates, out var validationError))
+                {
+                    _error = validationError;
+                    _showSummary = false;
+                    return;
+                }
+
                 // Step 1: Remove collections. Sync-back guard: clear change-stream resume tokens
                 // before removal so a later re-add of the same namespace starts a fresh stream.
                 foreach (var id in _toRemoveIds)
