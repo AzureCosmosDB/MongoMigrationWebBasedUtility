@@ -1089,21 +1089,16 @@ namespace OnlineMongoMigrationProcessor
                 }
 
                 var mappedNamespaces = loadedObject
-                    .Select(item => new
+                    .Select(item => new MigrationUnitBasic
                     {
-                        Source = $"{item.DatabaseName.Trim()}.{item.CollectionName.Trim()}",
-                        Target = $"{(string.IsNullOrWhiteSpace(item.TargetDatabaseName) ? item.DatabaseName.Trim() : item.TargetDatabaseName.Trim())}.{(string.IsNullOrWhiteSpace(item.TargetCollectionName) ? item.CollectionName.Trim() : item.TargetCollectionName.Trim())}"
-                    })
-                    .ToList();
+                        DatabaseName = item.DatabaseName.Trim(),
+                        CollectionName = item.CollectionName.Trim(),
+                        TargetDatabaseName = item.TargetDatabaseName?.Trim(),
+                        TargetCollectionName = item.TargetCollectionName?.Trim()
+                    });
 
-                var collision = mappedNamespaces
-                    .GroupBy(x => x.Target, StringComparer.OrdinalIgnoreCase)
-                    .FirstOrDefault(g => g.Select(v => v.Source).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1);
-
-                if (collision != null)
+                if (!ValidateNoTargetNamespaceClashes(mappedNamespaces, out errorMessage))
                 {
-                    var sources = string.Join(", ", collision.Select(x => x.Source).Distinct(StringComparer.OrdinalIgnoreCase));
-                    errorMessage = $"Target namespace clash detected: {collision.Key} is mapped from multiple source namespaces ({sources}).";
                     return new Tuple<bool, string, string>(false, string.Empty, errorMessage);
                 }
 
@@ -1171,7 +1166,7 @@ namespace OnlineMongoMigrationProcessor
             }
 
             var sources = string.Join(", ", collision.Select(x => x.Source).Distinct(StringComparer.OrdinalIgnoreCase));
-            errorMessage = $"Target namespace clash detected: {collision.Key} is mapped from multiple source namespaces ({sources}).";
+            errorMessage = $"Many-to-one migration is not allowed: target namespace {collision.Key} is mapped from multiple source namespaces ({sources}).";
             return false;
         }
 

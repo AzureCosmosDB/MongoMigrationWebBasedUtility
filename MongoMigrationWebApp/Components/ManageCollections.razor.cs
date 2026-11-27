@@ -355,6 +355,19 @@ namespace MongoMigrationWebApp.Components
                 return false;
             }
 
+            var candidate = new MigrationUnitBasic
+            {
+                DatabaseName = db,
+                CollectionName = col,
+                TargetDatabaseName = targetDb,
+                TargetCollectionName = targetCol
+            };
+            if (!Helper.ValidateTargetNamespaces(MigrationJob, GetCandidateUnits().Append(candidate), out var validationError))
+            {
+                _error = validationError;
+                return false;
+            }
+
             // Sync Only skips the data copy — never overwrite/drop the target, only append.
             var formOverwrite = IsSyncOnlyJob ? false : _formOverwrite;
 
@@ -725,8 +738,29 @@ namespace MongoMigrationWebApp.Components
         private int GetPendingAddCount() => _drafts.Count;
         private int GetPendingRemoveCount() => _toRemoveIds.Count;
 
+        private IEnumerable<MigrationUnitBasic> GetCandidateUnits()
+        {
+            return _liveUnits
+                .Where(unit => !_toRemoveIds.Contains(unit.Id))
+                .Cast<MigrationUnitBasic>()
+                .Concat(_drafts.Select(draft => new MigrationUnitBasic
+                {
+                    DatabaseName = draft.DatabaseName,
+                    CollectionName = draft.CollectionName,
+                    TargetDatabaseName = draft.TargetDatabaseName,
+                    TargetCollectionName = draft.TargetCollectionName
+                }));
+        }
+
         private async Task ShowSummary()
         {
+            if (!Helper.ValidateTargetNamespaces(MigrationJob, GetCandidateUnits(), out var validationError))
+            {
+                _error = validationError;
+                return;
+            }
+
+            _error = null;
             _isPreparingSummary = true;
             // Paint the busy overlay before building the (potentially very large) summary table.
             StateHasChanged();
@@ -786,17 +820,7 @@ namespace MongoMigrationWebApp.Components
 
             try
             {
-                var candidates = _liveUnits
-                    .Where(unit => !_toRemoveIds.Contains(unit.Id))
-                    .Cast<MigrationUnitBasic>()
-                    .Concat(_drafts.Select(draft => new MigrationUnitBasic
-                    {
-                        DatabaseName = draft.DatabaseName,
-                        CollectionName = draft.CollectionName,
-                        TargetDatabaseName = draft.TargetDatabaseName,
-                        TargetCollectionName = draft.TargetCollectionName
-                    }));
-                if (!Helper.ValidateTargetNamespaces(MigrationJob, candidates, out var validationError))
+                if (!Helper.ValidateTargetNamespaces(MigrationJob, GetCandidateUnits(), out var validationError))
                 {
                     _error = validationError;
                     _showSummary = false;
