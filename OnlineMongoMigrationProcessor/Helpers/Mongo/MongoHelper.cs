@@ -1254,6 +1254,38 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
         }
 
 
+        public static async Task<CreateCollectionOptions> GetSourceCollectionOptionsAsync(IMongoDatabase sourceDatabase, string sourceCollectionName)
+        {
+            // listCollections with a name filter is the driver equivalent of db.getCollectionInfos({ name: ... }).
+            using var cursor = await sourceDatabase.ListCollectionsAsync(new ListCollectionsOptions
+            {
+                Filter = new BsonDocument("name", sourceCollectionName)
+            });
+            var collectionInfos = await cursor.ToListAsync();
+            var collectionInfo = collectionInfos.SingleOrDefault()
+                ?? throw new InvalidOperationException($"Source collection metadata not found for {sourceDatabase.DatabaseNamespace.DatabaseName}.{sourceCollectionName}.");
+
+            var options = new CreateCollectionOptions();
+            if (collectionInfo.TryGetValue("options", out var sourceOptions))
+            {
+                if (!sourceOptions.IsBsonDocument)
+                    throw new InvalidOperationException($"Invalid source collection options for {sourceCollectionName}.");
+
+                if (sourceOptions.AsBsonDocument.TryGetValue("collation", out var collation))
+                {
+                    if (!collation.IsBsonDocument)
+                        throw new InvalidOperationException($"Invalid source collection collation for {sourceCollectionName}.");
+
+                    var collationOptions = collation.AsBsonDocument.DeepClone().AsBsonDocument;
+                    // ICU version is server metadata, not a supported collection creation option.
+                    collationOptions.Remove("version");
+                    options.Collation = Collation.FromBsonDocument(collationOptions);
+                }
+            }
+
+            return options;
+        }
+
         public static async Task<bool> DeleteAndCopyIndexesAsync(Log log,MigrationUnit mu, string targetConnectionString, IMongoCollection<BsonDocument> sourceCollection, bool skipIndexes, bool uniqueOnly = false)
         {
             MigrationJobContext.AddVerboseLog($"Starting index copy for {sourceCollection.CollectionNamespace.DatabaseNamespace.DatabaseName}.{sourceCollection.CollectionNamespace.CollectionName}");
@@ -1262,6 +1294,7 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                 // Extract database and collection details from the source collection
                 var sourceDatabase = sourceCollection.Database;
                 var sourceCollectionName = sourceCollection.CollectionNamespace.CollectionName;
+                var collectionOptions = await GetSourceCollectionOptionsAsync(sourceDatabase, sourceCollectionName);
 
                 // Connect to the target database
                 var targetClient = MongoClientFactory.Create(log,targetConnectionString);
@@ -1286,20 +1319,15 @@ namespace OnlineMongoMigrationProcessor.Helpers.Mongo
                     
                 }
 
+                await targetDatabase.CreateCollectionAsync(targetCollectionName, collectionOptions);
+                mu.TargetCreated = true;
+                if (collectionOptions.Collation != null)
+                    log.WriteLine($"Copied source collection collation to {namespaceForLog}: {collectionOptions.Collation.ToBsonDocument()}", LogType.Debug);
+
                 if (skipIndexes)
-                {
-                    // Ensure the collection is created even when indexes are skipped
-                    await targetDatabase.CreateCollectionAsync(targetCollectionName);
-                    mu.TargetCreated = true;
                     return true;
-                }
 
                 log.WriteLine($"Creating {(uniqueOnly ? "unique " : "")}indexes for: {namespaceForLog}");
-                
-
-                // Create the target collection
-                await targetDatabase.CreateCollectionAsync(targetCollectionName);
-                mu.TargetCreated = true;
 
                 var targetCollection = targetDatabase.GetCollection<BsonDocument>(targetCollectionName);
 

@@ -258,6 +258,8 @@ Each collection (draft or existing) carries its own options. The badges on the l
 
 #### Indexing: blocking vs non-blocking
 
+When **Overwrite = True** recreates a target collection, its default collation is copied from the source collection's `options.collation`, obtained using the equivalent of `db.getCollectionInfos({ name: "myCollection" })`. This also applies when **Do not create indexes** is selected and when the target namespace is renamed. Sources without an explicit collation use the server default. Metadata or collation creation failures are logged and prevent collection preparation from succeeding. **Overwrite = False** and **Sync Only** preserve the existing target collation; pre-create the target with the desired collation in these modes.
+
 The tool splits index migration into two phases, and the `blocking` / `non-blocking` choice only affects the second phase. Both phases only run when the strategy is `Copy indexes from source (non-blocking)` or `Copy indexes from source (blocking)` — choosing `Do not create indexes` skips them both.
 
 1. **Unique indexes — built before data copy.** When a *Copy indexes from source* strategy is selected, all unique indexes from the source are created on the target collection up-front, before any documents are inserted. This makes duplicate-key violations on the source surface immediately during the copy (instead of having to be detected and reconciled later), and ensures any constraints the application relies on are enforced from the first write.
@@ -901,6 +903,7 @@ Notes:
 - The per-collection **Overwrite**, **Indexing**, **Sharding**, **Move-to-shard**, and **_id type** options are set via the Manage Collections UI (or the bulk action toolbar) after the namespaces are staged as drafts — they are not part of the CollectionInfo JSON.
 - You can optionally remap each source namespace to a different target namespace by providing `TargetDatabaseName` and/or `TargetCollectionName`.
 - If `TargetDatabaseName` or `TargetCollectionName` is omitted/empty, the tool defaults that value to the source `DatabaseName`/`CollectionName`.
+- Many-to-one migration is not allowed: different source collections must not map to the same target database and collection, including across separate additions in Manage Collections. Conflicts are rejected when staging drafts, reviewing/applying changes, and before migration starts. Collections with the same target collection name in different target databases are allowed.
 - Source and target may use the same endpoint (a warning is shown, but job creation is allowed). For same-cluster migrations, every collection must have a different target namespace: supply `TargetCollectionName` and/or `TargetDatabaseName` in JSON. For example, map `SalesDB.Customers` to `SalesDB.Customers_v2`. Targets must not match any source namespace in the job, even another collection's source. This is enforced when adding/applying collections and before migration starts. Simulation runs do not require renaming.
 - Target namespace mapping is not supported when the source uses wildcards (`*`). Use explicit source namespaces when remapping.
 - Filters must be valid MongoDB query JSON (as a string). Only supports basic operators (`eq`,`lt`,`lte`,`gt`,`gte`,`in`) on root fields. They apply to both bulk copy and change stream.
